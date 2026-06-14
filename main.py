@@ -944,7 +944,17 @@ async def health_check():
 
 @app.get("/v1/models")
 async def list_models():
-    """模型列表（让客户端不报错）"""
+    """模型列表：直接转发上游（OpenRouter等）真实的模型列表"""
+    models_url = API_BASE_URL.replace("/chat/completions", "/models")
+    try:
+        headers = {"Authorization": f"Bearer {API_KEY}"}
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(models_url, headers=headers)
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        print(f"⚠️ 获取模型列表失败: {e}")
+
     return {
         "object": "list",
         "data": [
@@ -956,6 +966,7 @@ async def list_models():
             }
         ],
     }
+
 
 
 @app.post("/v1/chat/completions")
