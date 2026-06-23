@@ -1360,10 +1360,15 @@ async def add_message_to_conversation(session_id: str, request: Request):
     from datetime import datetime, timezone
     if created_at_str:
         try:
-            dt = datetime.fromisoformat(created_at_str)
+            # 处理前端可能传来的各种格式：
+            # - "2026-06-23T14:30:00.000Z"  -> 去掉 Z
+            # - "2026-06-23 14:30:00"      -> 把空格换成 T
+            dt_str = created_at_str.replace('Z', '').replace(' ', 'T')
+            dt = datetime.fromisoformat(dt_str)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ 时间解析失败: {e}, 原始值: {created_at_str}")
             dt = datetime.now(timezone.utc)
     else:
         dt = datetime.now(timezone.utc)
@@ -2089,6 +2094,22 @@ async def api_import_conversations(request: Request):
             return {"error": "格式错误：需要 JSON 数组"}
         imported, skipped = await import_conversations(records)
         return {"status": "ok", "imported": imported, "skipped": skipped, "total": imported + skipped}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.delete("/api/messages/{message_id}")
+async def delete_message(message_id: int):
+    """永久删除单条对话消息"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute("DELETE FROM conversations WHERE id = $1", message_id)
+            deleted = int(result.split()[-1]) if result else 0
+            if deleted == 0:
+                return JSONResponse(status_code=404, content={"error": "消息不存在"})
+            return {"status": "ok", "deleted": deleted}
     except Exception as e:
         return {"error": str(e)}
 
