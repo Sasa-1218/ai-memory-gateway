@@ -2023,6 +2023,7 @@ async function saveSettings() {
             const panel = document.getElementById('conv-detail-panel');
             if (panel && panel.style.display !== 'none' && convDetailSessionId) {
                 await loadConvMessages(convDetailSessionId, false);
+                }
         }
     } catch (e) {
         showSettingsMsg('error', '保存失败: ' + e.message);
