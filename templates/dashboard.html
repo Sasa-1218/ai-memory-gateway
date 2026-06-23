@@ -335,7 +335,10 @@
                 <div id="conv-detail-panel" class="card" style="display: none;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
                         <h4 id="conv-detail-title">对话详情</h4>
-                        <button class="btn btn-sm" onclick="closeConvDetail()">关闭</button>
+                        <div>
+                            <button class="btn btn-sm btn-primary" onclick="openInsertMessageModal()" style="margin-right: 8px;">➕ 插入消息</button>
+                            <button class="btn btn-sm" onclick="closeConvDetail()">关闭</button>
+                        </div>
                     </div>
                     <div id="conv-detail-messages" style="max-height: 600px; overflow-y: auto;"></div>
                 </div>
@@ -607,6 +610,34 @@
                     <button class="btn btn-primary btn-lg" onclick="saveSettings()" id="save-settings-btn" style="min-width:200px;">保存设置</button>
                 </div>
             </section>
+                <!-- 插入消息弹窗 -->
+                <div id="insertMessageModal" class="modal" style="display:none;">
+                    <div class="modal-content">
+                        <h3>插入消息</h3>
+                        <p style="color: var(--text-muted); font-size: 14px;">补录一条对话到当前会话中（支持自定义时间，自动按顺序插入）</p>
+                        <div class="form-group">
+                            <label class="form-label">角色</label>
+                            <select id="insertRole" class="select-input">
+                                <option value="user">👤 我（用户）</option>
+                                <option value="assistant">🤖 AI（助手）</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">内容</label>
+                            <textarea id="insertContent" class="textarea" rows="6" placeholder="输入这条消息的内容…"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">发生时间</label>
+                            <input type="datetime-local" id="insertTime" class="form-input">
+                            <small class="form-hint">留空则使用当前时间。填正确的时间才能插到对话中间。</small>
+                        </div>
+                        <div class="modal-actions">
+                            <button class="btn btn-secondary" onclick="closeInsertMessageModal()">取消</button>
+                            <button class="btn btn-primary" onclick="submitInsertMessage()">确认插入</button>
+                        </div>
+                    </div>
+                </div>
+            
         </main>
     </div>
 
