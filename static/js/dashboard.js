@@ -1249,10 +1249,14 @@ async function loadConvMessages(sessionId, append = false) {
                 <button class="btn btn-sm" onclick="deleteConversation('${escapeHtml(sessionId)}')">${ICONS.trash(13)} 删除对话</button>
             </div>`;
         }
+
+        // 读取自定义角色显示名称（从设置缓存或直接读取 DOM）
+        const userDisplay = document.getElementById('set-role_display_user')?.value || '👤 用户';
+        const assistantDisplay = document.getElementById('set-role_display_assistant')?.value || '🤖 助手';
         
         for (const msg of messages) {
             const isUser = msg.role === 'user';
-            const roleLabel = isUser ? '👤 用户' : '🤖 助手';
+            const roleLabel = isUser ? userDisplay : assistantDisplay;
             const bgColor = isUser ? 'var(--bg-user, rgba(59,130,246,0.08))' : 'var(--bg-assistant, rgba(0,0,0,0.02))';
             const timeStr = msg.created_at ? formatConvTime(msg.created_at) : '';
             const msgId = msg.id || '';
@@ -1885,7 +1889,8 @@ let _modelList = [];
 // 所有需要读写的字段 key（开源版：EMBEDDING_API_KEY + EMBEDDING_BASE_URL）
 const _SETTINGS_FIELDS = {
     str: ['API_BASE_URL', 'API_KEY', 'DEFAULT_MODEL', 'MEMORY_API_KEY', 'MEMORY_MODEL',
-          'CACHE_SUMMARY_MODEL', 'CACHE_PARTITION_TRIGGER', 'EMBEDDING_API_KEY', 'EMBEDDING_BASE_URL', 'EMBEDDING_MODEL', 'REASONING_EFFORT'],
+          'CACHE_SUMMARY_MODEL', 'CACHE_PARTITION_TRIGGER', 'EMBEDDING_API_KEY', 'EMBEDDING_BASE_URL', 'EMBEDDING_MODEL', 'REASONING_EFFORT',
+         'role_display_user', 'role_display_assistant'],
     int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'EMBEDDING_DIM'],
     float: ['MIN_SCORE_THRESHOLD'],
     bool: ['MEMORY_ENABLED', 'CACHE_PARTITION_ENABLED', 'MEMORY_VECTOR_ENABLED', 'FORCE_STREAM'],
@@ -2014,6 +2019,10 @@ async function saveSettings() {
             const msg = `已更新 ${data.updated?.length || 0} 项` +
                         (data.skipped?.length ? `，跳过 ${data.skipped.length} 项（未修改）` : '');
             showSettingsMsg('success', msg);
+            // ✅ 关键：保存成功后才刷新对话详情
+            const panel = document.getElementById('conv-detail-panel');
+            if (panel && panel.style.display !== 'none' && convDetailSessionId) {
+                await loadConvMessages(convDetailSessionId, false);
         }
     } catch (e) {
         showSettingsMsg('error', '保存失败: ' + e.message);
