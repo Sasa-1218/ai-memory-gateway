@@ -633,9 +633,14 @@
                         <div class="form-group">
                             <label class="form-label">角色</label>
                             <select id="insertRole" class="select-input">
-                                <option value="user">👤 我（用户）</option>
-                                <option value="assistant">🤖 AI（助手）</option>
                             </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">模型</label>
+                            <select id="insertModel" class="select-input">
+                                <option value="manual">📝 手动补录</option>
+                            </select>
+                            <small class="form-hint">选择用于标记这条消息的模型（从网关已配置的模型列表中获取）</small>
                         </div>
                         <div class="form-group">
                             <label class="form-label">内容</label>
