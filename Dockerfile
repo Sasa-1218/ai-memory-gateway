@@ -7,7 +7,7 @@ WORKDIR /app
 # 先复制依赖文件，利用 Docker 缓存加速
 COPY requirements.txt .
 RUN pip install --no-cache-dir \
-    -i https://mirrors.aliyun.com/pypi/simple/ \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
     -r requirements.txt
 
 # 复制项目文件
