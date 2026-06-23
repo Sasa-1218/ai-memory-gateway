@@ -2019,7 +2019,8 @@ async function saveSettings() {
             const msg = `已更新 ${data.updated?.length || 0} 项` +
                         (data.skipped?.length ? `，跳过 ${data.skipped.length} 项（未修改）` : '');
             showSettingsMsg('success', msg);
-            // ✅ 关键：保存成功后才刷新对话详情
+
+            // ✅ 保存成功后刷新对话详情（如果打开）
             const panel = document.getElementById('conv-detail-panel');
             if (panel && panel.style.display !== 'none' && convDetailSessionId) {
                 await loadConvMessages(convDetailSessionId, false);
