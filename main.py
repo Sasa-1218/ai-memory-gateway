@@ -1344,19 +1344,35 @@ async def dashboard_page(request: Request):
 
 @app.post("/api/conversations/{session_id}/messages")
 async def add_message_to_conversation(session_id: str, request: Request):
-    """手动向对话线插入一条消息"""
+    """手动向对话线插入一条消息（支持自定义时间）"""
     data = await request.json()
-    role = data.get("role", "user")  # user 或 assistant
+    role = data.get("role", "user")
     content = data.get("content", "").strip()
     model = data.get("model", "manual")
+    created_at_str = data.get("created_at")  # 可选：ISO格式时间字符串
     
     if not content:
         return {"error": "content 不能为空"}
     if role not in ("user", "assistant"):
         return {"error": "role 只能是 user 或 assistant"}
     
-    await save_message(session_id, role, content, model)
-    return {"status": "ok", "session_id": session_id, "role": role}
+    # 解析时间
+    from datetime import datetime, timezone
+    if created_at_str:
+        try:
+            dt = datetime.fromisoformat(created_at_str)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            dt = datetime.now(timezone.utc)
+    else:
+        dt = datetime.now(timezone.utc)
+    
+    # 调用 database 里的新函数
+    from database import save_message_with_time
+    await save_message_with_time(session_id, role, content, model, dt)
+    
+    return {"status": "ok", "session_id": session_id, "role": role, "created_at": dt.isoformat()}
 
 
 # ============================================================
