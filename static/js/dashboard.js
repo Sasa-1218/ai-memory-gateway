@@ -947,6 +947,7 @@ function doExport() {
 // 对话记录功能
 // ============================================
 let convCurrentPage = 1;
+let currentViewingSessionId = null;   // 当前打开的对话ID，供插入消息使用；
 let convIsSearchMode = false;
 let convSearchQuery = '';
 
@@ -1207,6 +1208,7 @@ async function openConvDetail(sessionId) {
     const messagesEl = document.getElementById('conv-detail-messages');
     
     convDetailSessionId = sessionId;
+    currentViewingSessionId = sessionId;
     convDetailLoadedCount = 0;
     panel.style.display = 'block';
     titleEl.textContent = '加载中...';
@@ -2122,4 +2124,92 @@ function showSettingsMsg(type, text) {
     el.className = 'msg-box msg-' + type;
     el.textContent = text;
     setTimeout(() => { el.style.display = 'none'; }, 5000);
+}
+
+
+// ============================================
+// 插入消息（手动补录）
+// ============================================
+
+function openInsertMessageModal() {
+    if (!currentViewingSessionId) {
+        alert('请先打开一个对话详情');
+        return;
+    }
+    const modal = document.getElementById('insertMessageModal');
+    modal.style.display = 'flex';
+    document.getElementById('insertRole').value = 'user';
+    document.getElementById('insertContent').value = '';
+    // 默认填当前时间（本地时间，精确到分钟）
+    const now = new Date();
+    const localStr = now.getFullYear() + '-' +
+        String(now.getMonth() + 1).padStart(2, '0') + '-' +
+        String(now.getDate()).padStart(2, '0') + 'T' +
+        String(now.getHours()).padStart(2, '0') + ':' +
+        String(now.getMinutes()).padStart(2, '0');
+    document.getElementById('insertTime').value = localStr;
+    modal.dataset.sessionId = currentViewingSessionId;
+}
+
+function closeInsertMessageModal() {
+    document.getElementById('insertMessageModal').style.display = 'none';
+}
+
+async function submitInsertMessage() {
+    const modal = document.getElementById('insertMessageModal');
+    const sessionId = modal.dataset.sessionId;
+    const role = document.getElementById('insertRole').value;
+    const content = document.getElementById('insertContent').value.trim();
+    const timeStr = document.getElementById('insertTime').value;
+
+    if (!content) {
+        alert('请输入消息内容');
+        return;
+    }
+
+    // 构建请求体（model 传 manual，标记为手动补录）
+    const payload = {
+        role: role,
+        content: content,
+        model: 'manual'   // 用于区分来源：手动补录
+    };
+
+    // 如果用户填了时间，就传给后端
+    if (timeStr) {
+        // 把 datetime-local 的本地时间转成 UTC 时间戳，再格式化成数据库能接受的格式
+        const localDate = new Date(timeStr);
+        if (!isNaN(localDate.getTime())) {
+            // 转为 UTC ISO 格式（去掉毫秒和时区后缀）
+            const utcStr = localDate.toISOString().replace('Z', '').slice(0, 19);
+            payload.created_at = utcStr;
+        }
+    }
+
+    try {
+        const resp = await fetch(`/api/conversations/${encodeURIComponent(sessionId)}/messages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            closeInsertMessageModal();
+            // 刷新当前对话详情（重新加载消息列表）
+            await loadConvMessages(sessionId, false);
+            showMsg('✅ 消息已插入', 'success');
+        } else {
+            showMsg('❌ 插入失败：' + (data.error || '未知错误'), 'error');
+        }
+    } catch (e) {
+        showMsg('❌ 网络错误', 'error');
+        console.error(e);
+    }
+}
+
+// 辅助函数：显示消息（复用现有的 manage-msg 样式）
+function showMsg(text, type) {
+    const container = document.getElementById('manage-msg');
+    if (!container) return;
+    container.innerHTML = `<div class="msg msg-${type}">${text}</div>`;
+    setTimeout(() => { container.innerHTML = ''; }, 5000);
 }
