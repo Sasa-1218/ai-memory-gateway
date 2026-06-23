@@ -5,6 +5,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # 先复制依赖文件，利用 Docker 缓存加速
+COPY requirements.txt .
 COPY wheels/ /wheels/
 RUN pip install --no-cache-dir \
     -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
