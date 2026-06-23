@@ -1,4 +1,0 @@
-[phases.install]
-cmds = [
-  "pip install -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir -r requirements.txt"
-]
