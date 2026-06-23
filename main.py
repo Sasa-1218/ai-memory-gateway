@@ -2487,6 +2487,8 @@ async def get_settings():
 
             # System Prompt
             "systemPrompt": db.get("systemPrompt") or _DEFAULT_SYSTEM_PROMPT or "",
+            "role_display_user": db.get("role_display_user") or "👤 用户",
+            "role_display_assistant": db.get("role_display_assistant") or "🤖 助手",
         }
 
         return {"status": "ok", "settings": settings}
