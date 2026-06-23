@@ -461,7 +461,30 @@ async def save_message(session_id: str, role: str, content: str, model: str = ""
             session_id, role, content, model, metadata,
         )
 
+async def save_message(session_id: str, role: str, content: str, model: str = "", metadata: str = None):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO conversations (session_id, role, content, model, metadata) VALUES ($1, $2, $3, $4, $5)",
+            session_id, role, content, model, metadata,
+        )
 
+
+async def save_message_with_time(session_id: str, role: str, content: str, model: str = "", created_at: datetime = None):
+    """保存一条消息，允许自定义时间（用于手动补录）"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if created_at is None:
+            created_at = datetime.now(dt_timezone.utc)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=dt_timezone.utc)
+        created_at_utc = created_at.astimezone(dt_timezone.utc)
+        
+        await conn.execute(
+            "INSERT INTO conversations (session_id, role, content, model, created_at) VALUES ($1, $2, $3, $4, $5)",
+            session_id, role, content, model, created_at_utc,
+        )
+        
 async def get_last_user_content(session_id: str) -> str:
     """获取指定session最后一条user消息的content"""
     pool = await get_pool()
