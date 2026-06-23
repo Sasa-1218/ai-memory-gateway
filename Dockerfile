@@ -6,7 +6,7 @@ WORKDIR /app
 
 # 先复制依赖文件，利用 Docker 缓存加速
 COPY requirements.txt .
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir \ --timeout 120 \
     -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
     -r requirements.txt
 
