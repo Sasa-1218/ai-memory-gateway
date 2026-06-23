@@ -1977,32 +1977,26 @@ async function saveSettings() {
 
     const payload = {};
 
-    // 字符串
     _SETTINGS_FIELDS.str.forEach(k => {
         const el = document.getElementById('set-' + k);
         if (el) payload[k] = el.value;
     });
-    // 整数
     _SETTINGS_FIELDS.int.forEach(k => {
         const el = document.getElementById('set-' + k);
         if (el) payload[k] = parseInt(el.value) || 0;
     });
-    // 浮点
     _SETTINGS_FIELDS.float.forEach(k => {
         const el = document.getElementById('set-' + k);
         if (el) payload[k] = parseFloat(el.value) || 0;
     });
-    // 布尔
     _SETTINGS_FIELDS.bool.forEach(k => {
         const el = document.getElementById('set-' + k);
         if (el) payload[k] = el.checked;
     });
-    // 滑块
     _SETTINGS_FIELDS.range.forEach(k => {
         const el = document.getElementById('set-' + k);
         if (el) payload[k] = parseFloat(el.value) || 0;
     });
-    // 长文本
     const promptEl = document.getElementById('set-systemPrompt');
     if (promptEl) payload.systemPrompt = promptEl.value;
 
@@ -2013,14 +2007,14 @@ async function saveSettings() {
             body: JSON.stringify(payload)
         });
         const data = await resp.json();
+
         if (data.error) {
             showSettingsMsg('error', '保存失败: ' + data.error);
         } else {
             const msg = `已更新 ${data.updated?.length || 0} 项` +
-                        (data.skipped?.length ? `，跳过 ${data.skipped.length} 项（未修改）` : '');
+                (data.skipped?.length ? `，跳过 ${data.skipped.length} 项（未修改）` : '');
             showSettingsMsg('success', msg);
 
-            // ✅ 保存成功后刷新对话详情（如果打开）
             const panel = document.getElementById('conv-detail-panel');
             if (panel && panel.style.display !== 'none' && convDetailSessionId) {
                 await loadConvMessages(convDetailSessionId, false);
