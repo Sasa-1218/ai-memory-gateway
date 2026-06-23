@@ -304,24 +304,17 @@ async def gateway_auth_middleware(request: Request, call_next):
 # ============================================================
 
 async def build_system_prompt_with_memories(user_message: str) -> str:
-    """
-    构建带记忆的 system prompt
-    1. 用用户消息搜索相关记忆
-    2. 格式化成文本拼接到人设后面
-    """
+    """构建记忆数据块（不含人设，由调用方追加到人设末尾）"""
     if not MEMORY_ENABLED or not MEMORY_EXTRACT_ENABLED:
-        return SYSTEM_PROMPT
-    
+        return ""
     if MAX_MEMORIES_INJECT <= 0:
-        return SYSTEM_PROMPT
-    
+        return ""
+
     try:
         memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
-        
         if not memories:
-            return SYSTEM_PROMPT
-        
-        # 格式化记忆文本（带日期，帮助模型判断新旧）
+            return ""
+
         memory_lines = []
         for mem in memories:
             date_str = ""
@@ -335,32 +328,13 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
                     date_str = f"[{str(mem['created_at'])[:10]}] "
             memory_lines.append(f"- {date_str}{mem['content']}")
         memory_text = "\n".join(memory_lines)
-        
-        enhanced_prompt = f"""{SYSTEM_PROMPT}
 
-【从过往对话中检索到的相关记忆】
-{memory_text}
-
-# 记忆应用
-- 像朋友般自然运用这些记忆，不刻意展示
-- 仅在相关话题出现时引用，避免主动提及
-- 对重要信息（如健康、日期、约定）保持一致性
-- 新信息与记忆冲突时，以新信息为准
-- 模糊记忆可表达不确定性："记得你似乎说过..."
-
-# 交流方式
-- 自然引用："记得你说过..."或"上次我们聊到..."
-- 避免机械式表达如"根据我的记忆..."或"检索到的信息显示..."
-- 共同经历可温情回忆："上次那个事挺好玩的"
-
-记忆是丰富对话的工具，而非对话焦点。"""
-        
         print(f"📚 注入了 {len(memories)} 条相关记忆")
-        return enhanced_prompt
-        
+        return f"<脑海中浮现的既往事实>\n{memory_text}\n</脑海中浮现的既往事实>"
+
     except Exception as e:
-        print(f"⚠️  记忆检索失败: {e}，使用纯人设")
-        return SYSTEM_PROMPT
+        print(f"⚠️  记忆检索失败: {e}")
+        return ""
 
 
 # ============================================================
@@ -757,7 +731,7 @@ async def build_memory_text(user_message: str) -> str:
             memory_lines.append(f"- {date_str}{mem['content']}")
         
         print(f"📚 注入了 {len(memories)} 条相关记忆")
-        return "【从过往对话中检索到的相关记忆】\n" + "\n".join(memory_lines)
+        return "<脑海中浮现的既往事实>\n" + "\n".join(memory_lines) + "\n</脑海中浮现的既往事实>"
     except Exception as e:
         print(f"⚠️ 记忆检索失败: {e}")
         return ""
@@ -1102,22 +1076,28 @@ async def chat_completions(request: Request):
     
     else:
         # ---------- 原有逻辑：system prompt + 记忆注入 ----------
-        if SYSTEM_PROMPT or (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message):
-            if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
-                enhanced_prompt = await build_system_prompt_with_memories(user_message)
-            else:
-                enhanced_prompt = SYSTEM_PROMPT
-            
-            if enhanced_prompt:
-                has_system = any(msg.get("role") == "system" for msg in messages)
-                if has_system:
-                    for i, msg in enumerate(messages):
-                        if msg.get("role") == "system":
-                            messages[i]["content"] = enhanced_prompt + "\n\n" + msg["content"]
-                            break
-                else:
-                    messages.insert(0, {"role": "system", "content": enhanced_prompt})
-        
+        memory_block = ""
+        if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
+            memory_block = await build_system_prompt_with_memories(user_message)
+
+        has_system = any(msg.get("role") == "system" for msg in messages)
+
+        if has_system:
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "system":
+                    if memory_block:
+                        # 追加到人设末尾，不是前置
+                        messages[i]["content"] = msg["content"] + "\n\n" + memory_block
+                    # 没有记忆就原样不动
+                    break
+        elif SYSTEM_PROMPT or memory_block:
+            # 客户端没发 system 消息时（少见），用网关人设 + 记忆拼
+            base = SYSTEM_PROMPT
+            if memory_block:
+                base = (base + "\n\n" + memory_block) if base else memory_block
+            if base:
+                messages.insert(0, {"role": "system", "content": base})
+
         body["messages"] = messages
     
     # ---------- 模型处理 ----------
@@ -1362,6 +1342,21 @@ async def dashboard_page(request: Request):
     
     return templates.TemplateResponse(request, "dashboard.html")
 
+@app.post("/api/conversations/{session_id}/messages")
+async def add_message_to_conversation(session_id: str, request: Request):
+    """手动向对话线插入一条消息"""
+    data = await request.json()
+    role = data.get("role", "user")  # user 或 assistant
+    content = data.get("content", "").strip()
+    model = data.get("model", "manual")
+    
+    if not content:
+        return {"error": "content 不能为空"}
+    if role not in ("user", "assistant"):
+        return {"error": "role 只能是 user 或 assistant"}
+    
+    await save_message(session_id, role, content, model)
+    return {"status": "ok", "session_id": session_id, "role": role}
 
 
 # ============================================================
