@@ -2147,9 +2147,9 @@ function openInsertMessageModal() {
     }
     const modal = document.getElementById('insertMessageModal');
     modal.style.display = 'flex';
-    document.getElementById('insertRole').value = 'user';
-    document.getElementById('insertContent').value = '';
-    // 默认填当前时间（本地时间，精确到分钟）
+    modal.dataset.sessionId = currentViewingSessionId;
+    
+    // 1. 设置默认时间
     const now = new Date();
     const localStr = now.getFullYear() + '-' +
         String(now.getMonth() + 1).padStart(2, '0') + '-' +
@@ -2157,7 +2157,35 @@ function openInsertMessageModal() {
         String(now.getHours()).padStart(2, '0') + ':' +
         String(now.getMinutes()).padStart(2, '0');
     document.getElementById('insertTime').value = localStr;
-    modal.dataset.sessionId = currentViewingSessionId;
+    document.getElementById('insertContent').value = '';
+    
+    // 2. 从设置读取自定义昵称，动态填充角色下拉选项
+    const userDisplay = document.getElementById('set-role_display_user')?.value || '👤 用户';
+    const assistantDisplay = document.getElementById('set-role_display_assistant')?.value || '🤖 助手';
+    const roleSelect = document.getElementById('insertRole');
+    roleSelect.innerHTML = `
+        <option value="user">${userDisplay}</option>
+        <option value="assistant">${assistantDisplay}</option>
+    `;
+    
+    // 3. 加载模型列表
+    const modelSelect = document.getElementById('insertModel');
+    modelSelect.innerHTML = '<option value="manual">📝 手动补录</option>';
+    
+    fetch('/api/models')
+        .then(res => res.json())
+        .then(data => {
+            const models = data.models || [];
+            models.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m.id;
+                opt.textContent = m.name || m.id;
+                modelSelect.appendChild(opt);
+            });
+        })
+        .catch(() => {
+            // 静默失败，保留"手动补录"选项
+        });
 }
 
 function closeInsertMessageModal() {
@@ -2177,10 +2205,11 @@ async function submitInsertMessage() {
     }
 
     // 构建请求体（model 传 manual，标记为手动补录）
+    const model = document.getElementById('insertModel').value;
     const payload = {
         role: role,
         content: content,
-        model: 'manual'   // 用于区分来源：手动补录
+        model: model
     };
 
     // 如果用户填了时间，就传给后端
