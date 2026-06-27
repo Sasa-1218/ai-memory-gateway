@@ -69,6 +69,16 @@ const LAYER_NAMES = {
 // 初始化
 // ============================================
 document.addEventListener('DOMContentLoaded', () => {
+    // 💡 解决“失忆”核心步骤1：网页刚打开时，立刻去缓存拿之前存的名字
+    const localUser = localStorage.getItem('role_display_user');
+    if (localUser && document.getElementById('set-role_display_user')) {
+        document.getElementById('set-role_display_user').value = localUser;
+    }
+    const localAst = localStorage.getItem('role_display_assistant');
+    if (localAst && document.getElementById('set-role_display_assistant')) {
+        document.getElementById('set-role_display_assistant').value = localAst;
+    }
+
     // 初始化侧边栏导航
     initNavigation();
     // 初始化Tab切换
@@ -78,6 +88,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // 加载导出统计
     loadExportStats();
 });
+
 
 // ============================================
 // 侧边栏导航
@@ -1975,6 +1986,13 @@ async function saveSettings() {
     btn.disabled = true;
     btn.textContent = '保存中...';
 
+    // 💡 解决“失忆”核心步骤3：点击保存时，立刻写入浏览器本地仓库
+    const userVal = document.getElementById('set-role_display_user')?.value;
+    if (userVal) localStorage.setItem('role_display_user', userVal);
+    
+    const assistantVal = document.getElementById('set-role_display_assistant')?.value;
+    if (assistantVal) localStorage.setItem('role_display_assistant', assistantVal);
+    
     const payload = {};
 
     _SETTINGS_FIELDS.str.forEach(k => {
