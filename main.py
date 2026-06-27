@@ -25,6 +25,9 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from pydantic import BaseModel
+from typing import Optional
+
 from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories
@@ -102,7 +105,35 @@ def get_memory_api_key() -> str:
 EXTRA_REFERER = os.getenv("EXTRA_REFERER", "https://ai-memory-gateway.local")
 EXTRA_TITLE = os.getenv("EXTRA_TITLE", "AI Memory Gateway")
 
+# 健康数据的包裹格式
+class HealthData(BaseModel):
+    date: str
+    steps: int = 0
+    active_calories: float = 0.0
+    sleep_start: Optional[str] = None
+    sleep_end: Optional[str] = None
+    sleep_duration: Optional[str] = None
+    heart_rate_avg: float = 0.0
+    heart_rate_min: float = 0.0
+    heart_rate_max: float = 0.0
+    resting_heart_rate_avg: float = 0.0
+    resting_heart_rate_max: float = 0.0
+    resting_heart_rate_mix: float = 0.0
+    oxygen_saturation_avg: float = 0.0
+    oxygen_saturation_max: float = 0.0
+    oxygen_saturation_mix: float = 0.0
+    hrv_avg: float = 0.0
+    hrv_max: float = 0.0
+    hrv_min: float = 0.0
+    period: Optional[str] = None
 
+# 环境状态数据的包裹格式
+class StatusData(BaseModel):
+    location: str
+    weather: str
+    temperature: float
+    battery: int
+    schedule: Optional[str] = None
 # ============================================================
 # 人设加载
 # ============================================================
@@ -2610,6 +2641,19 @@ async def save_settings(request: Request):
     except Exception as e:
         print(f"[save_settings] 错误: {e}")
         return {"error": str(e)}
+        
+# 接收健康数据 
+@app.post("/api/health/push")
+async def push_health_data(data: HealthData):
+    # 因为有中间件保护，能走到这里的绝对是自己人
+    print("收到健康数据：", data.dict())
+    return {"status": "success", "message": "健康数据已收到，等待对接数据库"}
+
+# 接收状态数据
+@app.post("/api/status/push")
+async def push_status_data(data: StatusData):
+    print("收到状态数据：", data.dict())
+    return {"status": "success", "message": "环境状态已收到，等待对接数据库"}
 
 
 # ============================================================
