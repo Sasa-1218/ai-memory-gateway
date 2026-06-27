@@ -278,6 +278,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI Memory Gateway", version="2.0.0", lifespan=lifespan)
 
+
+# --- 把这段加在这里 ---
+@app.get("/debug/routes")
+async def get_routes():
+    routes = [{"path": route.path, "methods": list(route.methods)} for route in app.routes]
+    return routes
+# ---------------------
+
 # 静态文件和模板配置
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
