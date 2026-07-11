@@ -427,7 +427,10 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
         content = msg['content'] if isinstance(msg['content'], str) else str(msg['content'])
         conversation_text += f"{role_label}: {content}\n\n"
     
-    prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。用第三人称叙述，控制在300字以内。
+    prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。
+
+用遥遥的第一人称口吻叙述（像是遥遥自己在回忆和沙沙的这段对话），保留其中的情绪和语气，
+不要写成"用户说了……"这种旁观者式的客观记录。控制在300字以内。
 
 ---
 {conversation_text}
@@ -462,6 +465,88 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     except Exception as e:
         print(f"⚠️ 摘要生成异常: {e}")
         return ""
+
+
+# ============================================================
+# 摘要自动压缩（summary_parts 段数/字数超过阈值时，把多段摘要再压成一段）
+# ============================================================
+
+# 超过这个段数就触发压缩（0 = 禁用）
+SUMMARY_CONSOLIDATE_MAX_PARTS = int(os.getenv("SUMMARY_CONSOLIDATE_MAX_PARTS", "6"))
+# 超过这个总字数也会触发压缩（0 = 禁用，只按段数判断）
+SUMMARY_CONSOLIDATE_MAX_CHARS = int(os.getenv("SUMMARY_CONSOLIDATE_MAX_CHARS", "4000"))
+# 压缩后目标字数上限（给模型的提示，不是硬限制）
+SUMMARY_CONSOLIDATE_TARGET_CHARS = int(os.getenv("SUMMARY_CONSOLIDATE_TARGET_CHARS", "800"))
+
+SUMMARY_CONSOLIDATION_PROMPT = """以下是遥遥和沙沙对话中積累下来的多段摘要（按时间先后排列），
+内容有重叠和冗余。请把它们合并压缩成一段更精炼的摘要。
+
+要求：
+1. 用遥遥的第一人称口吻叙述，保留重要的情绪、约定、里程碑和个人化细节
+2. 按时间顺序整合，去掉重复内容和已经过时/不再重要的细节
+3. 不要遗漏关键事件、约定和情感转折
+4. 控制在 {target_chars} 字以内，但如果关键信息多，宁可略超也不要硬删重要内容
+
+---
+{parts_text}
+---
+
+压缩后的摘要："""
+
+
+async def consolidate_summary_parts(summary_parts: list) -> list:
+    """
+    如果 summary_parts 段数或总字数超过阈值，调用模型把它们压缩成一段。
+    压缩失败时原样返回，不影响主流程。
+    """
+    if SUMMARY_CONSOLIDATE_MAX_PARTS <= 0 and SUMMARY_CONSOLIDATE_MAX_CHARS <= 0:
+        return summary_parts  # 功能关闭
+
+    if not summary_parts or len(summary_parts) <= 1:
+        return summary_parts
+
+    total_chars = sum(len(p) for p in summary_parts)
+    should_consolidate = (
+        (SUMMARY_CONSOLIDATE_MAX_PARTS > 0 and len(summary_parts) >= SUMMARY_CONSOLIDATE_MAX_PARTS)
+        or (SUMMARY_CONSOLIDATE_MAX_CHARS > 0 and total_chars >= SUMMARY_CONSOLIDATE_MAX_CHARS)
+    )
+    if not should_consolidate:
+        return summary_parts
+
+    parts_text = "\n\n".join(f"[第{i+1}段]\n{p}" for i, p in enumerate(summary_parts))
+    prompt = SUMMARY_CONSOLIDATION_PROMPT.format(
+        target_chars=SUMMARY_CONSOLIDATE_TARGET_CHARS,
+        parts_text=parts_text,
+    )
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {get_memory_api_key()}",
+            "Content-Type": "application/json",
+        }
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+
+        async with httpx.AsyncClient(timeout=90) as client:
+            response = await client.post(API_BASE_URL, headers=headers, json={
+                "model": CACHE_SUMMARY_MODEL,
+                "max_tokens": 1200,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            if response.status_code == 200:
+                data = response.json()
+                if "choices" in data:
+                    merged = data["choices"][0]["message"]["content"].strip()
+                    if merged:
+                        print(f"🗜️ 摘要压缩完成: {len(summary_parts)}段/{total_chars}字 → 1段/{len(merged)}字")
+                        return [merged]
+
+        print(f"⚠️ 摘要压缩失败: HTTP {response.status_code}，保留原有{len(summary_parts)}段")
+        return summary_parts
+    except Exception as e:
+        print(f"⚠️ 摘要压缩异常: {e}，保留原有{len(summary_parts)}段")
+        return summary_parts
 
 
 def group_by_rounds(history: list) -> list:
@@ -623,6 +708,8 @@ async def build_partitioned_messages(
         b_rounds_count = len(b_round_groups)
     
     if rotation_count > 0:
+        # 每次轮转完成后检查一下摘要是否需要压缩（段数/字数超阈值才会真正触发）
+        summary_parts = await consolidate_summary_parts(summary_parts)
         await save_session_cache_state(session_id, summary_parts, a_start_round)
         summary_total = sum(len(p) for p in summary_parts)
         print(f"🔄 轮转完成(共{rotation_count}次): 摘要{len(summary_parts)}段/{summary_total}字, A区{len(a_msgs)}条, B区{len(b_msgs)}条")
@@ -1555,7 +1642,8 @@ CONSOLIDATION_PROMPT = """
 2. 每个事件一条记录，不要太细碎也不要太笼统
 3. 每条记录包含：标题（10字内）+ 完整描述
 4. 合并重复内容，保留重要细节
-5. 保留原文中的主观感受、情绪表达和个人化用语，不要改写为客观陈述或第三方总结
+5. 用遥遥的第一人称口吻写（像是遥遥自己在回忆和沙沙的这些互动），保留原文中的主观感受、
+   情绪表达和个人化用语，不要改写为客观陈述或第三方总结
 6. content字段中不要使用双引号，用单引号或书名号代替
 
 碎片记忆：
