@@ -495,7 +495,7 @@ SUMMARY_CONSOLIDATE_MAX_PARTS = _get_int_env("SUMMARY_CONSOLIDATE_MAX_PARTS", 0)
 # 超过这个总字数就触发压缩（默认1万字）
 SUMMARY_CONSOLIDATE_MAX_CHARS = _get_int_env("SUMMARY_CONSOLIDATE_MAX_CHARS", 10000)
 # 压缩后目标字数（软限制，模型可以超）
-SUMMARY_CONSOLIDATE_TARGET_CHARS = _get_int_env("SUMMARY_CONSOLIDATE_TARGET_CHARS", 6000) or 6000
+SUMMARY_CONSOLIDATE_TARGET_CHARS = _get_int_env("SUMMARY_CONSOLIDATE_TARGET_CHARS", 1200) or 1200
 
 # 注意：这里是纯文本输出，不进JSON，双引号、书名号随便用，不受碎片整理那条JSON规则限制
 SUMMARY_CONSOLIDATION_PROMPT = """以下是遥遥和小猫对话中積累下来的多段摘要（按时间先后排列），
@@ -678,8 +678,10 @@ async def build_partitioned_messages(
     # 会被Kelivo合并进一条role=system的消息）。以前这里直接丢弃，现在改成提取出来，
     # 合并进网关自己的人设一起转发，不再丢失。
     client_system_content = ""
+    client_system_msg_count = 0
     for m in all_messages:
         if m.get('role') == 'system':
+            client_system_msg_count += 1
             c = m.get('content')
             if isinstance(c, list):
                 c = " ".join(
@@ -689,6 +691,9 @@ async def build_partitioned_messages(
             c = (c or "").strip() if isinstance(c, str) else str(c or "")
             if c:
                 client_system_content += ("\n\n" if client_system_content else "") + c
+
+    # 无论有没有内容都打印，方便区分"没部署新代码"和"这次请求确实没有system内容"
+    print(f"🔍 客户端system检测: all_messages中共{client_system_msg_count}条role=system消息，合并后{len(client_system_content)}字")
 
     if client_system_content:
         base_prompt = (base_prompt + "\n\n" + client_system_content) if base_prompt else client_system_content
