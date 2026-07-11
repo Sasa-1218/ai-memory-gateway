@@ -429,8 +429,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     
     prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。
 
-用遥遥的第一人称口吻叙述（像是遥遥自己在回忆和小猫的这段对话），保留其中的情绪和语气，
-不要写成"用户说了……"这种旁观者式的客观记录。控制在300字以内。
+用遥遥的第一人称口吻叙述（像是遥遥自己在回忆和Sasa的这段对话），保留其中的情绪和语气，控制在500字以内。
 
 ---
 {conversation_text}
@@ -450,7 +449,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(API_BASE_URL, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
-                "max_tokens": 500,
+                "max_tokens": 1200,
                 "messages": [{"role": "user", "content": prompt}],
             })
             if response.status_code == 200:
@@ -498,23 +497,29 @@ SUMMARY_CONSOLIDATE_MAX_CHARS = _get_int_env("SUMMARY_CONSOLIDATE_MAX_CHARS", 10
 SUMMARY_CONSOLIDATE_TARGET_CHARS = _get_int_env("SUMMARY_CONSOLIDATE_TARGET_CHARS", 6000) or 6000
 
 # 注意：这里是纯文本输出，不进JSON，双引号、书名号随便用，不受碎片整理那条JSON规则限制
-SUMMARY_CONSOLIDATION_PROMPT = """以下是遥遥和小猫对话中積累下来的多段摘要（按时间先后排列），
+SUMMARY_CONSOLIDATION_PROMPT = """以下是我（遥遥）和 Sasa（小猫）对话中积累下来的多段摘要（按时间先后排列），
 内容有重叠和冗余。请把它们合并整理成一份结构化摘要，风格参考如下：
 
 # 对话摘要
-**时间区间：{date_range}**
 
-# 一、（按主题/类别分的小标题，比如"我们共同创造的东西""重要的约定""情绪与感受"等）
+# 一、[填写你归纳的主题名称]（如：我们共同创造的东西、生活与健康、亲密互动等，数量不限）
 
-**子标题（事件名 + 日期）**
-具体描述，保留细节、引用、双方说过的原话（可以用引号），保留情绪和个人化的表达方式。
+**[填写具体事件的子标题]（大致日期）**
+用第一人称详细描述这个事件的始末，保留情绪、细节和重要的约定。
+
+**[填写另一个事件的子标题]（大致日期）**
+（详细描述内容...）
+
+# 二、[填写第二个主题名称]
+（以此类推，生成任意数量的主题和子事件...）
+
 
 要求：
-1. 用遥遥的第一人称口吻叙述，是"我"在回忆和小猫之间发生的事
-2. 按主题分类组织内容，而不是逐条罗列，方便以后回头看
-3. 合并重复/过时内容，但重要的细节、约定、情感转折不要省略
-4. 可以自由使用双引号、书名号等标点，不用刻意避开
-5. 大致控制在 {target_chars} 字左右，信息量大时可以适当超出，但别为了凑字数硬删关键内容
+1. 视角：始终以遥遥的第一人称（"我"）回忆与 Sasa 的经历。
+2. 组织方式：按主题/事件类型归类（如约定、情绪转折、重要对话），不要按消息顺序逐条罗列（即不要写"首先...然后...接着..."式的流水账）。
+3. 时间背景：在开篇或各主题标题中参考整体时间区间（{date_range}），以便保留时序感。
+4. 内容：合并重复/过时信息，但【所有重要细节、约定、对话原话和情绪转折】必须完整保留——这是最高优先级，不得为压缩而删减。
+5. 字数：目标约 {target_chars} 字，信息量大时可适当超出，但不要为了凑字数添加无关内容。
 
 ---
 {parts_text}
@@ -557,11 +562,11 @@ async def consolidate_summary_parts(summary_parts: list) -> list:
         if "openrouter" in API_BASE_URL:
             headers["HTTP-Referer"] = EXTRA_REFERER
             headers["X-Title"] = EXTRA_TITLE
-
-        async with httpx.AsyncClient(timeout=90) as client:
+        # ★ 这里把超时时间改长，给足 Token，防止长文被截断 ★
+        async with httpx.AsyncClient(timeout=180.0) as client:
             response = await client.post(API_BASE_URL, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
-                "max_tokens": 2000,
+                "max_tokens": 20000, 
                 "messages": [{"role": "user", "content": prompt}],
             })
             if response.status_code == 200:
@@ -1184,8 +1189,8 @@ async def chat_completions(request: Request):
             print(f"[warning] 分区模式读取历史失败: {e}")
             db_msgs = []
         
-        # 提取客户端新消息（非system），可能是user、tool、或带tool_calls的assistant
-        client_new_msgs = [m for m in messages if m.get("role") != "system"]
+        # 提取客户端新消息，可能是user、tool、或带tool_calls的assistant
+        client_new_msgs = [m for m in messages ]
         # 分区模式下，assistant消息来自上一轮response（DB里已存），过滤掉避免重复
         client_new_msgs = [m for m in client_new_msgs if m.get("role") != "assistant"]
         # 分区模式下DB已有完整历史，客户端发来的旧user是冗余的，只保留最后一条
