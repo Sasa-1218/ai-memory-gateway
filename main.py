@@ -101,6 +101,17 @@ MEMORY_API_KEY = os.getenv("MEMORY_API_KEY", "")
 def get_memory_api_key() -> str:
     return MEMORY_API_KEY or API_KEY
 
+# 摘要专用 API Key（不设则回退到主 API_KEY）
+SUMMARY_API_BASE_URL = os.getenv("SUMMARY_API_BASE_URL", "")
+SUMMARY_API_KEY = os.getenv("SUMMARY_API_KEY", "")
+
+def get_summary_api_base_url() -> str:
+    return SUMMARY_API_BASE_URL or API_BASE_URL
+
+def get_summary_api_key() -> str:
+    return SUMMARY_API_KEY or get_memory_api_key()
+
+
 # 额外的请求头（有些 API 需要，比如 OpenRouter 需要 Referer）
 EXTRA_REFERER = os.getenv("EXTRA_REFERER", "https://ai-memory-gateway.local")
 EXTRA_TITLE = os.getenv("EXTRA_TITLE", "AI Memory Gateway")
@@ -439,15 +450,16 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     
     try:
         headers = {
-            "Authorization": f"Bearer {get_memory_api_key()}",
+            "Authorization": f"Bearer {get_summary_api_key()}",
             "Content-Type": "application/json",
         }
-        if "openrouter" in API_BASE_URL:
+        summary_url = get_summary_api_base_url()
+        if "openrouter" in summary_url:
             headers["HTTP-Referer"] = EXTRA_REFERER
             headers["X-Title"] = EXTRA_TITLE
 
         async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(API_BASE_URL, headers=headers, json={
+            response = await client.post(summary_url, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
                 "max_tokens": 1200,
                 "messages": [{"role": "user", "content": prompt}],
@@ -520,6 +532,7 @@ SUMMARY_CONSOLIDATION_PROMPT = """以下是我（遥遥）和 Sasa（小猫）�
 3. 时间背景：在开篇或各主题标题中参考整体时间区间（{date_range}），以便保留时序感。
 4. 内容：合并重复/过时信息，但【所有重要细节、约定、对话原话和情绪转折】必须完整保留——这是最高优先级，不得为压缩而删减。
 5. 字数：目标约 {target_chars} 字，信息量大时可适当超出，但不要为了凑字数添加无关内容。
+6. 不要编造原文摘要里没有的细节或对话，只做归纳、合并、精简，不做扩写或推测。
 
 ---
 {parts_text}
@@ -698,6 +711,8 @@ async def build_partitioned_messages(
                 client_system_content += ("\n\n" if client_system_content else "") + c
 
     # 无论有没有内容都打印，方便区分"没部署新代码"和"这次请求确实没有system内容"
+    import hashlib
+    content_hash = hashlib.md5(client_system_content.encode('utf-8')).hexdigest()[:8] if client_system_content else "无"
     print(f"🔍 客户端system检测: all_messages中共{client_system_msg_count}条role=system消息，合并后{len(client_system_content)}字")
 
     if client_system_content:
