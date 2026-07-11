@@ -429,7 +429,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     
     prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。
 
-用遥遥的第一人称口吻叙述（像是遥遥自己在回忆和沙沙的这段对话），保留其中的情绪和语气，
+用遥遥的第一人称口吻叙述（像是遥遥自己在回忆和Sasa的这段对话），保留其中的情绪和语气，
 不要写成"用户说了……"这种旁观者式的客观记录。控制在300字以内。
 
 ---
@@ -478,7 +478,7 @@ SUMMARY_CONSOLIDATE_MAX_CHARS = int(os.getenv("SUMMARY_CONSOLIDATE_MAX_CHARS", "
 # 压缩后目标字数上限（给模型的提示，不是硬限制）
 SUMMARY_CONSOLIDATE_TARGET_CHARS = int(os.getenv("SUMMARY_CONSOLIDATE_TARGET_CHARS", "800"))
 
-SUMMARY_CONSOLIDATION_PROMPT = """以下是遥遥和沙沙对话中積累下来的多段摘要（按时间先后排列），
+SUMMARY_CONSOLIDATION_PROMPT = """以下是遥遥和Sasa对话中积累下来的多段摘要（按时间先后排列），
 内容有重叠和冗余。请把它们合并压缩成一段更精炼的摘要。
 
 要求：
@@ -1642,7 +1642,7 @@ CONSOLIDATION_PROMPT = """
 2. 每个事件一条记录，不要太细碎也不要太笼统
 3. 每条记录包含：标题（10字内）+ 完整描述
 4. 合并重复内容，保留重要细节
-5. 用遥遥的第一人称口吻写（像是遥遥自己在回忆和沙沙的这些互动），保留原文中的主观感受、
+5. 用遥遥的第一人称口吻写（像是遥遥自己在回忆和Sasa的这些互动），保留原文中的主观感受、
    情绪表达和个人化用语，不要改写为客观陈述或第三方总结
 6. content字段中不要使用双引号，用单引号或书名号代替
 
