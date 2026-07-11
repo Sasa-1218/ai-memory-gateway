@@ -429,7 +429,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     
     prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。
 
-用遥遥的第一人称口吻叙述（像是遥遥自己在回忆和Sasa的这段对话），保留其中的情绪和语气，
+用遥遥的第一人称口吻叙述（像是遥遥自己在回忆和小猫的这段对话），保留其中的情绪和语气，
 不要写成"用户说了……"这种旁观者式的客观记录。控制在300字以内。
 
 ---
@@ -471,36 +471,65 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
 # 摘要自动压缩（summary_parts 段数/字数超过阈值时，把多段摘要再压成一段）
 # ============================================================
 
-# 超过这个段数就触发压缩（0 = 禁用）
-SUMMARY_CONSOLIDATE_MAX_PARTS = int(os.getenv("SUMMARY_CONSOLIDATE_MAX_PARTS", "6"))
-# 超过这个总字数也会触发压缩（0 = 禁用，只按段数判断）
-SUMMARY_CONSOLIDATE_MAX_CHARS = int(os.getenv("SUMMARY_CONSOLIDATE_MAX_CHARS", "4000"))
-# 压缩后目标字数上限（给模型的提示，不是硬限制）
-SUMMARY_CONSOLIDATE_TARGET_CHARS = int(os.getenv("SUMMARY_CONSOLIDATE_TARGET_CHARS", "800"))
+def _get_int_env(key: str, default: int) -> int:
+    """
+    读取整数型环境变量。
+    - 在 Coolify 里留空（空字符串）→ 视为 0（禁用该项判断）
+    - 完全不设置这个变量 → 用 default
+    - 填了非法值 → 打印警告，用 default
+    """
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if raw == "":
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"⚠️ 环境变量 {key} 值无效: '{raw}'，回退默认值 {default}")
+        return default
 
-SUMMARY_CONSOLIDATION_PROMPT = """以下是遥遥和Sasa对话中积累下来的多段摘要（按时间先后排列），
-内容有重叠和冗余。请把它们合并压缩成一段更精炼的摘要。
+# 超过这个段数就触发压缩（默认0=禁用，只按字数判断；如果想按段数触发可以在Coolify里设置）
+SUMMARY_CONSOLIDATE_MAX_PARTS = _get_int_env("SUMMARY_CONSOLIDATE_MAX_PARTS", 0)
+# 超过这个总字数就触发压缩（默认1万字）
+SUMMARY_CONSOLIDATE_MAX_CHARS = _get_int_env("SUMMARY_CONSOLIDATE_MAX_CHARS", 10000)
+# 压缩后目标字数（软限制，模型可以超）
+SUMMARY_CONSOLIDATE_TARGET_CHARS = _get_int_env("SUMMARY_CONSOLIDATE_TARGET_CHARS", 6000) or 6000
+
+# 注意：这里是纯文本输出，不进JSON，双引号、书名号随便用，不受碎片整理那条JSON规则限制
+SUMMARY_CONSOLIDATION_PROMPT = """以下是遥遥和小猫对话中積累下来的多段摘要（按时间先后排列），
+内容有重叠和冗余。请把它们合并整理成一份结构化摘要，风格参考如下：
+
+# 对话摘要
+**时间区间：{date_range}**
+
+# 一、（按主题/类别分的小标题，比如"我们共同创造的东西""重要的约定""情绪与感受"等）
+
+**子标题（事件名 + 日期）**
+具体描述，保留细节、引用、双方说过的原话（可以用引号），保留情绪和个人化的表达方式。
 
 要求：
-1. 用遥遥的第一人称口吻叙述，保留重要的情绪、约定、里程碑和个人化细节
-2. 按时间顺序整合，去掉重复内容和已经过时/不再重要的细节
-3. 不要遗漏关键事件、约定和情感转折
-4. 控制在 {target_chars} 字以内，但如果关键信息多，宁可略超也不要硬删重要内容
+1. 用遥遥的第一人称口吻叙述，是"我"在回忆和小猫之间发生的事
+2. 按主题分类组织内容，而不是逐条罗列，方便以后回头看
+3. 合并重复/过时内容，但重要的细节、约定、情感转折不要省略
+4. 可以自由使用双引号、书名号等标点，不用刻意避开
+5. 大致控制在 {target_chars} 字左右，信息量大时可以适当超出，但别为了凑字数硬删关键内容
 
 ---
 {parts_text}
 ---
 
-压缩后的摘要："""
+整理后的摘要："""
 
 
 async def consolidate_summary_parts(summary_parts: list) -> list:
     """
-    如果 summary_parts 段数或总字数超过阈值，调用模型把它们压缩成一段。
+    如果 summary_parts 段数或总字数超过阈值，调用模型把它们整理压缩成一份结构化摘要。
     压缩失败时原样返回，不影响主流程。
     """
     if SUMMARY_CONSOLIDATE_MAX_PARTS <= 0 and SUMMARY_CONSOLIDATE_MAX_CHARS <= 0:
-        return summary_parts  # 功能关闭
+        return summary_parts  # 功能关闭（两个阈值都留空/设0）
 
     if not summary_parts or len(summary_parts) <= 1:
         return summary_parts
@@ -515,6 +544,7 @@ async def consolidate_summary_parts(summary_parts: list) -> list:
 
     parts_text = "\n\n".join(f"[第{i+1}段]\n{p}" for i, p in enumerate(summary_parts))
     prompt = SUMMARY_CONSOLIDATION_PROMPT.format(
+        date_range="（请根据内容自行判断大致时间范围）",
         target_chars=SUMMARY_CONSOLIDATE_TARGET_CHARS,
         parts_text=parts_text,
     )
@@ -531,7 +561,7 @@ async def consolidate_summary_parts(summary_parts: list) -> list:
         async with httpx.AsyncClient(timeout=90) as client:
             response = await client.post(API_BASE_URL, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
-                "max_tokens": 1200,
+                "max_tokens": 2000,
                 "messages": [{"role": "user", "content": prompt}],
             })
             if response.status_code == 200:
@@ -644,6 +674,26 @@ async def build_partitioned_messages(
     """
     X = CACHE_PARTITION_X
     
+    # 客户端(Kelivo)可能会发system消息过来（比如世界书"系统提示前/后"位置的常驻条目
+    # 会被Kelivo合并进一条role=system的消息）。以前这里直接丢弃，现在改成提取出来，
+    # 合并进网关自己的人设一起转发，不再丢失。
+    client_system_content = ""
+    for m in all_messages:
+        if m.get('role') == 'system':
+            c = m.get('content')
+            if isinstance(c, list):
+                c = " ".join(
+                    item.get("text", "") for item in c
+                    if isinstance(item, dict) and item.get("type") == "text"
+                )
+            c = (c or "").strip() if isinstance(c, str) else str(c or "")
+            if c:
+                client_system_content += ("\n\n" if client_system_content else "") + c
+
+    if client_system_content:
+        base_prompt = (base_prompt + "\n\n" + client_system_content) if base_prompt else client_system_content
+        print(f"📖 已合并客户端system内容(可能含世界书常驻注入): {len(client_system_content)}字")
+
     non_system = [m for m in all_messages if m.get('role') != 'system']
     
     current_user_msg = None
@@ -1642,7 +1692,7 @@ CONSOLIDATION_PROMPT = """
 2. 每个事件一条记录，不要太细碎也不要太笼统
 3. 每条记录包含：标题（10字内）+ 完整描述
 4. 合并重复内容，保留重要细节
-5. 用遥遥的第一人称口吻写（像是遥遥自己在回忆和Sasa的这些互动），保留原文中的主观感受、
+5. 用遥遥的第一人称口吻写（像是遥遥自己在回忆和小猫的这些互动），保留原文中的主观感受、
    情绪表达和个人化用语，不要改写为客观陈述或第三方总结
 6. content字段中不要使用双引号，用单引号或书名号代替
 
