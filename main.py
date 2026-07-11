@@ -1204,8 +1204,8 @@ async def chat_completions(request: Request):
             print(f"[warning] 分区模式读取历史失败: {e}")
             db_msgs = []
         
-        # 提取客户端新消息，可能是user、tool、或带tool_calls的assistant
-        client_new_msgs = [m for m in messages ]
+        # 提取客户端新消息（非system），可能是user、tool、或带tool_calls的assistant
+        client_new_msgs = [m for m in messages if m.get("role") != "system"]
         # 分区模式下，assistant消息来自上一轮response（DB里已存），过滤掉避免重复
         client_new_msgs = [m for m in client_new_msgs if m.get("role") != "assistant"]
         # 分区模式下DB已有完整历史，客户端发来的旧user是冗余的，只保留最后一条
