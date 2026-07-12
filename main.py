@@ -227,6 +227,7 @@ async def lifespan(app: FastAPI):
                         "CACHE_PARTITION_ENABLED": lambda v: _parse_bool(v),
                         "CACHE_PARTITION_X": int, "CACHE_PARTITION_TRIGGER": str,
                         "CACHE_PARTITION_WINDOW": int, "CACHE_SUMMARY_MODEL": str,
+                        "SUMMARY_API_BASE_URL": str, "SUMMARY_API_KEY": str,
                         "FORCE_STREAM": lambda v: _parse_bool(v),
                         "REASONING_EFFORT": str,
                     }
@@ -2664,6 +2665,8 @@ async def get_settings():
         embedding_key_raw = db.get("EMBEDDING_API_KEY") or _db_module.EMBEDDING_API_KEY
 
         memory_key_raw = db.get("MEMORY_API_KEY") or MEMORY_API_KEY
+        summary_key_raw = db.get("SUMMARY_API_KEY") or SUMMARY_API_KEY
+
 
         settings = {
             # 基础连接
@@ -2740,6 +2743,8 @@ async def save_settings(request: Request):
             "CACHE_PARTITION_TRIGGER": str,
             "CACHE_PARTITION_WINDOW": int,
             "CACHE_SUMMARY_MODEL":   str,
+            "SUMMARY_API_BASE_URL":  str,
+            "SUMMARY_API_KEY":       str,
             "FORCE_STREAM":          lambda v: _parse_bool(v),
             "REASONING_EFFORT":      str,
         }
@@ -2763,7 +2768,7 @@ async def save_settings(request: Request):
         _ENV_ONLY = {"MEMORY_MODEL": str}
 
         # 打码字段
-        _MASKED_KEYS = {"API_KEY", "EMBEDDING_API_KEY", "MEMORY_API_KEY"}
+        _MASKED_KEYS = {"API_KEY", "EMBEDDING_API_KEY", "MEMORY_API_KEY", "SUMMARY_API_KEY"}
 
         for key, value in data.items():
             # --- 打码字段特殊处理 ---
