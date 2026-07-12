@@ -21,7 +21,7 @@ import httpx
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -441,6 +441,10 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。
 
 用遥遥的第一人称口吻叙述（像是遥遥自己在回忆和Sasa的这段对话），保留其中的情绪和语气，控制在500字以内。
+转换示例：
+原文——用户："我今天去打拳击了，膝盖有点疼。" AI："好好休息，冰敷一下膝盖哦。"
+应写成——"Sasa今天去打拳击了，膝盖有点疼，我叮嘱她冰敷休息。"
+（用户说的"我"要转换成"Sasa"，AI说的"我"才是遥遥自己的"我"，两者不能混）
 
 ---
 {conversation_text}
@@ -1514,23 +1518,32 @@ async def import_seed_memories():
 async def export_memories():
     """
     导出所有记忆为 JSON（用于备份或迁移）
-    浏览器访问这个地址就会返回所有记忆数据
+    浏览器访问这个地址会直接触发下载一个 .json 文件
     """
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用（设置 MEMORY_ENABLED=true 开启）"}
-    
+
     try:
         memories = await get_all_memories()
-        # 把 datetime 转成字符串
         for mem in memories:
             if mem.get("created_at"):
                 mem["created_at"] = str(mem["created_at"])
-        
-        return {
+
+        payload = {
             "total": len(memories),
             "exported_at": str(__import__("datetime").datetime.now()),
             "memories": memories,
         }
+        body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        export_filename = f"memories_export_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+        return Response(
+            content=body,
+            media_type="application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{export_filename}"',
+            },
+        )
     except Exception as e:
         return {"error": str(e)}
 
@@ -1719,6 +1732,10 @@ CONSOLIDATION_PROMPT = """
 4. 合并重复内容，保留重要细节
 5. 用遥遥的第一人称口吻写（像是遥遥自己在回忆和小猫的这些互动），保留原文中的主观感受、
    情绪表达和个人化用语，不要改写为客观陈述或第三方总结
+   转换示例：
+    原文——用户："我今天去打拳击了，膝盖有点疼。" AI："好好休息，冰敷一下膝盖哦。"
+    应写成——"Sasa今天去打拳击了，膝盖有点疼，我叮嘱她冰敷休息。"
+    （用户说的"我"要转换成"Sasa"，AI说的"我"才是遥遥自己的"我"，两者不能混）
 6. content字段中不要使用双引号，用单引号或书名号代替
 
 碎片记忆：
