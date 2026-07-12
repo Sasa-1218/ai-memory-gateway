@@ -524,6 +524,16 @@
                             <div class="combo-dropdown" id="dropdown-CACHE_SUMMARY_MODEL"></div>
                         </div>
                     </div>
+                    <div class="settings-field">
+                        <label>摘要专用 API Base URL</label>
+                        <input type="text" id="set-SUMMARY_API_BASE_URL" class="input" placeholder="留空则使用上面的主 API Base URL">
+                        <small class="form-hint">想让摘要单独走 DeepSeek/GLM 等官方接口（不经过 OpenRouter）时填这里，例：https://api.deepseek.com/v1/chat/completions</small>
+                    </div>
+                    <div class="settings-field">
+                        <label>摘要专用 API Key</label>
+                        <input type="text" id="set-SUMMARY_API_KEY" class="input" placeholder="sk-...">
+                        <small class="form-hint" id="set-SUMMARY_API_KEY-hint">留空则使用记忆模型 Key（再留空则用主 API Key），打码显示，留空不改</small>
+                    </div>
                 </div>
 
                 <!-- 向量搜索 -->
