@@ -948,9 +948,26 @@ async function loadExportStats() {
     }
 }
 
-function doExport() {
-    // 直接跳转到导出接口，浏览器会下载文件
-    window.location.href = '/export/memories';
+async function doExport() {
+    try {
+        const resp = await fetch('/export/memories');
+        const data = await resp.json();
+        if (data.error) { alert("导出失败: " + data.error); return; }
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        const now = new Date();
+        const ts = now.getFullYear() +
+            String(now.getMonth()+1).padStart(2,"0") +
+            String(now.getDate()).padStart(2,"0") + "_" +
+            String(now.getHours()).padStart(2,"0") +
+            String(now.getMinutes()).padStart(2,"0") +
+            String(now.getSeconds()).padStart(2,"0");
+        a.href = url;
+        a.download = "memories_export_" + ts + ".json";
+        a.click();
+        URL.revokeObjectURL(url);
+    } catch(e) { alert("导出失败: " + e.message); }
 }
 
 
@@ -1900,7 +1917,7 @@ let _modelList = [];
 // 所有需要读写的字段 key（开源版：EMBEDDING_API_KEY + EMBEDDING_BASE_URL）
 const _SETTINGS_FIELDS = {
     str: ['API_BASE_URL', 'API_KEY', 'DEFAULT_MODEL', 'MEMORY_API_KEY', 'MEMORY_MODEL',
-          'CACHE_SUMMARY_MODEL', 'CACHE_PARTITION_TRIGGER', 'EMBEDDING_API_KEY', 'EMBEDDING_BASE_URL', 'EMBEDDING_MODEL', 'REASONING_EFFORT',
+          'CACHE_SUMMARY_MODEL', 'SUMMARY_API_BASE_URL', 'SUMMARY_API_KEY', 'CACHE_PARTITION_TRIGGER', 'EMBEDDING_API_KEY', 'EMBEDDING_BASE_URL', 'EMBEDDING_MODEL', 'REASONING_EFFORT',
          'role_display_user', 'role_display_assistant'],
     int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'EMBEDDING_DIM'],
     float: ['MIN_SCORE_THRESHOLD'],
@@ -1931,7 +1948,7 @@ async function loadSettings() {
             if (el) el.value = s[k] || '';
         });
         // 打码字段提示
-        ['API_KEY', 'MEMORY_API_KEY', 'EMBEDDING_API_KEY'].forEach(k => {
+        ['API_KEY', 'MEMORY_API_KEY', 'EMBEDDING_API_KEY', 'SUMMARY_API_KEY'].forEach(k => {
             const hint = document.getElementById('set-' + k + '-hint');
             if (hint && s[k]) hint.textContent = '当前: ' + s[k];
         });
