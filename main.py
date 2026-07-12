@@ -101,9 +101,14 @@ MEMORY_API_KEY = os.getenv("MEMORY_API_KEY", "")
 def get_memory_api_key() -> str:
     return MEMORY_API_KEY or API_KEY
 
-# 摘要专用 API Key（不设则回退到主 API_KEY）
+# 摘要模型专用的独立接口地址/Key（不设则回退到 MEMORY_API_KEY/API_BASE_URL）
+# 用于把摘要压缩这块单独指到 DeepSeek/GLM 等官方接口，跳过 OpenRouter，省手续费
+# 例：SUMMARY_API_BASE_URL=https://api.deepseek.com/v1/chat/completions
+#     SUMMARY_API_KEY=sk-xxxxxxxx（DeepSeek官方控制台申请的key）
+#     CACHE_SUMMARY_MODEL=deepseek-chat
 SUMMARY_API_BASE_URL = os.getenv("SUMMARY_API_BASE_URL", "")
 SUMMARY_API_KEY = os.getenv("SUMMARY_API_KEY", "")
+
 
 def get_summary_api_base_url() -> str:
     return SUMMARY_API_BASE_URL or API_BASE_URL
@@ -574,12 +579,14 @@ async def consolidate_summary_parts(summary_parts: list) -> list:
 
     try:
         headers = {
-            "Authorization": f"Bearer {get_memory_api_key()}",
+            "Authorization": f"Bearer {get_summary_api_key()}",
             "Content-Type": "application/json",
         }
-        if "openrouter" in API_BASE_URL:
+        summary_url = get_summary_api_base_url()
+        if "openrouter" in summary_url:
             headers["HTTP-Referer"] = EXTRA_REFERER
             headers["X-Title"] = EXTRA_TITLE
+            
         # ★ 这里把超时时间改长，给足 Token，防止长文被截断 ★
         async with httpx.AsyncClient(timeout=180.0) as client:
             response = await client.post(API_BASE_URL, headers=headers, json={
