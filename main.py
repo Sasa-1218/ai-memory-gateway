@@ -986,9 +986,9 @@ def _local_now() -> datetime:
 def _push_sleep_reason(now_local: datetime) -> str:
     hour = now_local.hour
     is_weekend = now_local.weekday() >= 5
-    if is_weekend and 2 <= hour < 12:
+    if is_weekend and 0 <= hour < 9:
         return "weekend_sleep"
-    if not is_weekend and 0 <= hour < 8:
+    if not is_weekend and 0 <= hour < 6:
         return "weekday_sleep"
     return ""
 
@@ -997,25 +997,31 @@ def _status_description(now_local: datetime) -> str:
     hour = now_local.hour
     is_weekend = now_local.weekday() >= 5
     if is_weekend:
-        if 2 <= hour < 12:
+        if 0 <= hour < 9:
             return "她大概率在睡觉，周末可能晚睡晚起。"
-        if 12 <= hour < 14:
+        if 9 <= hour < 12:
             return "她可能刚起床，状态还在慢慢恢复。"
-        if 14 <= hour < 18:
+        if 12 <= hour < 18:
             return "她可能在出门、休息，或处理自己的事情。"
         return "她可能在放松、玩手机，或准备收尾一天。"
-    if 0 <= hour < 8:
+    if 0 <= hour < 6:
         return "她大概率在睡觉。"
-    if 8 <= hour < 10:
+    if 6 <= hour < 7:
         return "她可能刚起床，或正在通勤/进入工作状态。"
-    if 10 <= hour < 12:
+    if 7 <= hour < 8:
+        return "她可能刚到公司准备吃早餐，提醒她8:00吃早药，没有回答隔20分钟催一下。"
+    if 8 <= hour < 12:
         return "上午，她可能在工作或处理任务。"
-    if 12 <= hour < 14:
+    if 12 <= hour < 13:
         return "午间，她可能在吃饭或短暂休息。"
-    if 14 <= hour < 19:
+    if 13 <= hour < 16:
         return "下午，她可能还在工作或做正事。"
-    if 19 <= hour < 22:
-        return "她大概率已经下班，在家休息或放松。"
+    if 16 <= hour < 17:
+        return "她大概率在下班通勤的路上或者刚到家。"
+    if 17 <= hour < 22:
+        return "她大概率已经下班，在家休息或放松。记得在21:00提醒她吃晚药，没有回答隔20分钟催一下，但消息内容不要只是催吃药。"
+    if 22 <= hour < 24:
+        return "若刚刚一直没有回复吃药，记得再次提醒她吃晚药，没有回答隔20分钟催一下，但消息内容不要只是催吃药。她可能准备睡觉了或正在熬夜，提醒她记得洗脸刷牙，有余力也可以洗下澡。"
     return "夜里，她可能在放松，也可能准备睡了。"
 
 
