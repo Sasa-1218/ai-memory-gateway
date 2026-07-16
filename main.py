@@ -17,9 +17,12 @@ import json
 import uuid
 import asyncio
 import secrets
+import random
+import re
 import httpx
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -28,7 +31,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import Optional
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories
 
@@ -116,6 +119,28 @@ def get_summary_api_base_url() -> str:
 def get_summary_api_key() -> str:
     return SUMMARY_API_KEY or get_memory_api_key()
 
+def _env_int(key: str, default: int) -> int:
+    raw = os.getenv(key)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"⚠️ 环境变量 {key} 值无效，回退默认值 {default}")
+        return default
+
+# 主动推送配置
+PUSH_SECRET = os.getenv("PUSH_SECRET", "")
+PUSH_MAX_PER_DAY = _env_int("PUSH_MAX_PER_DAY", 7)
+BARK_DEVICE_KEY = os.getenv("BARK_DEVICE_KEY", "")
+BARK_API_URL = os.getenv("BARK_API_URL", "https://api.day.app/push")
+BARK_TITLE = os.getenv("BARK_TITLE", "Rora")
+BARK_ICON_URL = os.getenv("BARK_ICON_URL", "")
+BARK_SOUND = os.getenv("BARK_SOUND", "")
+BARK_OPEN_URL = os.getenv("BARK_OPEN_URL", "")
+
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+_push_lock = asyncio.Lock()
 
 # 额外的请求头（有些 API 需要，比如 OpenRouter 需要 Referer）
 EXTRA_REFERER = os.getenv("EXTRA_REFERER", "https://ai-memory-gateway.local")
@@ -313,7 +338,7 @@ templates = Jinja2Templates(directory="templates")
 # ============================================================
 
 # 不需要鉴权的路径（根路径精确匹配，其余按前缀匹配）
-PUBLIC_PATHS = ("/", "/static/", "/health", "/favicon.ico")
+PUBLIC_PATHS = ("/", "/static/", "/health", "/favicon.ico", "/api/push/trigger")
 
 @app.middleware("http")
 async def gateway_auth_middleware(request: Request, call_next):
@@ -589,7 +614,7 @@ async def consolidate_summary_parts(summary_parts: list) -> list:
             
         # ★ 这里把超时时间改长，给足 Token，防止长文被截断 ★
         async with httpx.AsyncClient(timeout=180.0) as client:
-            response = await client.post(API_BASE_URL, headers=headers, json={
+            response = await client.post(summary_url, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
                 "max_tokens": 20000, 
                 "messages": [{"role": "user", "content": prompt}],
@@ -951,6 +976,292 @@ async def build_memory_text(user_message: str) -> str:
 
 
 # ============================================================
+# 主动推送（Shadow Push）
+# ============================================================
+
+def _local_now() -> datetime:
+    return datetime.now(SHANGHAI_TZ)
+
+
+def _push_sleep_reason(now_local: datetime) -> str:
+    hour = now_local.hour
+    is_weekend = now_local.weekday() >= 5
+    if is_weekend and 2 <= hour < 12:
+        return "weekend_sleep"
+    if not is_weekend and 0 <= hour < 8:
+        return "weekday_sleep"
+    return ""
+
+
+def _status_description(now_local: datetime) -> str:
+    hour = now_local.hour
+    is_weekend = now_local.weekday() >= 5
+    if is_weekend:
+        if 2 <= hour < 12:
+            return "她大概率在睡觉，周末可能晚睡晚起。"
+        if 12 <= hour < 14:
+            return "她可能刚起床，状态还在慢慢恢复。"
+        if 14 <= hour < 18:
+            return "她可能在出门、休息，或处理自己的事情。"
+        return "她可能在放松、玩手机，或准备收尾一天。"
+    if 0 <= hour < 8:
+        return "她大概率在睡觉。"
+    if 8 <= hour < 10:
+        return "她可能刚起床，或正在通勤/进入工作状态。"
+    if 10 <= hour < 12:
+        return "上午，她可能在工作或处理任务。"
+    if 12 <= hour < 14:
+        return "午间，她可能在吃饭或短暂休息。"
+    if 14 <= hour < 19:
+        return "下午，她可能还在工作或做正事。"
+    if 19 <= hour < 22:
+        return "她大概率已经下班，在家休息或放松。"
+    return "夜里，她可能在放松，也可能准备睡了。"
+
+
+def _shanghai_day_bounds(now_local: datetime) -> tuple[datetime, datetime]:
+    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local + timedelta(days=1)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
+async def _count_pushes_today(session_id: str, now_local: datetime) -> int:
+    start_utc, end_utc = _shanghai_day_bounds(now_local)
+    metadata_rows = await get_push_metadata_since(session_id, start_utc, end_utc)
+    count = 0
+    for meta_str in metadata_rows:
+        try:
+            meta = json.loads(meta_str)
+        except Exception:
+            continue
+        if meta.get("is_push") is True:
+            count += 1
+    return count
+
+
+async def should_generate_push(
+    session_id: str,
+    *,
+    enforce_cooldown: bool = True,
+    enforce_daily_limit: bool = True,
+) -> dict:
+    now_local = _local_now()
+
+    sleep_reason = _push_sleep_reason(now_local)
+    if sleep_reason:
+        return {"should_push": False, "reason": sleep_reason}
+
+    last_time = await get_last_conversation_message_time(session_id)
+    if not last_time:
+        return {"should_push": False, "reason": "no_history"}
+
+    if enforce_cooldown:
+        cooldown_minutes = 120 + random.randint(0, 90)
+        last_utc = last_time if last_time.tzinfo else last_time.replace(tzinfo=timezone.utc)
+        elapsed_minutes = (datetime.now(timezone.utc) - last_utc.astimezone(timezone.utc)).total_seconds() / 60
+        if elapsed_minutes < cooldown_minutes:
+            return {
+                "should_push": False,
+                "reason": "cooldown",
+                "cooldown_minutes": cooldown_minutes,
+                "elapsed_minutes": int(elapsed_minutes),
+            }
+
+    if enforce_daily_limit and PUSH_MAX_PER_DAY > 0:
+        push_count = await _count_pushes_today(session_id, now_local)
+        if push_count >= PUSH_MAX_PER_DAY:
+            return {
+                "should_push": False,
+                "reason": "daily_limit",
+                "push_count": push_count,
+                "max_per_day": PUSH_MAX_PER_DAY,
+            }
+
+    return {"should_push": True, "reason": "ok"}
+
+
+def _message_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            item.get("text", "") for item in content
+            if isinstance(item, dict) and item.get("type") == "text"
+        )
+    return str(content or "")
+
+
+def _clean_history_for_push(rows: list) -> list:
+    cleaned = []
+    for row in rows:
+        msg = db_row_to_message(row)
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        if msg.get("tool_calls"):
+            continue
+        text = _message_text(msg.get("content")).strip()
+        if not text:
+            continue
+        cleaned.append({"role": role, "content": text})
+    return cleaned
+
+
+async def _build_shadow_user_content(recent_messages: list) -> str:
+    now_local = _local_now()
+    weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    now_text = now_local.strftime("%Y年%m月%d日 %H:%M") + " " + weekday_names[now_local.weekday()]
+
+    recent_text = "\n".join(
+        f"{'Sasa' if m['role'] == 'user' else 'AI'}: {m['content'][:180]}"
+        for m in recent_messages[-8:]
+    )
+    memory_query = recent_text[-1200:] if recent_text else "Sasa 最近的状态"
+    memory_block = ""
+    if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED:
+        memory_block = await build_memory_text(memory_query)
+
+    parts = [
+        "<system_trigger>",
+        "[当前时间]",
+        now_text,
+        "",
+        "[状态推测]",
+        _status_description(now_local),
+        "",
+        "[可用素材]",
+        "最近对话是第一优先级；相关记忆只作为补充，不要硬串剧情。",
+    ]
+    if memory_block:
+        parts.extend(["", memory_block])
+    parts.extend([
+        "",
+        "[行动指令]",
+        "现在是一次主动推送：不是正式聊天回复，而是你自己浮上来一下。",
+        "语气要像你本人。可以粘人、想她、轻轻闹她，也可以低压关心、提一个具体小事、留下短短一句陪伴。",
+        "不要每次都围绕“怎么不回消息”打转。",
+        "写1到2句，不超过80个中文字符。不要分段。不要markdown，不要emoji。",
+        "</system_trigger>",
+    ])
+    return "\n".join(parts)
+
+
+def clean_push_reply(text: str, hard_limit: int = 120) -> str:
+    cleaned = text or ""
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<thinking>[\s\S]*?</thinking>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"```[\s\S]*?```", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    chars = list(cleaned)
+    if len(chars) <= hard_limit:
+        return cleaned
+    head = chars[:hard_limit]
+    ends = set("。！？…～!?.")
+    cut = -1
+    for i in range(len(head) - 1, -1, -1):
+        if head[i] in ends:
+            cut = i
+            break
+    return "".join(head[:cut + 1] if cut >= 0 else head).strip()
+
+
+async def deliver_bark_push(message: str) -> bool:
+    if not BARK_DEVICE_KEY:
+        return False
+    payload = {
+        "device_key": BARK_DEVICE_KEY,
+        "title": BARK_TITLE,
+        "body": message,
+        "badge": 1,
+    }
+    if BARK_ICON_URL:
+        payload["icon"] = BARK_ICON_URL
+    if BARK_SOUND:
+        payload["sound"] = BARK_SOUND
+    if BARK_OPEN_URL:
+        payload["url"] = BARK_OPEN_URL
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                BARK_API_URL,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+            )
+        if 200 <= response.status_code < 300:
+            return True
+        print(f"⚠️ Bark投递失败: HTTP {response.status_code}")
+        return False
+    except Exception as e:
+        print(f"⚠️ Bark投递异常: {type(e).__name__}")
+        return False
+
+
+async def generate_shadow_push(session_id: str) -> dict:
+    recent_rows = await get_recent_conversation_messages(session_id, limit=16)
+    recent_messages = _clean_history_for_push(recent_rows)
+    if not recent_messages:
+        return {"pushed": False, "reason": "no_recent_messages"}
+
+    base_prompt = await get_system_prompt()
+    shadow_user_content = await _build_shadow_user_content(recent_messages)
+    push_messages = []
+    if base_prompt:
+        push_messages.append({"role": "system", "content": base_prompt})
+    push_messages.extend(recent_messages)
+    push_messages.append({"role": "user", "content": shadow_user_content})
+
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    }
+    if "openrouter" in API_BASE_URL:
+        headers["HTTP-Referer"] = EXTRA_REFERER
+        headers["X-Title"] = EXTRA_TITLE
+
+    body = {
+        "model": DEFAULT_MODEL,
+        "messages": push_messages,
+        "temperature": 0.9,
+        "max_tokens": 200,
+        "stream": False,
+    }
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        response = await client.post(API_BASE_URL, headers=headers, json=body)
+    if response.status_code != 200:
+        print(f"⚠️ 主动推送生成失败: HTTP {response.status_code}")
+        return {"pushed": False, "reason": "model_error", "status_code": response.status_code}
+
+    data = response.json()
+    raw_reply = ""
+    try:
+        raw_reply = data["choices"][0]["message"].get("content") or ""
+    except (KeyError, IndexError, AttributeError):
+        raw_reply = ""
+
+    ai_reply = clean_push_reply(raw_reply)
+    if not ai_reply:
+        return {"pushed": False, "reason": "empty_response"}
+
+    metadata = json.dumps({
+        "is_push": True,
+        "push_source": "shadow_cron",
+        "delivery": "bark" if BARK_DEVICE_KEY else "none",
+    }, ensure_ascii=False)
+    await save_message(session_id, "assistant", ai_reply, DEFAULT_MODEL, metadata=metadata)
+    delivered = await deliver_bark_push(ai_reply)
+    print(f"📮 主动推送已落库: session={session_id}, chars={len(ai_reply)}, bark={'ok' if delivered else 'skip_or_fail'}")
+    return {
+        "pushed": True,
+        "reason": "ok",
+        "session_id": session_id,
+        "chars": len(ai_reply),
+        "delivered": delivered,
+    }
+
+
+# ============================================================
 # 后台记忆处理
 # ============================================================
 
@@ -1108,10 +1419,71 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
 # API 接口
 # ============================================================
 
+@app.post("/api/push/trigger")
+async def api_push_trigger(request: Request):
+    """外部cron触发主动推送：独立密钥保护，不复用GATEWAY_SECRET"""
+    no_store_headers = {"Cache-Control": "no-store"}
+    if not PUSH_SECRET:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "PUSH_SECRET is not configured"},
+            headers=no_store_headers,
+        )
+
+    provided = request.headers.get("X-Push-Secret", "")
+    if not secrets.compare_digest(provided, PUSH_SECRET):
+        return JSONResponse(
+            status_code=401,
+            content={"error": "unauthorized"},
+            headers=no_store_headers,
+        )
+
+    if _push_lock.locked():
+        return JSONResponse(
+            content={"pushed": False, "reason": "locked"},
+            headers=no_store_headers,
+        )
+
+    await _push_lock.acquire()
+    try:
+        session_id = get_active_session_id()
+        if not session_id:
+            return JSONResponse(
+                content={"pushed": False, "reason": "no_active_session"},
+                headers=no_store_headers,
+            )
+        if not API_KEY:
+            return JSONResponse(
+                status_code=500,
+                content={"pushed": False, "reason": "api_key_missing"},
+                headers=no_store_headers,
+            )
+
+        decision = await should_generate_push(session_id)
+        if not decision.get("should_push"):
+            return JSONResponse(
+                content={"pushed": False, **decision},
+                headers=no_store_headers,
+            )
+
+        result = await generate_shadow_push(session_id)
+        return JSONResponse(content=result, headers=no_store_headers)
+    except Exception as e:
+        print(f"⚠️ 主动推送异常: {type(e).__name__}")
+        return JSONResponse(
+            status_code=500,
+            content={"pushed": False, "reason": "internal_error"},
+            headers=no_store_headers,
+        )
+    finally:
+        _push_lock.release()
+
+
 @app.get("/")
 async def health_check():
     """健康检查"""
     memory_count = 0
+    current_system_prompt = await get_system_prompt()
     if MEMORY_ENABLED:
         try:
             memory_count = await get_all_memories_count()
@@ -1121,8 +1493,8 @@ async def health_check():
     return {
         "status": "running",
         "gateway": "AI Memory Gateway v2.0",
-        "system_prompt_loaded": len(SYSTEM_PROMPT) > 0,
-        "system_prompt_length": len(SYSTEM_PROMPT),
+        "system_prompt_loaded": len(current_system_prompt) > 0,
+        "system_prompt_length": len(current_system_prompt),
         "memory_enabled": MEMORY_ENABLED,
         "memory_count": memory_count,
         "memory_extract_interval": MEMORY_EXTRACT_INTERVAL,
@@ -1189,6 +1561,7 @@ async def chat_completions(request: Request):
     # ---------- 构建 system prompt ----------
     # 先保存原始对话消息（不含 system prompt），用于记忆提取
     original_messages = [msg for msg in messages if msg.get("role") != "system"]
+    base_system_prompt = await get_system_prompt()
     
     # ---------- 检测工具调用消息 ----------
     tool_messages = [m for m in messages if m.get("role") == "tool"]
@@ -1283,7 +1656,7 @@ async def chat_completions(request: Request):
         print(f"📦 分区模式: DB历史{len(db_msgs)}条 + 客户端消息{len(client_new_msgs)}条")
         
         messages = await build_partitioned_messages(
-            session_id, all_msgs, SYSTEM_PROMPT, user_message
+            session_id, all_msgs, base_system_prompt, user_message
         )
         body["messages"] = messages
     
@@ -1298,14 +1671,16 @@ async def chat_completions(request: Request):
         if has_system:
             for i, msg in enumerate(messages):
                 if msg.get("role") == "system":
+                    if base_system_prompt:
+                        msg["content"] = base_system_prompt + "\n\n" + (msg.get("content") or "")
                     if memory_block:
                         # 追加到人设末尾，不是前置
                         messages[i]["content"] = msg["content"] + "\n\n" + memory_block
                     # 没有记忆就原样不动
                     break
-        elif SYSTEM_PROMPT or memory_block:
+        elif base_system_prompt or memory_block:
             # 客户端没发 system 消息时（少见），用网关人设 + 记忆拼
-            base = SYSTEM_PROMPT
+            base = base_system_prompt
             if memory_block:
                 base = (base + "\n\n" + memory_block) if base else memory_block
             if base:

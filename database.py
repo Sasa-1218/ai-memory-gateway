@@ -527,6 +527,49 @@ async def get_recent_messages(session_id: str, limit: int = 20):
         return list(reversed(rows))
 
 
+async def get_recent_conversation_messages(session_id: str, limit: int = 16):
+    """按时间正序读取指定session最近N条消息"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT role, content, metadata, created_at
+            FROM conversations
+            WHERE session_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+        """, session_id, limit)
+        return [dict(r) for r in reversed(rows)]
+
+
+async def get_last_conversation_message_time(session_id: str):
+    """获取指定session最后一条消息时间"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval("""
+            SELECT created_at
+            FROM conversations
+            WHERE session_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, session_id)
+
+
+async def get_push_metadata_since(session_id: str, start_at: datetime, end_at: datetime):
+    """读取指定时间窗口内assistant消息metadata，用于统计主动推送"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT metadata
+            FROM conversations
+            WHERE session_id = $1
+              AND role = 'assistant'
+              AND created_at >= $2
+              AND created_at < $3
+              AND metadata IS NOT NULL
+        """, session_id, start_at, end_at)
+        return [r["metadata"] for r in rows]
+
+
 async def search_conversations(query: str, limit: int = 20, offset: int = 0):
     """搜索对话内容，返回匹配的session列表"""
     keywords = extract_search_keywords(query)
