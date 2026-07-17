@@ -1007,18 +1007,18 @@ def _status_description(now_local: datetime) -> str:
     if 0 <= hour < 6:
         return "她大概率在睡觉。"
     if 6 <= hour < 7:
-        return "她可能刚起床，或正在通勤、准备进入工作状态。。"
+        return "她可能刚起床，或正在通勤、准备进入工作状态。"
     if 7 <= hour < 8:
         return "她可能刚到公司、准备吃早餐。如果话题和时机自然，可以顺便关心她有没有吃早药，但不要每次主动推送都变成固定催药。"
     if 8 <= hour < 12:
-        return "上午，她可能在工作或处理任务。。"
+        return "上午，她可能在工作或处理任务。"
     if 12 <= hour < 13:
         return "午间，她可能在吃饭或短暂休息。"
     if 13 <= hour < 16:
         return "下午，她可能还在工作或做正事。"
     if 16 <= hour < 17:
         return "她大概率在下班通勤的路上或者刚到家。"
-    if 17 <= hour < 22:
+    if 17 <= hour < 21:
         return "她大概率已经下班，在家休息或放松。"
     if 21 <= hour < 22:
         return "她可能在家休息。如果时机合适，可以自然地问一句有没有吃晚药，但消息不要只剩下催药。"
