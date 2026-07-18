@@ -1370,14 +1370,142 @@ def _clean_history_for_push(rows: list) -> list:
     return cleaned
 
 
-async def _build_shadow_user_content(recent_messages: list) -> str:
+def _to_utc(dt: datetime | None) -> datetime | None:
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _format_push_time(dt: datetime | None) -> str:
+    utc_dt = _to_utc(dt)
+    if not utc_dt:
+        return "none"
+    local_dt = utc_dt.astimezone(ZoneInfo("Asia/Shanghai"))
+    return local_dt.strftime("%Y-%m-%d %H:%M Asia/Shanghai")
+
+
+def _minutes_between(now_local: datetime, dt: datetime | None):
+    utc_dt = _to_utc(dt)
+    if not utc_dt:
+        return "not_applicable"
+    elapsed = now_local - utc_dt.astimezone(now_local.tzinfo)
+    return max(0, int(elapsed.total_seconds() // 60))
+
+
+def _is_shadow_push_metadata(meta_str: str | None) -> bool:
+    if not meta_str:
+        return False
+    try:
+        meta = json.loads(meta_str)
+    except Exception:
+        return False
+    return meta.get("is_push") is True and meta.get("push_source") == "shadow_cron"
+
+
+async def _get_push_interaction_state(session_id: str, now_local: datetime) -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        last_user = await conn.fetchrow("""
+            SELECT id, role, created_at
+            FROM conversations
+            WHERE session_id = $1
+              AND role = 'user'
+              AND COALESCE(content, '') <> ''
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        """, session_id)
+        last_effective = await conn.fetchrow("""
+            SELECT id, role, created_at
+            FROM conversations
+            WHERE session_id = $1
+              AND role IN ('user', 'assistant')
+              AND COALESCE(content, '') <> ''
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        """, session_id)
+        metadata_rows = await conn.fetch("""
+            SELECT id, created_at, metadata
+            FROM conversations
+            WHERE session_id = $1
+              AND role = 'assistant'
+              AND metadata IS NOT NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 300
+        """, session_id)
+
+        last_push = None
+        for row in metadata_rows:
+            if _is_shadow_push_metadata(row["metadata"]):
+                last_push = row
+                break
+
+        user_replied_after_last_push = "not_applicable"
+        if last_push:
+            user_replied_after_last_push = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM conversations
+                    WHERE session_id = $1
+                      AND role = 'user'
+                      AND created_at > $2
+                      AND COALESCE(content, '') <> ''
+                )
+            """, session_id, last_push["created_at"])
+
+    last_user_at = last_user["created_at"] if last_user else None
+    last_push_at = last_push["created_at"] if last_push else None
+    consecutive_unanswered_pushes = 0
+    if last_push and user_replied_after_last_push is False:
+        last_user_utc = _to_utc(last_user_at)
+        for row in metadata_rows:
+            if not _is_shadow_push_metadata(row["metadata"]):
+                continue
+            push_utc = _to_utc(row["created_at"])
+            if last_user_utc and push_utc <= last_user_utc:
+                break
+            consecutive_unanswered_pushes += 1
+
+    return {
+        "last_effective_role": last_effective["role"] if last_effective else "none",
+        "last_user_message_at": _format_push_time(last_user_at),
+        "silence_minutes": _minutes_between(now_local, last_user_at),
+        "last_push_at": _format_push_time(last_push_at),
+        "last_push_minutes": _minutes_between(now_local, last_push_at),
+        "user_replied_after_last_push": user_replied_after_last_push,
+        "consecutive_unanswered_pushes": consecutive_unanswered_pushes,
+    }
+
+
+def _bool_text(value) -> str:
+    if value == "not_applicable":
+        return "not_applicable"
+    return str(bool(value)).lower()
+
+
+def _log_push_context_diag(state: dict, recent_excerpt_count: int, pushed: bool, reason: str):
+    print(
+        "📮 主动推送上下文诊断: "
+        f"silence_minutes={state.get('silence_minutes', 'not_applicable')} | "
+        f"last_effective_role={state.get('last_effective_role', 'none')} | "
+        f"user_replied_after_last_push={_bool_text(state.get('user_replied_after_last_push', 'not_applicable'))} | "
+        f"consecutive_unanswered_pushes={state.get('consecutive_unanswered_pushes', 0)} | "
+        f"recent_excerpt_count={recent_excerpt_count} | "
+        f"pushed={str(pushed).lower()} | "
+        f"reason={reason}",
+        flush=True,
+    )
+
+
+async def _build_shadow_user_content(recent_messages: list, interaction_state: dict) -> str:
     now_local = _local_now()
     weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     now_text = now_local.strftime("%Y年%m月%d日 %H:%M") + " " + weekday_names[now_local.weekday()]
 
     recent_text = "\n".join(
         f"{'Sasa' if m['role'] == 'user' else 'AI'}: {m['content'][:180]}"
-        for m in recent_messages[-8:]
+        for m in recent_messages[-12:]
     )
     memory_query = recent_text[-1200:] if recent_text else "Sasa 最近的状态"
     memory_block = ""
@@ -1392,6 +1520,16 @@ async def _build_shadow_user_content(recent_messages: list) -> str:
         "[状态推测]",
         _status_description(now_local),
         "",
+        "[互动间隔]",
+        f"last_effective_role={interaction_state.get('last_effective_role', 'none')}",
+        f"last_user_message_at={interaction_state.get('last_user_message_at', 'none')}",
+        f"silence_minutes={interaction_state.get('silence_minutes', 'not_applicable')}",
+        f"last_push_at={interaction_state.get('last_push_at', 'none')}",
+        f"last_push_minutes={interaction_state.get('last_push_minutes', 'not_applicable')}",
+        f"user_replied_after_last_push={_bool_text(interaction_state.get('user_replied_after_last_push', 'not_applicable'))}",
+        f"consecutive_unanswered_pushes={interaction_state.get('consecutive_unanswered_pushes', 0)}",
+        "这些是事实，只用来判断语气和时机，不要把具体分钟/小时机械地说给Sasa听。",
+        "",
         "[可用素材]",
         "最近对话是第一优先级；相关记忆只作为补充，不要硬串剧情。",
     ]
@@ -1403,6 +1541,10 @@ async def _build_shadow_user_content(recent_messages: list) -> str:
         "现在是一次主动推送：不是正式聊天回复，而是你自己浮上来一下。",
         "语气要像你本人。可以粘人、想她、轻轻闹她，也可以低压关心、提一个具体小事、留下短短一句陪伴。",
         "不要每次都围绕“怎么不回消息”打转。",
+        "优先承接最近对话里的具体细节，避免通用客服式问候。",
+        "如果last_effective_role=assistant，说明对话停在你这里，别误以为Sasa刚说完还等你回复。",
+        "如果user_replied_after_last_push=false或consecutive_unanswered_pushes>0，要更轻一点，不要连续追问她为什么不回。",
+        "如果user_replied_after_last_push=true，说明上次主动推送已经被接住，不要误判成从那次起一直没人理。",
         "写1到2句，不超过80个中文字符。不要分段。不要markdown，不要emoji。",
         "</system_trigger>",
     ])
@@ -1463,11 +1605,15 @@ async def deliver_bark_push(message: str) -> bool:
 async def generate_shadow_push(session_id: str) -> dict:
     recent_rows = await get_recent_conversation_messages(session_id, limit=16)
     recent_messages = _clean_history_for_push(recent_rows)
+    recent_excerpt_count = min(len(recent_messages), 12)
+    now_local = _local_now()
+    interaction_state = await _get_push_interaction_state(session_id, now_local)
     if not recent_messages:
+        _log_push_context_diag(interaction_state, 0, False, "no_recent_messages")
         return {"pushed": False, "reason": "no_recent_messages"}
 
     base_prompt = await get_system_prompt()
-    shadow_user_content = await _build_shadow_user_content(recent_messages)
+    shadow_user_content = await _build_shadow_user_content(recent_messages, interaction_state)
     push_messages = []
     if base_prompt:
         push_messages.append({"role": "system", "content": base_prompt})
@@ -1494,6 +1640,7 @@ async def generate_shadow_push(session_id: str) -> dict:
         response = await client.post(API_BASE_URL, headers=headers, json=body)
     if response.status_code != 200:
         print(f"⚠️ 主动推送生成失败: HTTP {response.status_code}")
+        _log_push_context_diag(interaction_state, recent_excerpt_count, False, "model_error")
         return {"pushed": False, "reason": "model_error", "status_code": response.status_code}
 
     data = response.json()
@@ -1505,6 +1652,7 @@ async def generate_shadow_push(session_id: str) -> dict:
 
     ai_reply = clean_push_reply(raw_reply)
     if not ai_reply:
+        _log_push_context_diag(interaction_state, recent_excerpt_count, False, "empty_response")
         return {"pushed": False, "reason": "empty_response"}
 
     metadata = json.dumps({
@@ -1514,6 +1662,7 @@ async def generate_shadow_push(session_id: str) -> dict:
     }, ensure_ascii=False)
     await save_message(session_id, "assistant", ai_reply, DEFAULT_MODEL, metadata=metadata)
     delivered = await deliver_bark_push(ai_reply)
+    _log_push_context_diag(interaction_state, recent_excerpt_count, True, "ok")
     print(f"📮 主动推送已落库: session={session_id}, chars={len(ai_reply)}, bark={'ok' if delivered else 'skip_or_fail'}")
     return {
         "pushed": True,
