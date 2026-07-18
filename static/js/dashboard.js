@@ -85,6 +85,9 @@ document.addEventListener('DOMContentLoaded', () => {
     initTabs();
     // 加载记忆数据
     loadMemories();
+    // 加载主动推送投递状态
+    loadPushStatus();
+    setInterval(loadPushStatus, 60000);
     // 加载导出统计
     loadExportStats();
 });
@@ -174,6 +177,58 @@ function updateLayerCounts(stats) {
     if (el1) el1.textContent = stats.layer_1?.active || 0;
     if (el2) el2.textContent = stats.layer_2?.active || 0;
     if (el3) el3.textContent = stats.layer_3?.active || 0;
+}
+
+// ============================================
+// 主动推送投递状态
+// ============================================
+async function loadPushStatus() {
+    const card = document.getElementById('pushStatusCard');
+    if (!card) return;
+    try {
+        const resp = await fetch('/api/push/status');
+        const data = await resp.json();
+        const badge = document.getElementById('pushStatusBadge');
+        const desc = document.getElementById('pushStatusDesc');
+        document.getElementById('pushTotal24').textContent = data.total_24h ?? 0;
+        document.getElementById('pushUndelivered').textContent = data.undelivered_count ?? 0;
+        document.getElementById('pushRetryable').textContent = data.retryable_count ?? 0;
+        document.getElementById('pushExhausted').textContent = data.exhausted_count ?? 0;
+
+        const undelivered = Number(data.undelivered_count || 0);
+        const exhausted = Number(data.exhausted_count || 0);
+        const retryable = Number(data.retryable_count || 0);
+        badge.classList.remove('ok', 'warn');
+        if (!data.enabled) {
+            badge.textContent = '未配置';
+            desc.textContent = 'Bark 未启用，主动推送只会写入数据库。';
+        } else if (exhausted > 0) {
+            badge.textContent = '需查看';
+            badge.classList.add('warn');
+            desc.textContent = `有 ${exhausted} 条主动推送补发次数已用尽，最近错误：${data.last_error_type || 'unknown'}。`;
+        } else if (retryable > 0) {
+            badge.textContent = '补发中';
+            desc.textContent = `有 ${retryable} 条主动推送等待下次 cron 自动补发，最近错误：${data.last_error_type || 'unknown'}。`;
+        } else if (undelivered > 0) {
+            badge.textContent = '未送达';
+            badge.classList.add('warn');
+            desc.textContent = `最近有 ${undelivered} 条 Bark 未送达，最近失败时间：${data.last_failed_at || '-'}。`;
+        } else {
+            badge.textContent = '正常';
+            badge.classList.add('ok');
+            const latest = data.latest_push_at ? `最近主动推送：${data.latest_push_at}` : '最近24小时暂无主动推送';
+            desc.textContent = latest;
+        }
+    } catch (e) {
+        const badge = document.getElementById('pushStatusBadge');
+        const desc = document.getElementById('pushStatusDesc');
+        if (badge) {
+            badge.textContent = '异常';
+            badge.classList.remove('ok');
+            badge.classList.add('warn');
+        }
+        if (desc) desc.textContent = '主动推送投递状态读取失败。';
+    }
 }
 
 // ============================================

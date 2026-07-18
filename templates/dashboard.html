@@ -5,7 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Memory Gateway</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=3.5">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=3.6">
 </head>
 <body>
     <div class="dashboard">
@@ -56,6 +56,22 @@
                 <div class="section-header">
                     <h1>记忆管理</h1>
                     <p class="section-desc">查看、编辑、删除已存储的记忆</p>
+                </div>
+
+                <div class="card push-status-card" id="pushStatusCard">
+                    <div class="push-status-main">
+                        <div>
+                            <div class="push-status-title">主动推送投递</div>
+                            <div class="push-status-desc" id="pushStatusDesc">正在检查 Bark 投递状态...</div>
+                        </div>
+                        <span class="push-status-badge" id="pushStatusBadge">检查中</span>
+                    </div>
+                    <div class="push-status-grid">
+                        <div><span>24小时推送</span><b id="pushTotal24">-</b></div>
+                        <div><span>未送达</span><b id="pushUndelivered">-</b></div>
+                        <div><span>可补发</span><b id="pushRetryable">-</b></div>
+                        <div><span>已耗尽</span><b id="pushExhausted">-</b></div>
+                    </div>
                 </div>
 
                 <!-- 分层 Tab -->
@@ -672,6 +688,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.6"></script>
+    <script src="/static/js/dashboard.js?v=3.7"></script>
 </body>
 </html>

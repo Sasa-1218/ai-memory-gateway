@@ -203,6 +203,82 @@ body {
     margin-bottom: 20px;
 }
 
+.push-status-card {
+    padding: 16px 20px;
+}
+
+.push-status-main {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 14px;
+}
+
+.push-status-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.push-status-desc {
+    margin-top: 3px;
+    color: var(--text-light);
+    font-size: 13px;
+}
+
+.push-status-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 72px;
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--info);
+    background: var(--info-bg);
+    white-space: nowrap;
+}
+
+.push-status-badge.ok {
+    color: var(--success);
+    background: var(--success-bg);
+}
+
+.push-status-badge.warn {
+    color: var(--danger);
+    background: var(--danger-bg);
+}
+
+.push-status-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.push-status-grid div {
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-xs);
+    padding: 10px 12px;
+    background: var(--bg);
+}
+
+.push-status-grid span {
+    display: block;
+    color: var(--text-light);
+    font-size: 12px;
+}
+
+.push-status-grid b {
+    display: block;
+    margin-top: 3px;
+    color: var(--text);
+    font-size: 16px;
+    font-weight: 600;
+}
+
 .toolbar-card {
     padding: 16px 20px;
 }

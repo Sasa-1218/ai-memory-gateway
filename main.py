@@ -140,6 +140,11 @@ BARK_TITLE = os.getenv("BARK_TITLE", "Rora")
 BARK_ICON_URL = os.getenv("BARK_ICON_URL", "")
 BARK_SOUND = os.getenv("BARK_SOUND", "")
 BARK_OPEN_URL = os.getenv("BARK_OPEN_URL", "")
+BARK_GROUP = os.getenv("BARK_GROUP", "")
+BARK_LEVEL = os.getenv("BARK_LEVEL", "")
+BARK_IMAGE_URL = os.getenv("BARK_IMAGE_URL", "")
+BARK_BADGE = os.getenv("BARK_BADGE", "")
+BARK_MAX_DELIVERY_ATTEMPTS = 3
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _push_lock = asyncio.Lock()
@@ -1581,14 +1586,33 @@ def clean_push_reply(text: str, hard_limit: int = 120) -> str:
     return "".join(head[:cut + 1] if cut >= 0 else head).strip()
 
 
-async def deliver_bark_push(message: str) -> bool:
+def _parse_bark_badge(value: str):
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        badge = int(raw)
+    except ValueError:
+        print("⚠️ BARK_BADGE值无效，已忽略")
+        return None
+    if badge < 0:
+        print("⚠️ BARK_BADGE值无效，已忽略")
+        return None
+    return badge
+
+
+async def deliver_bark_push(message: str) -> dict:
     if not BARK_DEVICE_KEY:
-        return False
+        return {
+            "attempted": False,
+            "delivered": False,
+            "error_type": "not_configured",
+            "http_status": "not_reported",
+        }
     payload = {
         "device_key": BARK_DEVICE_KEY,
         "title": BARK_TITLE,
         "body": message,
-        "badge": 1,
     }
     if BARK_ICON_URL:
         payload["icon"] = BARK_ICON_URL
@@ -1596,6 +1620,18 @@ async def deliver_bark_push(message: str) -> bool:
         payload["sound"] = BARK_SOUND
     if BARK_OPEN_URL:
         payload["url"] = BARK_OPEN_URL
+    if BARK_GROUP:
+        payload["group"] = BARK_GROUP
+    if BARK_LEVEL:
+        if BARK_LEVEL in {"active", "timeSensitive", "passive", "critical"}:
+            payload["level"] = BARK_LEVEL
+        else:
+            print("⚠️ BARK_LEVEL值无效，已忽略")
+    if BARK_IMAGE_URL:
+        payload["image"] = BARK_IMAGE_URL
+    badge = _parse_bark_badge(BARK_BADGE)
+    if badge is not None:
+        payload["badge"] = badge
 
     try:
         async with httpx.AsyncClient(timeout=20) as client:
@@ -1605,12 +1641,222 @@ async def deliver_bark_push(message: str) -> bool:
                 json=payload,
             )
         if 200 <= response.status_code < 300:
-            return True
+            return {
+                "attempted": True,
+                "delivered": True,
+                "error_type": "none",
+                "http_status": response.status_code,
+            }
         print(f"⚠️ Bark投递失败: HTTP {response.status_code}")
-        return False
+        return {
+            "attempted": True,
+            "delivered": False,
+            "error_type": f"HTTP_{response.status_code}",
+            "http_status": response.status_code,
+        }
     except Exception as e:
         print(f"⚠️ Bark投递异常: {type(e).__name__}")
+        return {
+            "attempted": True,
+            "delivered": False,
+            "error_type": type(e).__name__,
+            "http_status": "not_reported",
+        }
+
+
+def _apply_bark_delivery_result(metadata: dict, result: dict) -> dict:
+    next_meta = dict(metadata)
+    if not result.get("attempted"):
+        next_meta["bark_attempted"] = False
+        next_meta["bark_delivered"] = False
+        next_meta["bark_error_type"] = result.get("error_type", "not_configured")
+        return next_meta
+    attempts = int(next_meta.get("bark_attempts") or 0) + 1
+    next_meta["bark_attempted"] = True
+    next_meta["bark_delivered"] = bool(result.get("delivered"))
+    next_meta["bark_attempts"] = attempts
+    next_meta["bark_error_type"] = result.get("error_type", "unknown")
+    next_meta["bark_http_status"] = result.get("http_status", "not_reported")
+    next_meta["bark_last_attempt_at"] = datetime.now(timezone.utc).isoformat()
+    if attempts >= BARK_MAX_DELIVERY_ATTEMPTS and not result.get("delivered"):
+        next_meta["bark_retry_exhausted"] = True
+    return next_meta
+
+
+async def _save_push_message(session_id: str, content: str, model: str, metadata: dict) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            INSERT INTO conversations (session_id, role, content, model, metadata)
+            VALUES ($1, 'assistant', $2, $3, $4)
+            RETURNING id
+            """,
+            session_id,
+            content,
+            model,
+            json.dumps(metadata, ensure_ascii=False),
+        )
+
+
+async def _update_message_metadata(message_id: int, metadata: dict):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE conversations SET metadata = $1 WHERE id = $2",
+            json.dumps(metadata, ensure_ascii=False),
+            message_id,
+        )
+
+
+def _parse_metadata(meta_str: str | None) -> dict:
+    if not meta_str:
+        return {}
+    try:
+        meta = json.loads(meta_str)
+    except Exception:
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _is_retryable_undelivered_push(meta: dict) -> bool:
+    if meta.get("is_push") is not True or meta.get("push_source") != "shadow_cron":
         return False
+    if meta.get("delivery") != "bark":
+        return False
+    if meta.get("bark_attempted") is not True or meta.get("bark_delivered") is not False:
+        return False
+    return int(meta.get("bark_attempts") or 0) < BARK_MAX_DELIVERY_ATTEMPTS
+
+
+async def retry_undelivered_bark_push(session_id: str) -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, content, created_at, metadata
+            FROM conversations
+            WHERE session_id = $1
+              AND role = 'assistant'
+              AND metadata IS NOT NULL
+            ORDER BY created_at ASC, id ASC
+            LIMIT 300
+            """,
+            session_id,
+        )
+
+    for row in rows:
+        meta = _parse_metadata(row["metadata"])
+        if not _is_retryable_undelivered_push(meta):
+            continue
+        result = await deliver_bark_push(row["content"] or "")
+        next_meta = _apply_bark_delivery_result(meta, result)
+        await _update_message_metadata(row["id"], next_meta)
+        delivered = bool(result.get("delivered"))
+        print(
+            "📮 Bark补发诊断: "
+            f"message_id={row['id']} | "
+            f"attempts={next_meta.get('bark_attempts', meta.get('bark_attempts', 0))} | "
+            f"delivered={str(delivered).lower()} | "
+            f"error_type={next_meta.get('bark_error_type', 'none')} | "
+            f"exhausted={str(bool(next_meta.get('bark_retry_exhausted'))).lower()}",
+            flush=True,
+        )
+        return {
+            "attempted": bool(result.get("attempted")),
+            "delivered": delivered,
+            "message_id": row["id"],
+            "attempts": next_meta.get("bark_attempts", meta.get("bark_attempts", 0)),
+            "error_type": next_meta.get("bark_error_type", "none"),
+            "exhausted": bool(next_meta.get("bark_retry_exhausted")),
+        }
+    return {"attempted": False, "delivered": False, "reason": "no_retryable_push"}
+
+
+def _format_dashboard_time(dt: datetime | None) -> str:
+    if not dt:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(SHANGHAI_TZ).strftime("%m-%d %H:%M")
+
+
+async def get_push_delivery_status(session_id: str) -> dict:
+    if not session_id:
+        return {
+            "enabled": bool(BARK_DEVICE_KEY),
+            "total_24h": 0,
+            "undelivered_count": 0,
+            "retryable_count": 0,
+            "exhausted_count": 0,
+            "last_failed_at": "",
+            "last_error_type": "none",
+            "latest_push_at": "",
+            "latest_delivery_state": "none",
+        }
+    now_utc = datetime.now(timezone.utc)
+    start_utc = now_utc - timedelta(hours=24)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, created_at, metadata
+            FROM conversations
+            WHERE session_id = $1
+              AND role = 'assistant'
+              AND created_at >= $2
+              AND metadata IS NOT NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 300
+            """,
+            session_id,
+            start_utc,
+        )
+
+    total = 0
+    undelivered = 0
+    retryable = 0
+    exhausted = 0
+    last_failed_at = None
+    last_error_type = "none"
+    latest_push_at = None
+    latest_delivery_state = "none"
+    for row in rows:
+        meta = _parse_metadata(row["metadata"])
+        if meta.get("is_push") is not True or meta.get("push_source") != "shadow_cron":
+            continue
+        total += 1
+        if latest_push_at is None:
+            latest_push_at = row["created_at"]
+            if meta.get("delivery") != "bark":
+                latest_delivery_state = "not_configured"
+            elif meta.get("bark_delivered") is True:
+                latest_delivery_state = "delivered"
+            elif meta.get("bark_attempted") is True:
+                latest_delivery_state = "undelivered"
+            else:
+                latest_delivery_state = "unknown"
+        if meta.get("delivery") == "bark" and meta.get("bark_attempted") is True and meta.get("bark_delivered") is False:
+            undelivered += 1
+            if last_failed_at is None:
+                last_failed_at = row["created_at"]
+                last_error_type = meta.get("bark_error_type", "unknown")
+            if int(meta.get("bark_attempts") or 0) < BARK_MAX_DELIVERY_ATTEMPTS:
+                retryable += 1
+            else:
+                exhausted += 1
+    return {
+        "enabled": bool(BARK_DEVICE_KEY),
+        "total_24h": total,
+        "undelivered_count": undelivered,
+        "retryable_count": retryable,
+        "exhausted_count": exhausted,
+        "last_failed_at": _format_dashboard_time(last_failed_at),
+        "last_error_type": last_error_type,
+        "latest_push_at": _format_dashboard_time(latest_push_at),
+        "latest_delivery_state": latest_delivery_state,
+        "max_attempts": BARK_MAX_DELIVERY_ATTEMPTS,
+    }
 
 
 async def generate_shadow_push(session_id: str) -> dict:
@@ -1666,13 +1912,16 @@ async def generate_shadow_push(session_id: str) -> dict:
         _log_push_context_diag(interaction_state, recent_excerpt_count, False, "empty_response")
         return {"pushed": False, "reason": "empty_response"}
 
-    metadata = json.dumps({
+    metadata = {
         "is_push": True,
         "push_source": "shadow_cron",
         "delivery": "bark" if BARK_DEVICE_KEY else "none",
-    }, ensure_ascii=False)
-    await save_message(session_id, "assistant", ai_reply, DEFAULT_MODEL, metadata=metadata)
-    delivered = await deliver_bark_push(ai_reply)
+    }
+    message_id = await _save_push_message(session_id, ai_reply, DEFAULT_MODEL, metadata)
+    delivery_result = await deliver_bark_push(ai_reply)
+    metadata = _apply_bark_delivery_result(metadata, delivery_result)
+    await _update_message_metadata(message_id, metadata)
+    delivered = bool(delivery_result.get("delivered"))
     _log_push_context_diag(interaction_state, recent_excerpt_count, True, "ok")
     print(f"📮 主动推送已落库: session={session_id}, chars={len(ai_reply)}, bark={'ok' if delivered else 'skip_or_fail'}")
     return {
@@ -1879,6 +2128,18 @@ async def api_push_trigger(request: Request):
             return JSONResponse(
                 status_code=500,
                 content={"pushed": False, "reason": "api_key_missing"},
+                headers=no_store_headers,
+            )
+
+        retry_result = await retry_undelivered_bark_push(session_id)
+        if retry_result.get("attempted"):
+            return JSONResponse(
+                content={
+                    "pushed": False,
+                    "reason": "bark_retry",
+                    "retry_delivered": retry_result.get("delivered", False),
+                    "retry_exhausted": retry_result.get("exhausted", False),
+                },
                 headers=no_store_headers,
             )
 
@@ -2377,6 +2638,15 @@ async def dashboard_page(request: Request):
         return HTMLResponse("<h3>记忆系统未启用（设置 MEMORY_ENABLED=true 开启）</h3>")
     
     return templates.TemplateResponse(request, "dashboard.html")
+
+
+@app.get("/api/push/status")
+async def api_push_status():
+    """主动推送投递状态（脱敏，只用于Dashboard展示）"""
+    if not MEMORY_ENABLED:
+        return {"enabled": False, "reason": "memory_disabled"}
+    return await get_push_delivery_status(get_active_session_id())
+
 
 @app.post("/api/conversations/{session_id}/messages")
 async def add_message_to_conversation(session_id: str, request: Request):
