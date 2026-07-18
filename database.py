@@ -9,6 +9,7 @@
 
 import os
 import re
+import hashlib
 from typing import Optional, List
 from datetime import datetime, timedelta, timezone as dt_timezone
 
@@ -42,6 +43,50 @@ MEMORY_HW_SEMANTIC = float(os.getenv("MEMORY_HW_SEMANTIC", "0.35"))
 MEMORY_HW_IMPORTANCE = float(os.getenv("MEMORY_HW_IMPORTANCE", "0.15"))
 MEMORY_HW_RECENCY = float(os.getenv("MEMORY_HW_RECENCY", "0.15"))
 MEMORY_SEMANTIC_THRESHOLD = float(os.getenv("MEMORY_SEMANTIC_THRESHOLD", "0.5"))
+
+
+def _short_hash_text(text: str) -> str:
+    if not text:
+        return "empty"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
+
+
+def _score_range(rows, key: str = "score") -> str:
+    values = []
+    for row in rows or []:
+        try:
+            values.append(float(row[key]))
+        except Exception:
+            continue
+    if not values:
+        return "not_reported"
+    return f"{min(values):.3f}-{max(values):.3f}"
+
+
+def _log_memory_search_diag(
+    mode: str,
+    query: str,
+    candidate_count: int,
+    hit_count: int,
+    filtered_count: int = 0,
+    score_range: str = "not_reported",
+    **extra,
+):
+    extra_text = " | ".join(f"{k}={v}" for k, v in extra.items())
+    if extra_text:
+        extra_text = " | " + extra_text
+    print(
+        "🔍 记忆搜索诊断: "
+        f"mode={mode} | "
+        f"query_chars={len(query or str())} | "
+        f"query_hash={_short_hash_text(query or str())} | "
+        f"candidates={candidate_count} | "
+        f"hits={hit_count} | "
+        f"filtered={filtered_count} | "
+        f"score_range={score_range}"
+        f"{extra_text}",
+        flush=True,
+    )
 
 
 # ============================================================
@@ -727,23 +772,29 @@ async def search_memories(query: str, limit: int = 10):
         # 过滤低分记忆
         if MIN_SCORE_THRESHOLD > 0:
             before_count = len(results)
-            results = [r for r in results if r['score'] >= MIN_SCORE_THRESHOLD]
+            results = [r for r in results if r["score"] >= MIN_SCORE_THRESHOLD]
             filtered = before_count - len(results)
         else:
+            before_count = len(results)
             filtered = 0
         
+        _log_memory_search_diag(
+            "keyword",
+            query,
+            candidate_count=before_count,
+            hit_count=len(results),
+            filtered_count=filtered,
+            score_range=_score_range(results),
+            keyword_count=len(keywords),
+            limit=limit,
+        )
+
         if results:
-            print(f"🔍 搜索 '{query}' → 关键词 {keywords[:8]}{'...' if len(keywords)>8 else ''} → 命中 {len(results)} 条" + (f"（过滤 {filtered} 条低分）" if filtered else ""))
-            for r in results[:3]:
-                print(f"   📌 [score={r['score']:.3f}] (hits={r['hit_count']}, imp={r['importance']}) {r['content'][:60]}...")
-            
             ids = [r["id"] for r in results]
             await conn.execute(
                 "UPDATE memories SET last_accessed = NOW() WHERE id = ANY($1::int[])",
                 ids,
             )
-        else:
-            print(f"🔍 搜索 '{query}' → 关键词 {keywords[:8]} → 无结果" + (f"（{filtered} 条被分数阈值过滤）" if filtered else ""))
         
         return results
 
@@ -861,7 +912,18 @@ async def search_memories_hybrid(query: str, limit: int = 10):
                 print(f"   🔢 向量路: {sem_passed}/{sem_total}条通过阈值（最高sim={sem_max:.3f}）")
         
         if not candidates:
-            print(f"🔍 混合搜索 '{query}' → 两路均无结果")
+            _log_memory_search_diag(
+                "hybrid" if query_embedding else "keyword",
+                query,
+                candidate_count=0,
+                hit_count=0,
+                filtered_count=0,
+                score_range="not_reported",
+                keyword_count=len(keywords),
+                vector_enabled=bool(query_embedding),
+                semantic_candidates=locals().get("sem_total", 0),
+                semantic_passed=locals().get("sem_passed", 0),
+            )
             return []
         
         # ---- 归一化 + 加权 ----
@@ -897,27 +959,34 @@ async def search_memories_hybrid(query: str, limit: int = 10):
         # 过滤低分
         if MIN_SCORE_THRESHOLD > 0:
             before_count = len(final)
-            final = [r for r in final if r['score'] >= MIN_SCORE_THRESHOLD]
+            final = [r for r in final if r["score"] >= MIN_SCORE_THRESHOLD]
             filtered = before_count - len(final)
         else:
+            before_count = len(final)
             filtered = 0
         
         results = final[:limit]
+        _log_memory_search_diag(
+            "hybrid" if query_embedding else "keyword",
+            query,
+            candidate_count=before_count,
+            hit_count=len(results),
+            filtered_count=filtered,
+            score_range=_score_range(results),
+            keyword_count=len(keywords),
+            vector_enabled=bool(query_embedding),
+            semantic_candidates=locals().get("sem_total", 0),
+            semantic_passed=locals().get("sem_passed", 0),
+            combined_candidates=len(candidates),
+            limit=limit,
+        )
         
         if results:
-            mode_tag = "混合" if query_embedding else "关键词"
-            kw_tag = f"关键词 {keywords[:6]}" if keywords else "无关键词"
-            print(f"🔍 {mode_tag}搜索 '{query}' → {kw_tag} → 命中 {len(results)} 条" + (f"（过滤 {filtered} 条低分）" if filtered else ""))
-            for r in results[:3]:
-                print(f"   📌 [score={r['score']:.3f}] (kw={r['hit_count']}, sim={r['similarity']:.2f}, imp={r['importance']}) {r['content'][:60]}...")
-            
             ids = [r["id"] for r in results]
             await conn.execute(
                 "UPDATE memories SET last_accessed = NOW() WHERE id = ANY($1::int[])",
                 ids,
             )
-        else:
-            print(f"🔍 混合搜索 '{query}' → 无结果" + (f"（{filtered} 条被过滤）" if filtered else ""))
         
         return [dict(r) for r in results]
 

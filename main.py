@@ -20,6 +20,7 @@ import secrets
 import random
 import re
 import hashlib
+import logging
 import httpx
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
@@ -365,14 +366,15 @@ async def gateway_auth_middleware(request: Request, call_next):
     if request.method == "OPTIONS":
         return await call_next(request)
 
-    # 从 header 或 query 参数获取密钥
-    provided_key = (
-        request.headers.get("X-Gateway-Key", "")
-        or request.query_params.get("gateway_key", "")
-    )
+    # 从 header 或 query 参数获取密钥。保持原有优先级：Header 优先，缺 Header 时才用 query。
+    header_key = request.headers.get("X-Gateway-Key", "")
+    query_key = request.query_params.get("gateway_key", "")
+    provided_key = header_key or query_key
 
     # compare_digest 防时序侧信道攻击
-    if not secrets.compare_digest(provided_key, GATEWAY_SECRET):
+    auth_success = secrets.compare_digest(provided_key, GATEWAY_SECRET)
+    _log_auth_diag(request, header_key, query_key, auth_success)
+    if not auth_success:
         return JSONResponse(
             status_code=401,
             content={"error": "Unauthorized. Provide X-Gateway-Key header or gateway_key parameter."},
@@ -527,6 +529,58 @@ def _log_cache_build_diag(diag: dict):
         f"sent_breakpoints={diag.get('sent_breakpoints', 'not_reported')}",
         flush=True,
     )
+
+
+
+def _redact_gateway_key_in_text(value: str) -> str:
+    if not value or "gateway_key=" not in value:
+        return value
+    return re.sub(r"([?&]gateway_key=)[^&\s\"]*", r"\1[REDACTED]", value)
+
+
+class _GatewayAccessLogFilter(logging.Filter):
+    def filter(self, record):
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _redact_gateway_key_in_text(arg) if isinstance(arg, str) else arg
+                for arg in record.args
+            )
+        elif isinstance(record.args, dict):
+            record.args = {
+                k: _redact_gateway_key_in_text(v) if isinstance(v, str) else v
+                for k, v in record.args.items()
+            }
+        if isinstance(record.msg, str):
+            record.msg = _redact_gateway_key_in_text(record.msg)
+        return True
+
+
+def _install_access_log_redaction():
+    logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _GatewayAccessLogFilter) for f in logger.filters):
+        logger.addFilter(_GatewayAccessLogFilter())
+
+
+def _log_auth_diag(request: Request, header_key: str, query_key: str, auth_success: bool):
+    if request.url.path != "/v1/chat/completions":
+        return
+    header_present = bool(header_key)
+    query_key_present = bool(query_key)
+    header_valid = header_present and secrets.compare_digest(header_key, GATEWAY_SECRET)
+    query_key_valid = query_key_present and secrets.compare_digest(query_key, GATEWAY_SECRET)
+    print(
+        "🔐 鉴权诊断: "
+        f"path=/v1/chat/completions | "
+        f"header_present={str(header_present).lower()} | "
+        f"header_valid={str(header_valid).lower()} | "
+        f"query_key_present={str(query_key_present).lower()} | "
+        f"query_key_valid={str(query_key_valid).lower()} | "
+        f"auth_success={str(auth_success).lower()}",
+        flush=True,
+    )
+
+
+_install_access_log_redaction()
 
 
 def _log_usage_diag(prefix: str, usage: dict | None):
@@ -3475,4 +3529,5 @@ if __name__ == "__main__":
         print(f"⚡ 强制流式传输：开启")
     if REASONING_EFFORT:
         print(f"🧠 推理参数注入：{REASONING_EFFORT}")
+    _install_access_log_redaction()
     uvicorn.run(app, host="0.0.0.0", port=PORT)
