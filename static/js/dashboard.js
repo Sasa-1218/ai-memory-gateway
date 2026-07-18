@@ -193,11 +193,15 @@ async function loadPushStatus() {
         document.getElementById('pushTotal24').textContent = data.total_24h ?? 0;
         document.getElementById('pushUndelivered').textContent = data.undelivered_count ?? 0;
         document.getElementById('pushRetryable').textContent = data.retryable_count ?? 0;
-        document.getElementById('pushExhausted').textContent = data.exhausted_count ?? 0;
+        const unansweredEl = document.getElementById('pushUnanswered');
+        if (unansweredEl) unansweredEl.textContent = data.consecutive_unanswered_pushes ?? 0;
 
         const undelivered = Number(data.undelivered_count || 0);
         const exhausted = Number(data.exhausted_count || 0);
         const retryable = Number(data.retryable_count || 0);
+        const stopped = Number(data.retry_stopped_count || 0);
+        const generated = data.latest_generated_at || '';
+        const deliveredAt = data.latest_delivered_at || '';
         badge.classList.remove('ok', 'warn');
         if (!data.enabled) {
             badge.textContent = '未配置';
@@ -209,6 +213,9 @@ async function loadPushStatus() {
         } else if (retryable > 0) {
             badge.textContent = '补发中';
             desc.textContent = `有 ${retryable} 条主动推送等待下次 cron 自动补发，最近错误：${data.last_error_type || 'unknown'}。`;
+        } else if (stopped > 0) {
+            badge.textContent = '已停止';
+            desc.textContent = `有 ${stopped} 条未送达推送因你已回复而停止补发。`;
         } else if (undelivered > 0) {
             badge.textContent = '未送达';
             badge.classList.add('warn');
@@ -216,8 +223,11 @@ async function loadPushStatus() {
         } else {
             badge.textContent = '正常';
             badge.classList.add('ok');
-            const latest = data.latest_push_at ? `最近主动推送：${data.latest_push_at}` : '最近24小时暂无主动推送';
-            desc.textContent = latest;
+            if (generated || deliveredAt) {
+                desc.textContent = `最近生成：${generated || '-'}；最近送达：${deliveredAt || '-'}`;
+            } else {
+                desc.textContent = '最近24小时暂无主动推送';
+            }
         }
     } catch (e) {
         const badge = document.getElementById('pushStatusBadge');

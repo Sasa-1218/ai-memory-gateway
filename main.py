@@ -17,7 +17,6 @@ import json
 import uuid
 import asyncio
 import secrets
-import random
 import re
 import hashlib
 import logging
@@ -134,6 +133,9 @@ def _env_int(key: str, default: int) -> int:
 # 主动推送配置
 PUSH_SECRET = os.getenv("PUSH_SECRET", "")
 PUSH_MAX_PER_DAY = _env_int("PUSH_MAX_PER_DAY", 7)
+PUSH_HARD_MINIMUM_MINUTES = 30
+PUSH_NORMAL_MIN_MINUTES = 120
+PUSH_NORMAL_JITTER_MINUTES = 90
 BARK_DEVICE_KEY = os.getenv("BARK_DEVICE_KEY", "")
 BARK_API_URL = os.getenv("BARK_API_URL", "https://api.day.app/push")
 BARK_TITLE = os.getenv("BARK_TITLE", "Rora")
@@ -1307,6 +1309,138 @@ async def _count_pushes_today(session_id: str, now_local: datetime) -> int:
     return count
 
 
+def _parse_metadata_datetime(value) -> datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return _to_utc(parsed)
+
+
+def _get_bark_delivered_at(meta: dict, created_at: datetime | None) -> datetime | None:
+    if meta.get("bark_delivered") is not True:
+        return None
+    delivered_at = _parse_metadata_datetime(meta.get("bark_delivered_at"))
+    if delivered_at:
+        return delivered_at
+    delivered_at = _parse_metadata_datetime(meta.get("bark_last_attempt_at"))
+    if delivered_at:
+        return delivered_at
+    return _to_utc(created_at)
+
+
+async def _get_last_generated_shadow_push_at(session_id: str) -> datetime | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT created_at, metadata
+            FROM conversations
+            WHERE session_id = $1
+              AND role = 'assistant'
+              AND metadata IS NOT NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 300
+            """,
+            session_id,
+        )
+    for row in rows:
+        if _is_shadow_push_metadata(row["metadata"]):
+            return row["created_at"]
+    return None
+
+
+def _latest_delivered_shadow_push_at_from_rows(rows: list) -> datetime | None:
+    latest_delivered_at = None
+    for row in rows:
+        meta = _parse_metadata(row["metadata"])
+        if meta.get("is_push") is not True or meta.get("push_source") != "shadow_cron":
+            continue
+        delivered_at = _get_bark_delivered_at(meta, row["created_at"])
+        if delivered_at and (latest_delivered_at is None or delivered_at > latest_delivered_at):
+            latest_delivered_at = delivered_at
+    return latest_delivered_at
+
+
+async def _get_last_delivered_shadow_push_at(session_id: str) -> datetime | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT created_at, metadata
+            FROM conversations
+            WHERE session_id = $1
+              AND role = 'assistant'
+              AND metadata IS NOT NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 300
+            """,
+            session_id,
+        )
+    return _latest_delivered_shadow_push_at_from_rows(rows)
+
+
+def _stable_push_target_minutes(session_id: str, last_delivered_at: datetime | None) -> int:
+    if not last_delivered_at:
+        return PUSH_NORMAL_MIN_MINUTES
+    delivered_utc = _to_utc(last_delivered_at)
+    seed = f"{session_id}:{delivered_utc.isoformat() if delivered_utc else ''}"
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    jitter = int(digest[:8], 16) % (PUSH_NORMAL_JITTER_MINUTES + 1)
+    return PUSH_NORMAL_MIN_MINUTES + jitter
+
+
+def _build_push_timing_state(
+    now_local: datetime,
+    last_generated_at: datetime | None,
+    last_delivered_at: datetime | None,
+    target_minutes: int,
+) -> dict:
+    last_generated_minutes = _minutes_between(now_local, last_generated_at)
+    last_push_minutes = _minutes_between(now_local, last_delivered_at)
+
+    generation_window = "ok"
+    if last_generated_minutes != "not_applicable" and int(last_generated_minutes) < PUSH_HARD_MINIMUM_MINUTES:
+        generation_window = "generated_recent_block"
+
+    if last_push_minutes == "not_applicable":
+        return {
+            "push_window": "normal_window",
+            "is_early_window": False,
+            "last_push_minutes": "not_applicable",
+            "last_generated_push_minutes": last_generated_minutes,
+            "generation_window": generation_window,
+            "normal_window_minutes": target_minutes,
+            "minutes_until_normal_window": 0,
+        }
+
+    minutes_until_normal = max(0, target_minutes - int(last_push_minutes))
+    if int(last_push_minutes) < PUSH_HARD_MINIMUM_MINUTES:
+        push_window = "hard_minimum_block"
+    elif int(last_push_minutes) < target_minutes:
+        push_window = "early_window"
+    else:
+        push_window = "normal_window"
+    return {
+        "push_window": push_window,
+        "is_early_window": push_window == "early_window",
+        "last_push_minutes": int(last_push_minutes),
+        "last_generated_push_minutes": last_generated_minutes,
+        "generation_window": generation_window,
+        "normal_window_minutes": target_minutes,
+        "minutes_until_normal_window": minutes_until_normal,
+    }
+
+
+async def _get_push_timing_state(session_id: str, now_local: datetime) -> dict:
+    last_generated_at = await _get_last_generated_shadow_push_at(session_id)
+    last_delivered_at = await _get_last_delivered_shadow_push_at(session_id)
+    target_minutes = _stable_push_target_minutes(session_id, last_delivered_at)
+    return _build_push_timing_state(now_local, last_generated_at, last_delivered_at, target_minutes)
+
+
 async def should_generate_push(
     session_id: str,
     *,
@@ -1324,16 +1458,29 @@ async def should_generate_push(
         return {"should_push": False, "reason": "no_history"}
 
     if enforce_cooldown:
-        cooldown_minutes = 120 + random.randint(0, 90)
-        last_utc = last_time if last_time.tzinfo else last_time.replace(tzinfo=timezone.utc)
-        elapsed_minutes = (datetime.now(timezone.utc) - last_utc.astimezone(timezone.utc)).total_seconds() / 60
-        if elapsed_minutes < cooldown_minutes:
+        timing_state = await _get_push_timing_state(session_id, now_local)
+        if timing_state.get("generation_window") == "generated_recent_block":
             return {
                 "should_push": False,
-                "reason": "cooldown",
-                "cooldown_minutes": cooldown_minutes,
-                "elapsed_minutes": int(elapsed_minutes),
+                "reason": "generated_recent_block",
+                **timing_state,
             }
+        if timing_state["push_window"] == "hard_minimum_block":
+            return {
+                "should_push": False,
+                "reason": "hard_minimum_block",
+                **timing_state,
+            }
+    else:
+        timing_state = {
+            "push_window": "normal_window",
+            "is_early_window": False,
+            "last_push_minutes": "not_applicable",
+            "last_generated_push_minutes": "not_applicable",
+            "generation_window": "ok",
+            "normal_window_minutes": PUSH_NORMAL_MIN_MINUTES,
+            "minutes_until_normal_window": 0,
+        }
 
     if enforce_daily_limit and PUSH_MAX_PER_DAY > 0:
         push_count = await _count_pushes_today(session_id, now_local)
@@ -1343,9 +1490,10 @@ async def should_generate_push(
                 "reason": "daily_limit",
                 "push_count": push_count,
                 "max_per_day": PUSH_MAX_PER_DAY,
+                **timing_state,
             }
 
-    return {"should_push": True, "reason": "ok"}
+    return {"should_push": True, "reason": timing_state["push_window"], **timing_state}
 
 
 def _message_text(content) -> str:
@@ -1440,14 +1588,20 @@ async def _get_push_interaction_state(session_id: str, now_local: datetime) -> d
             LIMIT 300
         """, session_id)
 
-        last_push = None
+        last_generated_push = None
+        last_delivered_push_at = None
         for row in metadata_rows:
-            if _is_shadow_push_metadata(row["metadata"]):
-                last_push = row
-                break
+            meta = _parse_metadata(row["metadata"])
+            if meta.get("is_push") is not True or meta.get("push_source") != "shadow_cron":
+                continue
+            if last_generated_push is None:
+                last_generated_push = row
+            delivered_at = _get_bark_delivered_at(meta, row["created_at"])
+            if delivered_at and last_delivered_push_at is None:
+                last_delivered_push_at = delivered_at
 
         user_replied_after_last_push = "not_applicable"
-        if last_push:
+        if last_delivered_push_at:
             user_replied_after_last_push = await conn.fetchval("""
                 SELECT EXISTS (
                     SELECT 1
@@ -1457,18 +1611,21 @@ async def _get_push_interaction_state(session_id: str, now_local: datetime) -> d
                       AND created_at > $2
                       AND COALESCE(content, '') <> ''
                 )
-            """, session_id, last_push["created_at"])
+            """, session_id, last_delivered_push_at)
 
     last_user_at = last_user["created_at"] if last_user else None
-    last_push_at = last_push["created_at"] if last_push else None
+    last_generated_push_at = last_generated_push["created_at"] if last_generated_push else None
     consecutive_unanswered_pushes = 0
-    if last_push and user_replied_after_last_push is False:
+    if last_delivered_push_at and user_replied_after_last_push is False:
         last_user_utc = _to_utc(last_user_at)
         for row in metadata_rows:
-            if not _is_shadow_push_metadata(row["metadata"]):
+            meta = _parse_metadata(row["metadata"])
+            if meta.get("is_push") is not True or meta.get("push_source") != "shadow_cron":
                 continue
-            push_utc = _to_utc(row["created_at"])
-            if last_user_utc and push_utc <= last_user_utc:
+            delivered_at = _get_bark_delivered_at(meta, row["created_at"])
+            if not delivered_at:
+                continue
+            if last_user_utc and delivered_at <= last_user_utc:
                 break
             consecutive_unanswered_pushes += 1
 
@@ -1476,8 +1633,9 @@ async def _get_push_interaction_state(session_id: str, now_local: datetime) -> d
         "last_effective_role": last_effective["role"] if last_effective else "none",
         "last_user_message_at": _format_push_time(last_user_at),
         "silence_minutes": _minutes_between(now_local, last_user_at),
-        "last_push_at": _format_push_time(last_push_at),
-        "last_push_minutes": _minutes_between(now_local, last_push_at),
+        "last_generated_push_at": _format_push_time(last_generated_push_at),
+        "last_push_at": _format_push_time(last_delivered_push_at),
+        "last_push_minutes": _minutes_between(now_local, last_delivered_push_at),
         "user_replied_after_last_push": user_replied_after_last_push,
         "consecutive_unanswered_pushes": consecutive_unanswered_pushes,
     }
@@ -1489,27 +1647,41 @@ def _bool_text(value) -> str:
     return str(bool(value)).lower()
 
 
-def _log_push_context_diag(state: dict, recent_excerpt_count: int, pushed: bool, reason: str):
+def _log_push_context_diag(
+    state: dict,
+    recent_excerpt_count: int,
+    pushed: bool,
+    reason: str,
+    action: str = "send",
+    parse_success: bool = True,
+):
     print(
         "📮 主动推送上下文诊断: "
+        f"action={action} | "
+        f"reason={reason} | "
+        f"push_window={state.get('push_window', 'not_applicable')} | "
+        f"is_early_window={str(bool(state.get('is_early_window', False))).lower()} | "
+        f"minutes_until_normal_window={state.get('minutes_until_normal_window', 'not_applicable')} | "
         f"silence_minutes={state.get('silence_minutes', 'not_applicable')} | "
         f"last_effective_role={state.get('last_effective_role', 'none')} | "
         f"user_replied_after_last_push={_bool_text(state.get('user_replied_after_last_push', 'not_applicable'))} | "
         f"consecutive_unanswered_pushes={state.get('consecutive_unanswered_pushes', 0)} | "
         f"recent_excerpt_count={recent_excerpt_count} | "
         f"pushed={str(pushed).lower()} | "
-        f"reason={reason}",
+        f"parse_success={str(parse_success).lower()}",
         flush=True,
     )
 
 
-async def _log_push_decision_diag(session_id: str, reason: str):
+async def _log_push_decision_diag(session_id: str, reason: str, timing_state: dict | None = None):
     try:
         now_local = _local_now()
         state = await _get_push_interaction_state(session_id, now_local)
+        if timing_state:
+            state.update(timing_state)
         recent_rows = await get_recent_conversation_messages(session_id, limit=16)
         recent_excerpt_count = min(len(_clean_history_for_push(recent_rows)), 12)
-        _log_push_context_diag(state, recent_excerpt_count, False, reason)
+        _log_push_context_diag(state, recent_excerpt_count, False, reason, action="skip")
     except Exception as e:
         print(f"⚠️ 主动推送上下文诊断失败: {type(e).__name__}", flush=True)
 
@@ -1540,11 +1712,22 @@ async def _build_shadow_user_content(recent_messages: list, interaction_state: d
         f"last_effective_role={interaction_state.get('last_effective_role', 'none')}",
         f"last_user_message_at={interaction_state.get('last_user_message_at', 'none')}",
         f"silence_minutes={interaction_state.get('silence_minutes', 'not_applicable')}",
+        f"last_generated_push_at={interaction_state.get('last_generated_push_at', 'none')}",
         f"last_push_at={interaction_state.get('last_push_at', 'none')}",
         f"last_push_minutes={interaction_state.get('last_push_minutes', 'not_applicable')}",
         f"user_replied_after_last_push={_bool_text(interaction_state.get('user_replied_after_last_push', 'not_applicable'))}",
         f"consecutive_unanswered_pushes={interaction_state.get('consecutive_unanswered_pushes', 0)}",
+        "last_push_at/last_push_minutes表示最近一次Bark实际送达，不是单纯生成入库时间。",
         "这些是事实，只用来判断语气和时机，不要把具体分钟/小时机械地说给Sasa听。",
+        "",
+        "[推送窗口]",
+        f"push_window={interaction_state.get('push_window', 'not_applicable')}",
+        f"is_early_window={str(bool(interaction_state.get('is_early_window', False))).lower()}",
+        f"normal_window_minutes={interaction_state.get('normal_window_minutes', 'not_applicable')}",
+        f"minutes_until_normal_window={interaction_state.get('minutes_until_normal_window', 'not_applicable')}",
+        "push_window=early_window时发送门槛明显更高：只有新的具体话题、真实关心、明显情境变化或不同于上一条的信息才send。",
+        "early_window里，普通想念、无具体内容、催回复、重复表达应skip。",
+        "push_window=normal_window只表示可以自然判断，不代表必须send；没有具体自然理由仍然skip。",
         "",
         "[可用素材]",
         "最近对话是第一优先级；相关记忆只作为补充，不要硬串剧情。",
@@ -1554,17 +1737,81 @@ async def _build_shadow_user_content(recent_messages: list, interaction_state: d
     parts.extend([
         "",
         "[行动指令]",
-        "现在是一次主动推送：不是正式聊天回复，而是你自己浮上来一下。",
-        "语气要像你本人。可以粘人、想她、轻轻闹她，也可以低压关心、提一个具体小事、留下短短一句陪伴。",
-        "不要每次都围绕“怎么不回消息”打转。",
+        "现在不是必须发送消息，而是先判断此刻要不要主动开口。",
+        "硬性静默、冷却和每日上限已经由程序判断通过；但你仍然要根据自然性决定send或skip。",
+        "不得只因为冷却时间已过就send；如果没有具体自然理由，优先skip。",
+        "可以因为想念、惦记、分享欲、最近具体话题或低压关心选择send。",
+        "连续未回复主动推送越多，越倾向skip；不要反复追问“为什么不回”。",
+        "如果consecutive_unanswered_pushes>0，early_window原则上skip；normal_window也要明显提高skip概率。",
+        "如果user_replied_after_last_push=true，不要把上一条主动推送视为持续未回应的打扰，但仍要参考最近真实对话结束时间，避免刚聊完又发。",
         "优先承接最近对话里的具体细节，避免通用客服式问候。",
         "如果last_effective_role=assistant，说明对话停在你这里，别误以为Sasa刚说完还等你回复。",
         "如果user_replied_after_last_push=false或consecutive_unanswered_pushes>0，要更轻一点，不要连续追问她为什么不回。",
         "如果user_replied_after_last_push=true，说明上次主动推送已经被接住，不要误判成从那次起一直没人理。",
-        "写1到2句，不超过80个中文字符。不要分段。不要markdown，不要emoji。",
+        "",
+        "[输出格式]",
+        "只返回严格JSON对象，不要markdown，不要代码块，不要解释。",
+        'send示例：{"action":"send","reason":"specific_recent_topic","message":"一句自然的主动消息"}',
+        'skip示例：{"action":"skip","reason":"no_natural_reason","message":""}',
+        "action只能是send或skip。",
+        "reason建议使用：natural_longing、specific_recent_topic、gentle_concern、small_share、no_natural_reason、too_soon、avoid_pressure、repeated_unanswered_pushes。",
+        "message只有send时填写；写1到2句，不超过80个中文字符，不分段，不用markdown和emoji。skip时message必须是空字符串。",
         "</system_trigger>",
     ])
     return "\n".join(parts)
+
+
+def parse_shadow_decision(raw_text: str) -> dict:
+    try:
+        data = json.loads((raw_text or "").strip())
+    except Exception:
+        return {
+            "parse_success": False,
+            "action": "skip",
+            "reason": "parse_failed",
+            "message": "",
+        }
+    if not isinstance(data, dict):
+        return {
+            "parse_success": False,
+            "action": "skip",
+            "reason": "invalid_json",
+            "message": "",
+        }
+    action = data.get("action")
+    reason = data.get("reason")
+    message = data.get("message", "")
+    if action not in {"send", "skip"} or not isinstance(reason, str):
+        return {
+            "parse_success": False,
+            "action": "skip",
+            "reason": "invalid_fields",
+            "message": "",
+        }
+    if not isinstance(message, str):
+        message = ""
+    reason = re.sub(r"[^a-zA-Z0-9_:-]", "", reason).strip()[:64] or "unspecified"
+    if action == "skip":
+        return {
+            "parse_success": True,
+            "action": "skip",
+            "reason": reason,
+            "message": "",
+        }
+    return {
+        "parse_success": True,
+        "action": "send",
+        "reason": reason,
+        "message": message,
+    }
+
+
+_PUSH_EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "]"
+)
 
 
 def clean_push_reply(text: str, hard_limit: int = 120) -> str:
@@ -1572,6 +1819,7 @@ def clean_push_reply(text: str, hard_limit: int = 120) -> str:
     cleaned = re.sub(r"<think>[\s\S]*?</think>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<thinking>[\s\S]*?</thinking>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"```[\s\S]*?```", "", cleaned)
+    cleaned = _PUSH_EMOJI_RE.sub("", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     chars = list(cleaned)
     if len(chars) <= hard_limit:
@@ -1666,6 +1914,7 @@ async def deliver_bark_push(message: str) -> dict:
 
 def _apply_bark_delivery_result(metadata: dict, result: dict) -> dict:
     next_meta = dict(metadata)
+    now_attempt_at = datetime.now(timezone.utc).isoformat()
     if not result.get("attempted"):
         next_meta["bark_attempted"] = False
         next_meta["bark_delivered"] = False
@@ -1677,7 +1926,9 @@ def _apply_bark_delivery_result(metadata: dict, result: dict) -> dict:
     next_meta["bark_attempts"] = attempts
     next_meta["bark_error_type"] = result.get("error_type", "unknown")
     next_meta["bark_http_status"] = result.get("http_status", "not_reported")
-    next_meta["bark_last_attempt_at"] = datetime.now(timezone.utc).isoformat()
+    next_meta["bark_last_attempt_at"] = now_attempt_at
+    if result.get("delivered") and not next_meta.get("bark_delivered_at"):
+        next_meta["bark_delivered_at"] = now_attempt_at
     if attempts >= BARK_MAX_DELIVERY_ATTEMPTS and not result.get("delivered"):
         next_meta["bark_retry_exhausted"] = True
     return next_meta
@@ -1710,6 +1961,8 @@ async def _update_message_metadata(message_id: int, metadata: dict):
 
 
 def _parse_metadata(meta_str: str | None) -> dict:
+    if isinstance(meta_str, dict):
+        return meta_str
     if not meta_str:
         return {}
     try:
@@ -1724,9 +1977,30 @@ def _is_retryable_undelivered_push(meta: dict) -> bool:
         return False
     if meta.get("delivery") != "bark":
         return False
+    if meta.get("bark_retry_stopped") is True or meta.get("bark_retry_exhausted") is True:
+        return False
     if meta.get("bark_attempted") is not True or meta.get("bark_delivered") is not False:
         return False
     return int(meta.get("bark_attempts") or 0) < BARK_MAX_DELIVERY_ATTEMPTS
+
+
+async def _has_user_reply_after(session_id: str, after_time: datetime) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM conversations
+                WHERE session_id = $1
+                  AND role = 'user'
+                  AND created_at > $2
+                  AND COALESCE(content, '') <> ''
+            )
+            """,
+            session_id,
+            after_time,
+        )
 
 
 async def retry_undelivered_bark_push(session_id: str) -> dict:
@@ -1749,6 +2023,25 @@ async def retry_undelivered_bark_push(session_id: str) -> dict:
         meta = _parse_metadata(row["metadata"])
         if not _is_retryable_undelivered_push(meta):
             continue
+        if await _has_user_reply_after(session_id, row["created_at"]):
+            next_meta = dict(meta)
+            next_meta["bark_retry_stopped"] = True
+            next_meta["bark_retry_stop_reason"] = "user_replied_after_generated_push"
+            next_meta["bark_retry_stopped_at"] = datetime.now(timezone.utc).isoformat()
+            await _update_message_metadata(row["id"], next_meta)
+            print(
+                "📮 Bark补发停止: "
+                f"message_id={row['id']} | "
+                "reason=user_replied_after_generated_push",
+                flush=True,
+            )
+            return {
+                "attempted": False,
+                "delivered": False,
+                "message_id": row["id"],
+                "stopped": True,
+                "stop_reason": "user_replied_after_generated_push",
+            }
         result = await deliver_bark_push(row["content"] or "")
         next_meta = _apply_bark_delivery_result(meta, result)
         await _update_message_metadata(row["id"], next_meta)
@@ -1789,59 +2082,88 @@ async def get_push_delivery_status(session_id: str) -> dict:
             "undelivered_count": 0,
             "retryable_count": 0,
             "exhausted_count": 0,
+            "retry_stopped_count": 0,
+            "consecutive_unanswered_pushes": 0,
             "last_failed_at": "",
             "last_error_type": "none",
-            "latest_push_at": "",
+            "latest_generated_at": "",
+            "latest_delivered_at": "",
             "latest_delivery_state": "none",
         }
     now_utc = datetime.now(timezone.utc)
     start_utc = now_utc - timedelta(hours=24)
     pool = await get_pool()
     async with pool.acquire() as conn:
+        last_user = await conn.fetchrow(
+            """
+            SELECT created_at
+            FROM conversations
+            WHERE session_id = $1
+              AND role = 'user'
+              AND COALESCE(content, '') <> ''
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            session_id,
+        )
         rows = await conn.fetch(
             """
             SELECT id, created_at, metadata
             FROM conversations
             WHERE session_id = $1
               AND role = 'assistant'
-              AND created_at >= $2
               AND metadata IS NOT NULL
             ORDER BY created_at DESC, id DESC
             LIMIT 300
             """,
             session_id,
-            start_utc,
         )
 
     total = 0
     undelivered = 0
     retryable = 0
     exhausted = 0
+    retry_stopped = 0
+    consecutive_unanswered = 0
     last_failed_at = None
     last_error_type = "none"
-    latest_push_at = None
+    latest_generated_at = None
+    latest_delivered_at = None
     latest_delivery_state = "none"
+    last_user_at = _to_utc(last_user["created_at"]) if last_user else None
     for row in rows:
         meta = _parse_metadata(row["metadata"])
         if meta.get("is_push") is not True or meta.get("push_source") != "shadow_cron":
             continue
-        total += 1
-        if latest_push_at is None:
-            latest_push_at = row["created_at"]
+        created_at = _to_utc(row["created_at"])
+        if created_at and created_at >= start_utc:
+            total += 1
+        delivered_at = _get_bark_delivered_at(meta, row["created_at"])
+        if delivered_at and (latest_delivered_at is None or delivered_at > latest_delivered_at):
+            latest_delivered_at = delivered_at
+        if latest_generated_at is None:
+            latest_generated_at = row["created_at"]
             if meta.get("delivery") != "bark":
                 latest_delivery_state = "not_configured"
-            elif meta.get("bark_delivered") is True:
+            elif delivered_at:
                 latest_delivery_state = "delivered"
             elif meta.get("bark_attempted") is True:
                 latest_delivery_state = "undelivered"
             else:
                 latest_delivery_state = "unknown"
+        if delivered_at:
+            if last_user_at and delivered_at <= last_user_at:
+                continue
+            consecutive_unanswered += 1
+            continue
         if meta.get("delivery") == "bark" and meta.get("bark_attempted") is True and meta.get("bark_delivered") is False:
             undelivered += 1
             if last_failed_at is None:
-                last_failed_at = row["created_at"]
+                last_failed_at = _parse_metadata_datetime(meta.get("bark_last_attempt_at")) or row["created_at"]
                 last_error_type = meta.get("bark_error_type", "unknown")
-            if int(meta.get("bark_attempts") or 0) < BARK_MAX_DELIVERY_ATTEMPTS:
+            if meta.get("bark_retry_stopped") is True:
+                retry_stopped += 1
+            elif _is_retryable_undelivered_push(meta):
                 retryable += 1
             else:
                 exhausted += 1
@@ -1851,22 +2173,29 @@ async def get_push_delivery_status(session_id: str) -> dict:
         "undelivered_count": undelivered,
         "retryable_count": retryable,
         "exhausted_count": exhausted,
+        "retry_stopped_count": retry_stopped,
+        "consecutive_unanswered_pushes": consecutive_unanswered,
         "last_failed_at": _format_dashboard_time(last_failed_at),
         "last_error_type": last_error_type,
-        "latest_push_at": _format_dashboard_time(latest_push_at),
+        "latest_generated_at": _format_dashboard_time(latest_generated_at),
+        "latest_delivered_at": _format_dashboard_time(latest_delivered_at),
+        "latest_push_at": _format_dashboard_time(latest_delivered_at),
         "latest_delivery_state": latest_delivery_state,
         "max_attempts": BARK_MAX_DELIVERY_ATTEMPTS,
     }
 
 
-async def generate_shadow_push(session_id: str) -> dict:
+async def generate_shadow_push(session_id: str, timing_state: dict | None = None) -> dict:
     recent_rows = await get_recent_conversation_messages(session_id, limit=16)
     recent_messages = _clean_history_for_push(recent_rows)
     recent_excerpt_count = min(len(recent_messages), 12)
     now_local = _local_now()
     interaction_state = await _get_push_interaction_state(session_id, now_local)
+    if timing_state is None:
+        timing_state = await _get_push_timing_state(session_id, now_local)
+    interaction_state.update(timing_state)
     if not recent_messages:
-        _log_push_context_diag(interaction_state, 0, False, "no_recent_messages")
+        _log_push_context_diag(interaction_state, 0, False, "no_recent_messages", action="skip")
         return {"pushed": False, "reason": "no_recent_messages"}
 
     base_prompt = await get_system_prompt()
@@ -1890,27 +2219,85 @@ async def generate_shadow_push(session_id: str) -> dict:
         "messages": push_messages,
         "temperature": 0.9,
         "max_tokens": 200,
+        "response_format": {"type": "json_object"},
         "stream": False,
     }
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(API_BASE_URL, headers=headers, json=body)
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(API_BASE_URL, headers=headers, json=body)
+    except Exception as e:
+        print(f"⚠️ 主动推送决策异常: {type(e).__name__}")
+        _log_push_context_diag(
+            interaction_state,
+            recent_excerpt_count,
+            False,
+            "model_exception",
+            action="skip",
+            parse_success=False,
+        )
+        return {"pushed": False, "reason": "model_exception"}
     if response.status_code != 200:
-        print(f"⚠️ 主动推送生成失败: HTTP {response.status_code}")
-        _log_push_context_diag(interaction_state, recent_excerpt_count, False, "model_error")
+        print(f"⚠️ 主动推送决策失败: HTTP {response.status_code}")
+        _log_push_context_diag(
+            interaction_state,
+            recent_excerpt_count,
+            False,
+            "model_error",
+            action="skip",
+            parse_success=False,
+        )
         return {"pushed": False, "reason": "model_error", "status_code": response.status_code}
 
-    data = response.json()
+    try:
+        data = response.json()
+    except Exception:
+        _log_push_context_diag(
+            interaction_state,
+            recent_excerpt_count,
+            False,
+            "invalid_response_json",
+            action="skip",
+            parse_success=False,
+        )
+        return {"pushed": False, "reason": "invalid_response_json"}
     raw_reply = ""
     try:
         raw_reply = data["choices"][0]["message"].get("content") or ""
     except (KeyError, IndexError, AttributeError):
         raw_reply = ""
 
-    ai_reply = clean_push_reply(raw_reply)
+    decision = parse_shadow_decision(raw_reply)
+    action = decision["action"]
+    decision_reason = decision["reason"]
+    parse_success = bool(decision["parse_success"])
+    if action == "skip":
+        _log_push_context_diag(
+            interaction_state,
+            recent_excerpt_count,
+            False,
+            decision_reason,
+            action="skip",
+            parse_success=parse_success,
+        )
+        return {
+            "pushed": False,
+            "reason": decision_reason,
+            "action": "skip",
+            "parse_success": parse_success,
+        }
+
+    ai_reply = clean_push_reply(decision.get("message", ""), hard_limit=80)
     if not ai_reply:
-        _log_push_context_diag(interaction_state, recent_excerpt_count, False, "empty_response")
-        return {"pushed": False, "reason": "empty_response"}
+        _log_push_context_diag(
+            interaction_state,
+            recent_excerpt_count,
+            False,
+            "empty_message",
+            action="skip",
+            parse_success=parse_success,
+        )
+        return {"pushed": False, "reason": "empty_message", "action": "skip", "parse_success": parse_success}
 
     metadata = {
         "is_push": True,
@@ -1922,11 +2309,20 @@ async def generate_shadow_push(session_id: str) -> dict:
     metadata = _apply_bark_delivery_result(metadata, delivery_result)
     await _update_message_metadata(message_id, metadata)
     delivered = bool(delivery_result.get("delivered"))
-    _log_push_context_diag(interaction_state, recent_excerpt_count, True, "ok")
+    _log_push_context_diag(
+        interaction_state,
+        recent_excerpt_count,
+        True,
+        decision_reason,
+        action="send",
+        parse_success=parse_success,
+    )
     print(f"📮 主动推送已落库: session={session_id}, chars={len(ai_reply)}, bark={'ok' if delivered else 'skip_or_fail'}")
     return {
         "pushed": True,
-        "reason": "ok",
+        "reason": decision_reason,
+        "action": "send",
+        "parse_success": parse_success,
         "session_id": session_id,
         "chars": len(ai_reply),
         "delivered": delivered,
@@ -2145,13 +2541,13 @@ async def api_push_trigger(request: Request):
 
         decision = await should_generate_push(session_id)
         if not decision.get("should_push"):
-            await _log_push_decision_diag(session_id, decision.get("reason", "blocked"))
+            await _log_push_decision_diag(session_id, decision.get("reason", "blocked"), decision)
             return JSONResponse(
                 content={"pushed": False, **decision},
                 headers=no_store_headers,
             )
 
-        result = await generate_shadow_push(session_id)
+        result = await generate_shadow_push(session_id, decision)
         return JSONResponse(content=result, headers=no_store_headers)
     except Exception as e:
         print(f"⚠️ 主动推送异常: {type(e).__name__}")
