@@ -1659,7 +1659,7 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         for mem in new_memories:
             content = mem["content"]
             if any(kw in content for kw in META_BLACKLIST):
-                print(f"🚫 过滤掉meta记忆: {content[:60]}...")
+                print(f"🚫 过滤掉meta记忆: content_chars={len(content)} hash={_short_hash_text(content)}")
                 continue
             filtered_memories.append(mem)
         
@@ -2479,7 +2479,7 @@ async def consolidate_memories_for_date_range(start_date, end_date):
 
                 if response.status_code != 200:
                     last_error = f"HTTP {response.status_code}: {response.text[:200]}"
-                    print(f"⚠️ 整理API返回 {response.status_code}: {response.text[:200]}")
+                    print(f"⚠️ 整理API返回 {response.status_code}: body_chars={len(response.text or str())} body_hash={_short_hash_text(response.text or str())}")
                     break
 
                 last_error = None
