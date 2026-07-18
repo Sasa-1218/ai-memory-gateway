@@ -19,6 +19,7 @@ import asyncio
 import secrets
 import random
 import re
+import hashlib
 import httpx
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
@@ -428,6 +429,153 @@ def _is_anthropic_model(model: str) -> bool:
     return "claude" in model_lower or "anthropic" in model_lower
 
 
+def _short_hash_text(text: str) -> str:
+    if not text:
+        return "empty"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
+
+
+def _diag_normalize(value):
+    if isinstance(value, dict):
+        return {
+            k: _diag_normalize(v)
+            for k, v in sorted(value.items())
+            if k not in ("created_at", "cache_control")
+        }
+    if isinstance(value, list):
+        return [_diag_normalize(v) for v in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _short_hash_value(value) -> str:
+    try:
+        text = json.dumps(_diag_normalize(value), ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        text = str(value)
+    return _short_hash_text(text)
+
+
+def _count_cache_breakpoints(value) -> int:
+    if isinstance(value, dict):
+        count = 1 if "cache_control" in value else 0
+        return count + sum(_count_cache_breakpoints(v) for v in value.values())
+    if isinstance(value, list):
+        return sum(_count_cache_breakpoints(v) for v in value)
+    return 0
+
+
+def _api_provider_label(url: str) -> str:
+    if not url:
+        return "unknown"
+    host = url.split("//", 1)[-1].split("/", 1)[0].lower()
+    if not host:
+        return "unknown"
+    if "openrouter" in host:
+        return "openrouter"
+    if "openai" in host:
+        return "openai"
+    if "deepseek" in host:
+        return "deepseek"
+    return host.split(":")[0]
+
+
+def _usage_get(mapping: dict, *keys):
+    current = mapping or {}
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return "not_reported"
+        current = current[key]
+    return current
+
+
+def _first_reported(*values):
+    for value in values:
+        if value != "not_reported":
+            return value
+    return "not_reported"
+
+
+def _log_cache_build_diag(diag: dict):
+    if not diag:
+        return
+    print(
+        "🧪 缓存诊断: "
+        f"provider={diag.get('api_provider', 'unknown')} | "
+        f"model={diag.get('actual_model', 'unknown')} | "
+        f"mode={diag.get('mode', 'unknown')} | "
+        f"session_hash={diag.get('session_hash', 'unknown')} | "
+        f"client_system={diag.get('client_system_count', 'not_reported')}条/"
+        f"{diag.get('client_system_chars', 'not_reported')}字/"
+        f"hash={diag.get('client_system_hash', 'not_reported')} | "
+        f"base_prompt={diag.get('base_prompt_chars', 'not_reported')}字/"
+        f"hash={diag.get('base_prompt_hash', 'not_reported')} | "
+        f"summary={diag.get('summary_count', 'not_reported')}段/"
+        f"{diag.get('summary_chars', 'not_reported')}字/"
+        f"hash={diag.get('summary_hash', 'not_reported')} | "
+        f"rounds_total={diag.get('total_rounds', 'not_reported')} | "
+        f"a_start_round={diag.get('a_start_round', 'not_reported')} | "
+        f"A={diag.get('a_rounds', 'not_applicable')}轮/"
+        f"{diag.get('a_messages', 'not_applicable')}条/"
+        f"hash={diag.get('a_hash', 'not_applicable')} | "
+        f"B={diag.get('b_rounds', 'not_applicable')}轮/"
+        f"{diag.get('b_messages', 'not_applicable')}条/"
+        f"hash={diag.get('b_hash', 'not_applicable')} | "
+        f"rotation_count={diag.get('rotation_count', 'not_reported')} | "
+        f"constructed_breakpoints={diag.get('constructed_breakpoints', 'not_reported')} | "
+        f"sent_breakpoints={diag.get('sent_breakpoints', 'not_reported')}",
+        flush=True,
+    )
+
+
+def _log_usage_diag(prefix: str, usage: dict | None):
+    details = usage.get("prompt_tokens_details", {}) if isinstance(usage, dict) else {}
+    prompt_tokens = _usage_get(usage, "prompt_tokens")
+    completion_tokens = _usage_get(usage, "completion_tokens")
+    total_tokens = _usage_get(usage, "total_tokens")
+    cached_tokens = _usage_get(usage, "prompt_tokens_details", "cached_tokens")
+    cache_read_tokens = _first_reported(
+        _usage_get(usage, "cache_read_input_tokens"),
+        _usage_get(usage, "cache_read_tokens"),
+        _usage_get(usage, "prompt_tokens_details", "cache_read_tokens"),
+        cached_tokens,
+    )
+    cache_write_tokens = _first_reported(
+        _usage_get(usage, "cache_creation_input_tokens"),
+        _usage_get(usage, "cache_write_tokens"),
+        _usage_get(usage, "prompt_tokens_details", "cache_write_tokens"),
+        _usage_get(usage, "prompt_tokens_details", "cache_creation_tokens"),
+    )
+    known_usage_keys = {
+        "prompt_tokens", "completion_tokens", "total_tokens", "prompt_tokens_details",
+        "cache_read_input_tokens", "cache_read_tokens", "cache_creation_input_tokens",
+        "cache_write_tokens",
+    }
+    known_detail_keys = {"cached_tokens", "cache_read_tokens", "cache_write_tokens", "cache_creation_tokens"}
+    other_cache = {}
+    if isinstance(usage, dict):
+        for k, v in usage.items():
+            if "cache" in k and k not in known_usage_keys:
+                other_cache[k] = v
+    if isinstance(details, dict):
+        for k, v in details.items():
+            if "cache" in k and k not in known_detail_keys:
+                other_cache[f"prompt_tokens_details.{k}"] = v
+    other_cache_text = json.dumps(other_cache, ensure_ascii=False, sort_keys=True) if other_cache else "not_reported"
+    print(
+        f"📊 {prefix} Cache Usage: "
+        f"prompt_tokens={prompt_tokens} | "
+        f"completion_tokens={completion_tokens} | "
+        f"total_tokens={total_tokens} | "
+        f"prompt_tokens_details.cached_tokens={cached_tokens} | "
+        f"cache_read_tokens={cache_read_tokens} | "
+        f"cache_creation_write_tokens={cache_write_tokens} | "
+        f"other_cache_fields={other_cache_text}",
+        flush=True,
+    )
+
+
 def _strip_cache_control(messages: list):
     """
     剥掉消息中的 cache_control 字段，非 Claude 模型用不了。
@@ -446,6 +594,7 @@ def _strip_cache_control(messages: list):
             msg["content"] = content[0]["text"]
     if stripped > 0:
         print(f"🔧 兼容性处理: 剥离了 {stripped} 个 cache_control 字段（非 Claude 模型）")
+    return stripped
 
 
 def build_time_injection() -> str:
@@ -714,6 +863,7 @@ async def build_partitioned_messages(
     all_messages: list,
     base_prompt: str,
     user_message: str,
+    cache_diag: dict | None = None,
 ) -> list:
     """
     分区缓存模式：构建带breakpoint的messages数组。
@@ -748,9 +898,8 @@ async def build_partitioned_messages(
                 client_system_content += ("\n\n" if client_system_content else "") + c
 
     # 无论有没有内容都打印，方便区分"没部署新代码"和"这次请求确实没有system内容"
-    import hashlib
-    content_hash = hashlib.md5(client_system_content.encode('utf-8')).hexdigest()[:8] if client_system_content else "无"
-    print(f"🔍 客户端system检测: all_messages中共{client_system_msg_count}条role=system消息，合并后{len(client_system_content)}字")
+    content_hash = _short_hash_text(client_system_content)
+    print(f"🔍 客户端system检测: all_messages中共{client_system_msg_count}条role=system消息，合并后{len(client_system_content)}字，hash={content_hash}")
 
     if client_system_content:
         base_prompt = (base_prompt + "\n\n" + client_system_content) if base_prompt else client_system_content
@@ -788,9 +937,27 @@ async def build_partitioned_messages(
     state = await get_session_cache_state(session_id)
     summary_parts = state['summary_parts']
     a_start_round = state['a_start_round']
+    summary_total = sum(len(p) for p in summary_parts)
+    if cache_diag is not None:
+        cache_diag.update({
+            "session_hash": _short_hash_text(session_id),
+            "client_system_count": client_system_msg_count,
+            "client_system_chars": len(client_system_content),
+            "client_system_hash": content_hash,
+            "base_prompt_chars": len(base_prompt or ""),
+            "base_prompt_hash": _short_hash_text(base_prompt or ""),
+            "summary_count": len(summary_parts),
+            "summary_chars": summary_total,
+            "summary_hash": _short_hash_value(summary_parts),
+            "total_rounds": total_rounds,
+            "a_start_round": a_start_round,
+            "rotation_count": 0,
+        })
     
     if total_rounds < X:
-        return await _build_basic_cached(history, base_prompt, user_message, current_user_msg)
+        if cache_diag is not None:
+            cache_diag["mode"] = "basic"
+        return await _build_basic_cached(history, base_prompt, user_message, current_user_msg, cache_diag=cache_diag)
     
     # 计算A/B区（按逻辑轮切片）
     a_end_round = a_start_round + X
@@ -825,6 +992,15 @@ async def build_partitioned_messages(
         await save_session_cache_state(session_id, summary_parts, a_start_round)
         summary_total = sum(len(p) for p in summary_parts)
         print(f"🔄 轮转完成(共{rotation_count}次): 摘要{len(summary_parts)}段/{summary_total}字, A区{len(a_msgs)}条, B区{len(b_msgs)}条")
+        if cache_diag is not None:
+            cache_diag.update({
+                "summary_count": len(summary_parts),
+                "summary_chars": summary_total,
+                "summary_hash": _short_hash_value(summary_parts),
+                "a_start_round": a_start_round,
+            })
+    if cache_diag is not None:
+        cache_diag["rotation_count"] = rotation_count
     
     # 拼装messages
     result = []
@@ -896,6 +1072,17 @@ async def build_partitioned_messages(
     tool_stripped = len(a_msgs) - len(cleaned_a)
     a_info = f"A区{len(cleaned_a)}条({len(a_round_groups)}轮)" + (f"[剥离{tool_stripped}条tool]" if tool_stripped else "")
     print(f"🔒 分区缓存: BP×{bp_count} | 摘要{'有' if summary_parts else '无'}({len(summary_parts)}段/{summary_total}字) | {a_info} | B区{len(b_msgs)}条({b_rounds_count}轮) | 总{len(result)}条messages")
+    if cache_diag is not None:
+        cache_diag.update({
+            "mode": "partitioned",
+            "a_rounds": len(a_round_groups),
+            "a_messages": len(cleaned_a),
+            "a_hash": _short_hash_value(cleaned_a),
+            "b_rounds": b_rounds_count,
+            "b_messages": len(b_cleaned),
+            "b_hash": _short_hash_value(b_cleaned),
+            "constructed_breakpoints": _count_cache_breakpoints(result),
+        })
     return result
 
 
@@ -904,6 +1091,7 @@ async def _build_basic_cached(
     base_prompt: str,
     user_message: str,
     current_user_msg: dict,
+    cache_diag: dict | None = None,
 ) -> list:
     """基础版prompt caching（历史不够分区时的降级模式）"""
     result = []
@@ -943,6 +1131,19 @@ async def _build_basic_cached(
     
     bp_count = 1 + (1 if history else 0)
     print(f"🔒 基础缓存(降级): BP×{bp_count} | 历史{len(history)}条 | 总{len(result)}条messages")
+    if cache_diag is not None:
+        cache_diag.update({
+            "mode": "basic",
+            "a_rounds": "not_applicable",
+            "a_messages": "not_applicable",
+            "a_hash": "not_applicable",
+            "b_rounds": "not_applicable",
+            "b_messages": "not_applicable",
+            "b_hash": "not_applicable",
+            "constructed_breakpoints": _count_cache_breakpoints(result),
+            "history_messages": len(history),
+            "history_hash": _short_hash_value([{k: v for k, v in msg.items() if k != 'created_at'} for msg in history]),
+        })
     return result
 
 
@@ -1578,12 +1779,18 @@ async def chat_completions(request: Request):
     
     # ---------- 生成 session ID ----------
     session_id = str(uuid.uuid4())[:8]
+    cache_diag = {
+        "api_provider": _api_provider_label(API_BASE_URL),
+        "mode": "legacy",
+        "session_hash": _short_hash_text(session_id),
+    }
     
     # ---------- 分区缓存模式 ----------
     if CACHE_PARTITION_ENABLED:
         active_sid = get_active_session_id()
         if active_sid:
             session_id = active_sid
+        cache_diag["session_hash"] = _short_hash_text(session_id)
         
         # 从DB读取历史
         try:
@@ -1664,7 +1871,7 @@ async def chat_completions(request: Request):
         print(f"📦 分区模式: DB历史{len(db_msgs)}条 + 客户端消息{len(client_new_msgs)}条")
         
         messages = await build_partitioned_messages(
-            session_id, all_msgs, base_system_prompt, user_message
+            session_id, all_msgs, base_system_prompt, user_message, cache_diag=cache_diag
         )
         body["messages"] = messages
     
@@ -1701,10 +1908,15 @@ async def chat_completions(request: Request):
     if not model:
         model = DEFAULT_MODEL
     body["model"] = model
+    cache_diag["actual_model"] = model
+    cache_diag["api_provider"] = _api_provider_label(API_BASE_URL)
+    cache_diag.setdefault("constructed_breakpoints", _count_cache_breakpoints(body.get("messages", [])))
     
     # ---------- cache_control 兼容性处理 ----------
     if CACHE_PARTITION_ENABLED and not _is_anthropic_model(model):
         _strip_cache_control(body.get("messages", []))
+    cache_diag["sent_breakpoints"] = _count_cache_breakpoints(body.get("messages", []))
+    _log_cache_build_diag(cache_diag)
     
     # ---------- 转发请求 ----------
     headers = {
@@ -1742,7 +1954,7 @@ async def chat_completions(request: Request):
     
     if is_stream:
         return StreamingResponse(
-            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages),
+            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages, cache_diag=cache_diag),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
@@ -1752,6 +1964,7 @@ async def chat_completions(request: Request):
             
             if response.status_code == 200:
                 resp_data = response.json()
+                _log_usage_diag("NonStream", resp_data.get("usage") if isinstance(resp_data, dict) else None)
                 assistant_msg = ""
                 assistant_tool_calls = None
                 assistant_reasoning = None
@@ -1780,7 +1993,7 @@ async def chat_completions(request: Request):
                 return JSONResponse(status_code=response.status_code, content=response.json())
 
 
-async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None):
+async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None):
     """流式响应 + 捕获完整回复（原始字节透传，确保SSE格式和thinking数据完整）"""
     full_response = []
     full_reasoning = []
@@ -1877,6 +2090,9 @@ async def stream_and_capture(headers: dict, body: dict, session_id: str, user_me
         if tt > 0:
             asyncio.create_task(save_token_usage(session_id, model, pt, ct, tt))
             print(f"📊 Stream Token: {pt} + {ct} = {tt}")
+        _log_usage_diag("Stream", stream_usage)
+    else:
+        _log_usage_diag("Stream", None)
     
     if MEMORY_ENABLED and (user_message or tool_messages):
         asyncio.create_task(
