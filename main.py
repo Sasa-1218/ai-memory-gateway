@@ -1498,6 +1498,17 @@ def _log_push_context_diag(state: dict, recent_excerpt_count: int, pushed: bool,
     )
 
 
+async def _log_push_decision_diag(session_id: str, reason: str):
+    try:
+        now_local = _local_now()
+        state = await _get_push_interaction_state(session_id, now_local)
+        recent_rows = await get_recent_conversation_messages(session_id, limit=16)
+        recent_excerpt_count = min(len(_clean_history_for_push(recent_rows)), 12)
+        _log_push_context_diag(state, recent_excerpt_count, False, reason)
+    except Exception as e:
+        print(f"⚠️ 主动推送上下文诊断失败: {type(e).__name__}", flush=True)
+
+
 async def _build_shadow_user_content(recent_messages: list, interaction_state: dict) -> str:
     now_local = _local_now()
     weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -1873,6 +1884,7 @@ async def api_push_trigger(request: Request):
 
         decision = await should_generate_push(session_id)
         if not decision.get("should_push"):
+            await _log_push_decision_diag(session_id, decision.get("reason", "blocked"))
             return JSONResponse(
                 content={"pushed": False, **decision},
                 headers=no_store_headers,
