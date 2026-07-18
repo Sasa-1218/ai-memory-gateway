@@ -8,7 +8,9 @@ WORKDIR /app
 COPY requirements.txt .
 COPY wheels/ /wheels/
 RUN pip install --no-cache-dir \
-    -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
+    --timeout 120 \
+    --retries 5 \
+    -i "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple/}" \
     /wheels/jieba-0.42.1.tar.gz \
     -r requirements.txt
 
