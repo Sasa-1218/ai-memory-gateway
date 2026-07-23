@@ -32,6 +32,13 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import Optional
 
+try:
+    import jwt
+    from jwt.algorithms import RSAAlgorithm
+except Exception:
+    jwt = None
+    RSAAlgorithm = None
+
 from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories
@@ -55,12 +62,25 @@ DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "anthropic/claude-sonnet-4")
 # 网关端口
 PORT = int(os.getenv("PORT", "8080"))
 
-# 网关访问密钥（强烈建议设置！）
-# 设置后所有非公开端点都需要鉴权，二选一：
-#   - 请求头方式：X-Gateway-Key: 你的密钥（客户端/API 调用）
-#   - URL参数方式：?gateway_key=你的密钥（方便浏览器访问 dashboard）
-# 不设置则跳过鉴权（兼容旧部署，仅建议内网环境使用）
+# 网关访问密钥（程序客户端/API 调用使用 X-Gateway-Key 请求头）
+# Dashboard 网页访问由 Cloudflare Access 单独保护，不再支持 URL 参数登录。
 GATEWAY_SECRET = os.getenv("GATEWAY_SECRET", "")
+
+# Cloudflare Access：用于 Dashboard 页面和 Dashboard 私有接口
+# CF_ACCESS_TEAM_DOMAIN 示例：https://your-team.cloudflareaccess.com
+# CF_ACCESS_AUD 为 Access Application Audience Tag。
+CF_ACCESS_TEAM_DOMAIN = os.getenv("CF_ACCESS_TEAM_DOMAIN", "").strip().rstrip("/")
+CF_ACCESS_AUD = os.getenv("CF_ACCESS_AUD", "").strip()
+CF_ACCESS_ALLOWED_EMAILS = {
+    item.strip().lower()
+    for item in os.getenv("CF_ACCESS_ALLOWED_EMAILS", "").split(",")
+    if item.strip()
+}
+CF_ACCESS_ALLOWED_EMAIL_DOMAINS = {
+    item.strip().lower().lstrip("@")
+    for item in os.getenv("CF_ACCESS_ALLOWED_EMAIL_DOMAINS", "").split(",")
+    if item.strip()
+}
 
 # 记忆系统开关（数据库出问题时可以临时关掉）
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "false").lower() == "true"
@@ -346,45 +366,75 @@ templates = Jinja2Templates(directory="templates")
 # 网关鉴权中间件
 # ============================================================
 
-# 不需要鉴权的路径（根路径精确匹配，其余按前缀匹配）
+# 不需要应用层鉴权的路径（根路径精确匹配，其余按前缀匹配）
 PUBLIC_PATHS = ("/", "/static/", "/health", "/favicon.ico", "/api/push/trigger")
+
+# Dashboard 页面和网页私有接口由 Cloudflare Access 保护。
+DASHBOARD_ACCESS_PATHS = ("/dashboard",)
+DASHBOARD_ACCESS_PREFIXES = ("/dashboard/", "/api/", "/import/", "/export/")
+
+# 程序客户端继续使用 X-Gateway-Key，避免影响 Kelivo、健康/状态上报等非网页调用。
+GATEWAY_KEY_PREFIXES = ("/v1/",)
+GATEWAY_KEY_PATHS = ("/api/health/push", "/api/status/push", "/debug/routes")
+
+
+def _is_public_path(path: str) -> bool:
+    if path == "/":
+        return True
+    return any(path.startswith(prefix) for prefix in PUBLIC_PATHS[1:])
+
+
+def _is_gateway_key_path(path: str) -> bool:
+    if path in GATEWAY_KEY_PATHS:
+        return True
+    return any(path.startswith(prefix) for prefix in GATEWAY_KEY_PREFIXES)
+
+
+def _is_dashboard_access_path(path: str) -> bool:
+    if _is_gateway_key_path(path):
+        return False
+    if path in DASHBOARD_ACCESS_PATHS:
+        return True
+    return any(path.startswith(prefix) for prefix in DASHBOARD_ACCESS_PREFIXES)
 
 @app.middleware("http")
 async def gateway_auth_middleware(request: Request, call_next):
-    """检查 GATEWAY_SECRET，保护所有非公开端点"""
-    # 未设置密钥时跳过鉴权（兼容旧部署，但会打印警告）
-    if not GATEWAY_SECRET:
-        if not hasattr(gateway_auth_middleware, "_warned"):
-            print("⚠️  GATEWAY_SECRET 未设置！所有 API 端点不受保护！")
-            print("⚠️  请在环境变量中设置 GATEWAY_SECRET 以启用鉴权")
-            gateway_auth_middleware._warned = True
-        return await call_next(request)
-
+    """将 Dashboard 的 Access 鉴权与程序 API 的网关密钥鉴权分开。"""
     path = request.url.path
-
-    # 公开路径不需要鉴权（根路径精确匹配）
-    if path == "/":
-        return await call_next(request)
-    for prefix in PUBLIC_PATHS[1:]:
-        if path.startswith(prefix):
-            return await call_next(request)
 
     # OPTIONS 预检请求放行（CORS 需要）
     if request.method == "OPTIONS":
         return await call_next(request)
 
-    # 从 header 或 query 参数获取密钥。保持原有优先级：Header 优先，缺 Header 时才用 query。
+    if _is_public_path(path):
+        return await call_next(request)
+
+    if _is_dashboard_access_path(path):
+        access_result = await _authenticate_dashboard_access(request)
+        if not access_result.get("ok"):
+            return JSONResponse(
+                status_code=access_result.get("status_code", 403),
+                content={"error": "Forbidden"},
+            )
+        return await call_next(request)
+
+    # 程序 API 只接受 X-Gateway-Key 请求头，不再接受 URL 查询参数登录。
+    if not GATEWAY_SECRET:
+        if not hasattr(gateway_auth_middleware, "_warned_gateway_secret"):
+            print("⚠️  GATEWAY_SECRET 未设置！程序 API 端点不受保护！")
+            print("⚠️  请在环境变量中设置 GATEWAY_SECRET 以启用程序 API 鉴权")
+            gateway_auth_middleware._warned_gateway_secret = True
+        return await call_next(request)
+
     header_key = request.headers.get("X-Gateway-Key", "")
-    query_key = request.query_params.get("gateway_key", "")
-    provided_key = header_key or query_key
 
     # compare_digest 防时序侧信道攻击
-    auth_success = secrets.compare_digest(provided_key, GATEWAY_SECRET)
-    _log_auth_diag(request, header_key, query_key, auth_success)
+    auth_success = bool(header_key) and secrets.compare_digest(header_key, GATEWAY_SECRET)
+    _log_auth_diag(request, header_key, auth_success)
     if not auth_success:
         return JSONResponse(
             status_code=401,
-            content={"error": "Unauthorized. Provide X-Gateway-Key header or gateway_key parameter."},
+            content={"error": "Unauthorized. Provide X-Gateway-Key header."},
         )
 
     return await call_next(request)
@@ -539,10 +589,21 @@ def _log_cache_build_diag(diag: dict):
 
 
 
+SENSITIVE_URL_LOGIN_KEYS = ("gateway_key", "key", "token")
+_CF_ACCESS_JWKS_CACHE = {"expires_at": 0.0, "keys": []}
+_CF_ACCESS_JWKS_TTL_SECONDS = 3600
+
+
 def _redact_gateway_key_in_text(value: str) -> str:
-    if not value or "gateway_key=" not in value:
+    lower_value = value.lower() if value else ""
+    if not lower_value or not any(f"{key}=" in lower_value for key in SENSITIVE_URL_LOGIN_KEYS):
         return value
-    return re.sub(r"([?&]gateway_key=)[^&\s\"]*", r"\1[REDACTED]", value)
+    return re.sub(
+        r"([?&](?:gateway_key|key|token)=)[^&\s\"]*",
+        r"\1[REDACTED]",
+        value,
+        flags=re.IGNORECASE,
+    )
 
 
 class _GatewayAccessLogFilter(logging.Filter):
@@ -568,20 +629,153 @@ def _install_access_log_redaction():
         logger.addFilter(_GatewayAccessLogFilter())
 
 
-def _log_auth_diag(request: Request, header_key: str, query_key: str, auth_success: bool):
+def _legacy_query_key_present(request: Request) -> bool:
+    return any(key in request.query_params for key in SENSITIVE_URL_LOGIN_KEYS)
+
+
+def _cf_access_team_domain() -> str:
+    if not CF_ACCESS_TEAM_DOMAIN:
+        return ""
+    if CF_ACCESS_TEAM_DOMAIN.startswith("https://"):
+        return CF_ACCESS_TEAM_DOMAIN
+    return f"https://{CF_ACCESS_TEAM_DOMAIN}"
+
+
+def _cf_access_certs_url() -> str:
+    team_domain = _cf_access_team_domain()
+    if not team_domain:
+        return ""
+    return f"{team_domain}/cdn-cgi/access/certs"
+
+
+def _hash_identity(value: str) -> str:
+    if not value:
+        return "not_reported"
+    return _short_hash_text(value.lower())
+
+
+async def _get_cf_access_jwks() -> list:
+    now_ts = datetime.now(timezone.utc).timestamp()
+    cached_keys = _CF_ACCESS_JWKS_CACHE.get("keys") or []
+    if cached_keys and now_ts < float(_CF_ACCESS_JWKS_CACHE.get("expires_at", 0.0)):
+        return cached_keys
+
+    certs_url = _cf_access_certs_url()
+    if not certs_url:
+        return []
+
+    async with httpx.AsyncClient(timeout=5) as client:
+        response = await client.get(certs_url)
+        response.raise_for_status()
+        payload = response.json()
+
+    keys = payload.get("keys", []) if isinstance(payload, dict) else []
+    if isinstance(keys, list) and keys:
+        _CF_ACCESS_JWKS_CACHE["keys"] = keys
+        _CF_ACCESS_JWKS_CACHE["expires_at"] = now_ts + _CF_ACCESS_JWKS_TTL_SECONDS
+    return keys if isinstance(keys, list) else []
+
+
+def _email_allowed(email: str) -> bool:
+    if not CF_ACCESS_ALLOWED_EMAILS and not CF_ACCESS_ALLOWED_EMAIL_DOMAINS:
+        return True
+    normalized = (email or "").strip().lower()
+    if normalized in CF_ACCESS_ALLOWED_EMAILS:
+        return True
+    if "@" in normalized:
+        domain = normalized.rsplit("@", 1)[-1]
+        return domain in CF_ACCESS_ALLOWED_EMAIL_DOMAINS
+    return False
+
+
+async def _verify_cf_access_jwt(token: str) -> dict:
+    if not token:
+        return {"ok": False, "reason": "missing_jwt", "status_code": 401}
+    if not CF_ACCESS_AUD or not _cf_access_team_domain():
+        return {"ok": False, "reason": "access_config_missing", "status_code": 403}
+    if jwt is None or RSAAlgorithm is None:
+        return {"ok": False, "reason": "jwt_dependency_missing", "status_code": 403}
+
+    try:
+        header = jwt.get_unverified_header(token)
+        kid = header.get("kid")
+        keys = await _get_cf_access_jwks()
+        selected_keys = [key for key in keys if not kid or key.get("kid") == kid]
+        if not selected_keys:
+            return {"ok": False, "reason": "access_key_not_found", "status_code": 403}
+
+        valid_issuers = {_cf_access_team_domain(), f"{_cf_access_team_domain()}/"}
+        last_error = None
+        for jwk in selected_keys:
+            try:
+                public_key = RSAAlgorithm.from_jwk(json.dumps(jwk))
+                payload = jwt.decode(
+                    token,
+                    key=public_key,
+                    algorithms=["RS256"],
+                    audience=CF_ACCESS_AUD,
+                    options={"verify_iss": False},
+                )
+                if payload.get("iss") not in valid_issuers:
+                    return {"ok": False, "reason": "invalid_issuer", "status_code": 403}
+
+                email = str(payload.get("email") or "")
+                if not _email_allowed(email):
+                    return {
+                        "ok": False,
+                        "reason": "identity_not_allowed",
+                        "status_code": 403,
+                        "identity_hash": _hash_identity(email),
+                    }
+                return {
+                    "ok": True,
+                    "reason": "ok",
+                    "status_code": 200,
+                    "identity_hash": _hash_identity(email),
+                }
+            except Exception as exc:
+                last_error = exc
+
+        return {
+            "ok": False,
+            "reason": type(last_error).__name__ if last_error else "jwt_invalid",
+            "status_code": 403,
+        }
+    except Exception as exc:
+        return {"ok": False, "reason": type(exc).__name__, "status_code": 403}
+
+
+def _log_dashboard_access_diag(request: Request, result: dict):
+    print(
+        "🛡️ Dashboard Access: "
+        f"path={request.url.path} | "
+        f"jwt_present={str(bool(request.headers.get('Cf-Access-Jwt-Assertion', ''))).lower()} | "
+        f"jwt_valid={str(bool(result.get('ok'))).lower()} | "
+        f"identity_hash={result.get('identity_hash', 'not_reported')} | "
+        f"reason={result.get('reason', 'not_reported')}",
+        flush=True,
+    )
+
+
+async def _authenticate_dashboard_access(request: Request) -> dict:
+    result = await _verify_cf_access_jwt(request.headers.get("Cf-Access-Jwt-Assertion", ""))
+    _log_dashboard_access_diag(request, result)
+    return result
+
+
+def _log_auth_diag(request: Request, header_key: str, auth_success: bool):
     if request.url.path != "/v1/chat/completions":
         return
     header_present = bool(header_key)
-    query_key_present = bool(query_key)
+    query_key_present = _legacy_query_key_present(request)
     header_valid = header_present and secrets.compare_digest(header_key, GATEWAY_SECRET)
-    query_key_valid = query_key_present and secrets.compare_digest(query_key, GATEWAY_SECRET)
     print(
         "🔐 鉴权诊断: "
         f"path=/v1/chat/completions | "
         f"header_present={str(header_present).lower()} | "
         f"header_valid={str(header_valid).lower()} | "
         f"query_key_present={str(query_key_present).lower()} | "
-        f"query_key_valid={str(query_key_valid).lower()} | "
+        f"query_key_valid=false | "
         f"auth_success={str(auth_success).lower()}",
         flush=True,
     )

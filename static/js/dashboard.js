@@ -34,23 +34,6 @@ const ICONS = (() => {
 })();
 
 // ============================================
-// 网关鉴权：从URL参数读取gateway_key，自动注入所有请求
-// ============================================
-const _gatewayKey = new URLSearchParams(window.location.search).get('gateway_key') || '';
-if (_gatewayKey) {
-    const _origFetch = window.fetch;
-    window.fetch = function(url, opts = {}) {
-        opts.headers = opts.headers || {};
-        if (opts.headers instanceof Headers) {
-            opts.headers.set('X-Gateway-Key', _gatewayKey);
-        } else {
-            opts.headers['X-Gateway-Key'] = _gatewayKey;
-        }
-        return _origFetch.call(this, url, opts);
-    };
-}
-
-// ============================================
 // 全局状态
 // ============================================
 let allMemories = [];
