@@ -190,6 +190,43 @@ async def init_tables():
                 updated_at      TIMESTAMPTZ DEFAULT NOW()
             );
         """)
+
+        # 主动推送决策日志：只记录状态、数量和原因代码，不保存正文/prompt/密钥
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS shadow_push_decisions (
+                id                              SERIAL PRIMARY KEY,
+                session_id                      TEXT DEFAULT '',
+                action                          TEXT NOT NULL,
+                intent                          TEXT DEFAULT '',
+                reason                          TEXT NOT NULL,
+                model                           TEXT DEFAULT '',
+                parse_success                   BOOLEAN,
+                pushed                          BOOLEAN DEFAULT FALSE,
+                bark_delivered                  BOOLEAN,
+                push_window                     TEXT DEFAULT '',
+                generation_window               TEXT DEFAULT '',
+                is_early_window                 BOOLEAN,
+                silence_minutes                 INTEGER,
+                last_push_minutes               INTEGER,
+                last_generated_push_minutes     INTEGER,
+                minutes_until_normal_window     INTEGER,
+                normal_window_minutes           INTEGER,
+                last_effective_role             TEXT DEFAULT '',
+                user_replied_after_last_push    BOOLEAN,
+                consecutive_unanswered_pushes   INTEGER DEFAULT 0,
+                recent_excerpt_count            INTEGER DEFAULT 0,
+                error_type                      TEXT DEFAULT '',
+                checked_at                      TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_shadow_push_decisions_session_time
+            ON shadow_push_decisions (session_id, checked_at DESC);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_shadow_push_decisions_action_time
+            ON shadow_push_decisions (action, checked_at DESC);
+        """)
         
         # ---- 三层记忆架构字段（layer / title / is_active / merged_from / event_date）----
         # layer: 1=原始碎片, 2=事件记忆, 3=核心记忆
@@ -327,6 +364,82 @@ async def init_tables():
             """)
     
     print("✅ 数据库表结构已就绪")
+
+
+def _decision_text(value, max_len: int = 128) -> str:
+    text = value if isinstance(value, str) else ""
+    text = re.sub(r"[\r\n\t]+", " ", text).strip()
+    return text[:max_len]
+
+
+async def save_shadow_push_decision(
+    session_id: str,
+    action: str,
+    reason: str,
+    intent: str = "",
+    model: str = "",
+    parse_success: bool = None,
+    pushed: bool = False,
+    bark_delivered: bool = None,
+    push_window: str = "",
+    generation_window: str = "",
+    is_early_window: bool = None,
+    silence_minutes: int = None,
+    last_push_minutes: int = None,
+    last_generated_push_minutes: int = None,
+    minutes_until_normal_window: int = None,
+    normal_window_minutes: int = None,
+    last_effective_role: str = "",
+    user_replied_after_last_push: bool = None,
+    consecutive_unanswered_pushes: int = 0,
+    recent_excerpt_count: int = 0,
+    error_type: str = "",
+):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO shadow_push_decisions (
+                session_id, action, intent, reason, model, parse_success,
+                pushed, bark_delivered, push_window, generation_window,
+                is_early_window, silence_minutes, last_push_minutes,
+                last_generated_push_minutes, minutes_until_normal_window,
+                normal_window_minutes, last_effective_role,
+                user_replied_after_last_push, consecutive_unanswered_pushes,
+                recent_excerpt_count, error_type
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10,
+                $11, $12, $13,
+                $14, $15,
+                $16, $17,
+                $18, $19,
+                $20, $21
+            )
+            """,
+            _decision_text(session_id, 256),
+            _decision_text(action, 32),
+            _decision_text(intent, 64),
+            _decision_text(reason, 128),
+            _decision_text(model, 128),
+            parse_success,
+            bool(pushed),
+            bark_delivered,
+            _decision_text(push_window, 64),
+            _decision_text(generation_window, 64),
+            is_early_window,
+            silence_minutes,
+            last_push_minutes,
+            last_generated_push_minutes,
+            minutes_until_normal_window,
+            normal_window_minutes,
+            _decision_text(last_effective_role, 32),
+            user_replied_after_last_push,
+            int(consecutive_unanswered_pushes or 0),
+            int(recent_excerpt_count or 0),
+            _decision_text(error_type, 128),
+        )
 
 
 # ============================================================

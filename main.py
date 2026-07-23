@@ -39,7 +39,7 @@ except Exception:
     jwt = None
     RSAAlgorithm = None
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories
 
@@ -1867,6 +1867,99 @@ def _log_push_context_diag(
     )
 
 
+def _push_decision_int(value):
+    if value in (None, "", "not_applicable", "not_reported"):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, number)
+
+
+def _push_decision_bool(value):
+    if value in (None, "", "not_applicable", "not_reported"):
+        return None
+    return bool(value)
+
+
+def _clean_push_decision_code(value, fallback: str = "unspecified", max_len: int = 64) -> str:
+    text = value if isinstance(value, str) else ""
+    text = re.sub(r"[^a-zA-Z0-9_:-]", "", text).strip()[:max_len]
+    return text or fallback
+
+
+def _build_shadow_push_decision_payload(
+    session_id: str,
+    action: str,
+    reason: str,
+    state: dict | None = None,
+    recent_excerpt_count: int = 0,
+    pushed: bool = False,
+    model: str = "",
+    parse_success: bool = None,
+    bark_delivered: bool = None,
+    error_type: str = "",
+    intent: str = "",
+) -> dict:
+    state = state or {}
+    return {
+        "session_id": session_id or "",
+        "action": _clean_push_decision_code(action, fallback="error", max_len=32),
+        "intent": _clean_push_decision_code(intent, fallback="", max_len=64),
+        "reason": _clean_push_decision_code(reason, fallback="unspecified", max_len=128),
+        "model": model or "",
+        "parse_success": parse_success,
+        "pushed": bool(pushed),
+        "bark_delivered": bark_delivered,
+        "push_window": state.get("push_window") or "",
+        "generation_window": state.get("generation_window") or "",
+        "is_early_window": _push_decision_bool(state.get("is_early_window")),
+        "silence_minutes": _push_decision_int(state.get("silence_minutes")),
+        "last_push_minutes": _push_decision_int(state.get("last_push_minutes")),
+        "last_generated_push_minutes": _push_decision_int(state.get("last_generated_push_minutes")),
+        "minutes_until_normal_window": _push_decision_int(state.get("minutes_until_normal_window")),
+        "normal_window_minutes": _push_decision_int(state.get("normal_window_minutes")),
+        "last_effective_role": state.get("last_effective_role") or "",
+        "user_replied_after_last_push": _push_decision_bool(state.get("user_replied_after_last_push")),
+        "consecutive_unanswered_pushes": _push_decision_int(state.get("consecutive_unanswered_pushes")) or 0,
+        "recent_excerpt_count": _push_decision_int(recent_excerpt_count) or 0,
+        "error_type": _clean_push_decision_code(error_type, fallback="", max_len=128),
+    }
+
+
+async def _save_shadow_push_decision_log(
+    session_id: str,
+    action: str,
+    reason: str,
+    state: dict | None = None,
+    recent_excerpt_count: int = 0,
+    pushed: bool = False,
+    model: str = "",
+    parse_success: bool = None,
+    bark_delivered: bool = None,
+    error_type: str = "",
+    intent: str = "",
+):
+    try:
+        payload = _build_shadow_push_decision_payload(
+            session_id=session_id,
+            action=action,
+            reason=reason,
+            state=state,
+            recent_excerpt_count=recent_excerpt_count,
+            pushed=pushed,
+            model=model,
+            parse_success=parse_success,
+            bark_delivered=bark_delivered,
+            error_type=error_type,
+            intent=intent,
+        )
+        await save_shadow_push_decision(**payload)
+    except Exception as e:
+        print(f"⚠️ 主动推送决策日志写入失败: {type(e).__name__}", flush=True)
+
+
 async def _log_push_decision_diag(session_id: str, reason: str, timing_state: dict | None = None):
     try:
         now_local = _local_now()
@@ -1876,6 +1969,15 @@ async def _log_push_decision_diag(session_id: str, reason: str, timing_state: di
         recent_rows = await get_recent_conversation_messages(session_id, limit=16)
         recent_excerpt_count = min(len(_clean_history_for_push(recent_rows)), 12)
         _log_push_context_diag(state, recent_excerpt_count, False, reason, action="skip")
+        await _save_shadow_push_decision_log(
+            session_id=session_id,
+            action="blocked",
+            reason=reason,
+            state=state,
+            recent_excerpt_count=recent_excerpt_count,
+            pushed=False,
+            model=DEFAULT_MODEL,
+        )
     except Exception as e:
         print(f"⚠️ 主动推送上下文诊断失败: {type(e).__name__}", flush=True)
 
@@ -1974,28 +2076,43 @@ def parse_shadow_decision(raw_text: str) -> dict:
         }
     action = data.get("action")
     reason = data.get("reason")
+    intent = _clean_push_decision_code(data.get("intent", ""), fallback="")
     message = data.get("message", "")
-    if action not in {"send", "skip"} or not isinstance(reason, str):
+    if action not in {"send", "skip"}:
         return {
             "parse_success": False,
             "action": "skip",
             "reason": "invalid_fields",
+            "intent": "",
+            "message": "",
+        }
+    if action == "skip":
+        reason = _clean_push_decision_code(reason, fallback="model_skip_no_reason")
+    elif not isinstance(reason, str):
+        return {
+            "parse_success": False,
+            "action": "skip",
+            "reason": "invalid_fields",
+            "intent": "",
             "message": "",
         }
     if not isinstance(message, str):
         message = ""
-    reason = re.sub(r"[^a-zA-Z0-9_:-]", "", reason).strip()[:64] or "unspecified"
+    if action == "send":
+        reason = _clean_push_decision_code(reason, fallback="unspecified")
     if action == "skip":
         return {
             "parse_success": True,
             "action": "skip",
             "reason": reason,
+            "intent": intent,
             "message": "",
         }
     return {
         "parse_success": True,
         "action": "send",
         "reason": reason,
+        "intent": intent,
         "message": message,
     }
 
@@ -2390,6 +2507,15 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
     interaction_state.update(timing_state)
     if not recent_messages:
         _log_push_context_diag(interaction_state, 0, False, "no_recent_messages", action="skip")
+        await _save_shadow_push_decision_log(
+            session_id=session_id,
+            action="skip",
+            reason="no_recent_messages",
+            state=interaction_state,
+            recent_excerpt_count=0,
+            pushed=False,
+            model=DEFAULT_MODEL,
+        )
         return {"pushed": False, "reason": "no_recent_messages"}
 
     base_prompt = await get_system_prompt()
@@ -2430,6 +2556,17 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
             action="skip",
             parse_success=False,
         )
+        await _save_shadow_push_decision_log(
+            session_id=session_id,
+            action="error",
+            reason="model_exception",
+            state=interaction_state,
+            recent_excerpt_count=recent_excerpt_count,
+            pushed=False,
+            model=DEFAULT_MODEL,
+            parse_success=False,
+            error_type=type(e).__name__,
+        )
         return {"pushed": False, "reason": "model_exception"}
     if response.status_code != 200:
         print(f"⚠️ 主动推送决策失败: HTTP {response.status_code}")
@@ -2440,6 +2577,17 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
             "model_error",
             action="skip",
             parse_success=False,
+        )
+        await _save_shadow_push_decision_log(
+            session_id=session_id,
+            action="error",
+            reason="model_error",
+            state=interaction_state,
+            recent_excerpt_count=recent_excerpt_count,
+            pushed=False,
+            model=DEFAULT_MODEL,
+            parse_success=False,
+            error_type=f"http_{response.status_code}",
         )
         return {"pushed": False, "reason": "model_error", "status_code": response.status_code}
 
@@ -2454,6 +2602,17 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
             action="skip",
             parse_success=False,
         )
+        await _save_shadow_push_decision_log(
+            session_id=session_id,
+            action="error",
+            reason="invalid_response_json",
+            state=interaction_state,
+            recent_excerpt_count=recent_excerpt_count,
+            pushed=False,
+            model=DEFAULT_MODEL,
+            parse_success=False,
+            error_type="invalid_response_json",
+        )
         return {"pushed": False, "reason": "invalid_response_json"}
     raw_reply = ""
     try:
@@ -2464,6 +2623,7 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
     decision = parse_shadow_decision(raw_reply)
     action = decision["action"]
     decision_reason = decision["reason"]
+    decision_intent = decision.get("intent", "")
     parse_success = bool(decision["parse_success"])
     if action == "skip":
         _log_push_context_diag(
@@ -2473,6 +2633,18 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
             decision_reason,
             action="skip",
             parse_success=parse_success,
+        )
+        await _save_shadow_push_decision_log(
+            session_id=session_id,
+            action="skip" if parse_success else "error",
+            reason=decision_reason,
+            intent=decision_intent,
+            state=interaction_state,
+            recent_excerpt_count=recent_excerpt_count,
+            pushed=False,
+            model=DEFAULT_MODEL,
+            parse_success=parse_success,
+            error_type="" if parse_success else decision_reason,
         )
         return {
             "pushed": False,
@@ -2489,6 +2661,17 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
             False,
             "empty_message",
             action="skip",
+            parse_success=parse_success,
+        )
+        await _save_shadow_push_decision_log(
+            session_id=session_id,
+            action="skip",
+            reason="empty_message",
+            intent=decision_intent,
+            state=interaction_state,
+            recent_excerpt_count=recent_excerpt_count,
+            pushed=False,
+            model=DEFAULT_MODEL,
             parse_success=parse_success,
         )
         return {"pushed": False, "reason": "empty_message", "action": "skip", "parse_success": parse_success}
@@ -2510,6 +2693,18 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
         decision_reason,
         action="send",
         parse_success=parse_success,
+    )
+    await _save_shadow_push_decision_log(
+        session_id=session_id,
+        action="send",
+        reason=decision_reason,
+        intent=decision_intent,
+        state=interaction_state,
+        recent_excerpt_count=recent_excerpt_count,
+        pushed=True,
+        model=DEFAULT_MODEL,
+        parse_success=parse_success,
+        bark_delivered=delivered,
     )
     print(f"📮 主动推送已落库: session={session_id}, chars={len(ai_reply)}, bark={'ok' if delivered else 'skip_or_fail'}")
     return {
@@ -2685,7 +2880,16 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
 async def api_push_trigger(request: Request):
     """外部cron触发主动推送：独立密钥保护，不复用GATEWAY_SECRET"""
     no_store_headers = {"Cache-Control": "no-store"}
+    session_id = ""
     if not PUSH_SECRET:
+        await _save_shadow_push_decision_log(
+            session_id="",
+            action="error",
+            reason="push_secret_missing",
+            model=DEFAULT_MODEL,
+            parse_success=None,
+            error_type="push_secret_missing",
+        )
         return JSONResponse(
             status_code=500,
             content={"error": "PUSH_SECRET is not configured"},
@@ -2694,6 +2898,13 @@ async def api_push_trigger(request: Request):
 
     provided = request.headers.get("X-Push-Secret", "")
     if not secrets.compare_digest(provided, PUSH_SECRET):
+        await _save_shadow_push_decision_log(
+            session_id="",
+            action="blocked",
+            reason="unauthorized",
+            model=DEFAULT_MODEL,
+            parse_success=None,
+        )
         return JSONResponse(
             status_code=401,
             content={"error": "unauthorized"},
@@ -2701,6 +2912,13 @@ async def api_push_trigger(request: Request):
         )
 
     if _push_lock.locked():
+        await _save_shadow_push_decision_log(
+            session_id=get_active_session_id() or "",
+            action="blocked",
+            reason="locked",
+            model=DEFAULT_MODEL,
+            parse_success=None,
+        )
         return JSONResponse(
             content={"pushed": False, "reason": "locked"},
             headers=no_store_headers,
@@ -2710,11 +2928,26 @@ async def api_push_trigger(request: Request):
     try:
         session_id = get_active_session_id()
         if not session_id:
+            await _save_shadow_push_decision_log(
+                session_id="",
+                action="blocked",
+                reason="no_active_session",
+                model=DEFAULT_MODEL,
+                parse_success=None,
+            )
             return JSONResponse(
                 content={"pushed": False, "reason": "no_active_session"},
                 headers=no_store_headers,
             )
         if not API_KEY:
+            await _save_shadow_push_decision_log(
+                session_id=session_id,
+                action="error",
+                reason="api_key_missing",
+                model=DEFAULT_MODEL,
+                parse_success=None,
+                error_type="api_key_missing",
+            )
             return JSONResponse(
                 status_code=500,
                 content={"pushed": False, "reason": "api_key_missing"},
@@ -2723,6 +2956,16 @@ async def api_push_trigger(request: Request):
 
         retry_result = await retry_undelivered_bark_push(session_id)
         if retry_result.get("attempted"):
+            await _save_shadow_push_decision_log(
+                session_id=session_id,
+                action="blocked",
+                reason="bark_retry",
+                model=DEFAULT_MODEL,
+                parse_success=None,
+                pushed=False,
+                bark_delivered=bool(retry_result.get("delivered", False)),
+                error_type="retry_exhausted" if retry_result.get("exhausted") else "",
+            )
             return JSONResponse(
                 content={
                     "pushed": False,
@@ -2745,6 +2988,14 @@ async def api_push_trigger(request: Request):
         return JSONResponse(content=result, headers=no_store_headers)
     except Exception as e:
         print(f"⚠️ 主动推送异常: {type(e).__name__}")
+        await _save_shadow_push_decision_log(
+            session_id=session_id,
+            action="error",
+            reason="internal_error",
+            model=DEFAULT_MODEL,
+            parse_success=None,
+            error_type=type(e).__name__,
+        )
         return JSONResponse(
             status_code=500,
             content={"pushed": False, "reason": "internal_error"},
