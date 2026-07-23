@@ -9,6 +9,7 @@
 
 import os
 import re
+import json
 import hashlib
 from typing import Optional, List
 from datetime import datetime, timedelta, timezone as dt_timezone
@@ -227,6 +228,51 @@ async def init_tables():
             CREATE INDEX IF NOT EXISTS idx_shadow_push_decisions_action_time
             ON shadow_push_decisions (action, checked_at DESC);
         """)
+
+        # io 感知事件：只作为设备/环境数据入口，不写 conversations
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS io_context_events (
+                id                  SERIAL PRIMARY KEY,
+                client_event_id     TEXT,
+                device_id           TEXT NOT NULL,
+                app_instance_id     TEXT DEFAULT '',
+                source_client       TEXT DEFAULT 'io',
+                event_type          TEXT NOT NULL,
+                observed_at         TIMESTAMPTZ NOT NULL,
+                received_at         TIMESTAMPTZ DEFAULT NOW(),
+                timezone            TEXT DEFAULT '',
+                permission_state    TEXT DEFAULT '',
+                payload             JSONB DEFAULT '{}'::jsonb,
+                schema_version      INTEGER DEFAULT 1
+            );
+        """)
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_io_context_events_client_event
+            ON io_context_events (device_id, client_event_id)
+            WHERE client_event_id IS NOT NULL;
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_io_context_events_type_observed
+            ON io_context_events (event_type, observed_at DESC);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_io_context_events_device_observed
+            ON io_context_events (device_id, observed_at DESC);
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS io_context_latest (
+                device_id           TEXT NOT NULL,
+                event_type          TEXT NOT NULL,
+                observed_at         TIMESTAMPTZ NOT NULL,
+                received_at         TIMESTAMPTZ DEFAULT NOW(),
+                timezone            TEXT DEFAULT '',
+                permission_state    TEXT DEFAULT '',
+                payload             JSONB DEFAULT '{}'::jsonb,
+                schema_version      INTEGER DEFAULT 1,
+                updated_at          TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (device_id, event_type)
+            );
+        """)
         
         # ---- 三层记忆架构字段（layer / title / is_active / merged_from / event_date）----
         # layer: 1=原始碎片, 2=事件记忆, 3=核心记忆
@@ -440,6 +486,129 @@ async def save_shadow_push_decision(
             int(recent_excerpt_count or 0),
             _decision_text(error_type, 128),
         )
+
+
+def _io_text(value, max_len: int = 128) -> str:
+    text = value if isinstance(value, str) else ""
+    text = re.sub(r"[\r\n\t]+", " ", text).strip()
+    return text[:max_len]
+
+
+def _io_int(value, default: int = 1) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _io_observed_at(value) -> datetime:
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value.strip():
+        text = value.strip().replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            dt = datetime.now(dt_timezone.utc)
+    else:
+        dt = datetime.now(dt_timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=dt_timezone.utc)
+    return dt.astimezone(dt_timezone.utc)
+
+
+async def save_io_context_events(
+    device_id: str,
+    events: list,
+    app_instance_id: str = "",
+    source_client: str = "io",
+    timezone_name: str = "",
+    schema_version: int = 1,
+) -> dict:
+    pool = await get_pool()
+    received = 0
+    inserted = 0
+    duplicates = 0
+    skipped = 0
+    latest_updated = 0
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for event in events or []:
+                if not isinstance(event, dict):
+                    skipped += 1
+                    continue
+                event_type = _io_text(event.get("event_type") or event.get("type"), 80)
+                if not event_type:
+                    skipped += 1
+                    continue
+                payload = event.get("payload")
+                if payload is None:
+                    payload = {}
+                payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                client_event_id = _io_text(event.get("client_event_id") or event.get("id"), 128) or None
+                permission_state = _io_text(event.get("permission_state"), 64)
+                observed_at = _io_observed_at(event.get("observed_at") or event.get("timestamp"))
+                received += 1
+
+                status = await conn.execute(
+                    """
+                    INSERT INTO io_context_events (
+                        client_event_id, device_id, app_instance_id, source_client,
+                        event_type, observed_at, timezone, permission_state,
+                        payload, schema_version
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    client_event_id,
+                    _io_text(device_id, 128),
+                    _io_text(app_instance_id, 128),
+                    _io_text(source_client, 64) or "io",
+                    event_type,
+                    observed_at,
+                    _io_text(event.get("timezone") or timezone_name, 64),
+                    permission_state,
+                    payload_json,
+                    _io_int(event.get("schema_version"), _io_int(schema_version, 1)),
+                )
+                if status.endswith("1"):
+                    inserted += 1
+                else:
+                    duplicates += 1
+
+                upsert_status = await conn.execute(
+                    """
+                    INSERT INTO io_context_latest (
+                        device_id, event_type, observed_at, timezone,
+                        permission_state, payload, schema_version, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, NOW())
+                    ON CONFLICT (device_id, event_type) DO UPDATE SET
+                        observed_at = EXCLUDED.observed_at,
+                        timezone = EXCLUDED.timezone,
+                        permission_state = EXCLUDED.permission_state,
+                        payload = EXCLUDED.payload,
+                        schema_version = EXCLUDED.schema_version,
+                        updated_at = NOW()
+                    WHERE EXCLUDED.observed_at >= io_context_latest.observed_at
+                    """,
+                    _io_text(device_id, 128),
+                    event_type,
+                    observed_at,
+                    _io_text(event.get("timezone") or timezone_name, 64),
+                    permission_state,
+                    payload_json,
+                    _io_int(event.get("schema_version"), _io_int(schema_version, 1)),
+                )
+                if upsert_status.endswith("1"):
+                    latest_updated += 1
+    return {
+        "received": received,
+        "inserted": inserted,
+        "duplicates": duplicates,
+        "skipped": skipped,
+        "latest_updated": latest_updated,
+    }
 
 
 # ============================================================

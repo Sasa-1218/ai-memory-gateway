@@ -39,7 +39,7 @@ except Exception:
     jwt = None
     RSAAlgorithm = None
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_io_context_events
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories
 
@@ -65,6 +65,9 @@ PORT = int(os.getenv("PORT", "8080"))
 # 网关访问密钥（程序客户端/API 调用使用 X-Gateway-Key 请求头）
 # Dashboard 网页访问由 Cloudflare Access 单独保护，不再支持 URL 参数登录。
 GATEWAY_SECRET = os.getenv("GATEWAY_SECRET", "")
+
+# io 感知数据入口密钥：独立于 Kelivo 使用的 X-Gateway-Key
+IO_INGEST_SECRET = os.getenv("IO_INGEST_SECRET", "")
 
 # Cloudflare Access：用于 Dashboard 页面和 Dashboard 私有接口
 # CF_ACCESS_TEAM_DOMAIN 示例：https://your-team.cloudflareaccess.com
@@ -374,6 +377,7 @@ DASHBOARD_ACCESS_PATHS = ("/dashboard",)
 DASHBOARD_ACCESS_PREFIXES = ("/dashboard/", "/api/", "/import/", "/export/")
 
 # 程序客户端继续使用 X-Gateway-Key，避免影响 Kelivo、健康/状态上报等非网页调用。
+IO_KEY_PREFIXES = ("/v1/io/",)
 GATEWAY_KEY_PREFIXES = ("/v1/",)
 GATEWAY_KEY_PATHS = ("/api/health/push", "/api/status/push", "/debug/routes")
 
@@ -385,13 +389,21 @@ def _is_public_path(path: str) -> bool:
 
 
 def _is_gateway_key_path(path: str) -> bool:
+    if _is_io_key_path(path):
+        return False
     if path in GATEWAY_KEY_PATHS:
         return True
     return any(path.startswith(prefix) for prefix in GATEWAY_KEY_PREFIXES)
 
 
+def _is_io_key_path(path: str) -> bool:
+    return any(path.startswith(prefix) for prefix in IO_KEY_PREFIXES)
+
+
 def _is_dashboard_access_path(path: str) -> bool:
     if _is_gateway_key_path(path):
+        return False
+    if _is_io_key_path(path):
         return False
     if path in DASHBOARD_ACCESS_PATHS:
         return True
@@ -407,6 +419,25 @@ async def gateway_auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     if _is_public_path(path):
+        return await call_next(request)
+
+    if _is_io_key_path(path):
+        if not IO_INGEST_SECRET:
+            if not hasattr(gateway_auth_middleware, "_warned_io_secret"):
+                print("⚠️  IO_INGEST_SECRET 未设置，io感知入口保持关闭", flush=True)
+                gateway_auth_middleware._warned_io_secret = True
+            return JSONResponse(
+                status_code=503,
+                content={"error": "io ingest is not configured"},
+            )
+        io_key = request.headers.get("X-IO-Key", "")
+        io_auth_success = bool(io_key) and secrets.compare_digest(io_key, IO_INGEST_SECRET)
+        _log_io_auth_diag(request, io_key, io_auth_success)
+        if not io_auth_success:
+            return JSONResponse(
+                status_code=401,
+                content={"error": "Unauthorized. Provide X-IO-Key header."},
+            )
         return await call_next(request)
 
     if _is_dashboard_access_path(path):
@@ -777,6 +808,16 @@ def _log_auth_diag(request: Request, header_key: str, auth_success: bool):
         f"query_key_present={str(query_key_present).lower()} | "
         f"query_key_valid=false | "
         f"auth_success={str(auth_success).lower()}",
+        flush=True,
+    )
+
+
+def _log_io_auth_diag(request: Request, io_key: str, auth_success: bool):
+    print(
+        "📱 io鉴权诊断: "
+        f"path={request.url.path} | "
+        f"header_present={str(bool(io_key)).lower()} | "
+        f"header_valid={str(auth_success).lower()}",
         flush=True,
     )
 
@@ -3050,6 +3091,81 @@ async def list_models():
                 "owned_by": "ai-memory-gateway",
             }
         ],
+    }
+
+
+def _io_request_text(value, max_len: int = 128) -> str:
+    text = value if isinstance(value, str) else ""
+    text = re.sub(r"[\r\n\t]+", " ", text).strip()
+    return text[:max_len]
+
+
+def _io_schema_version(value) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(number, 1000))
+
+
+def _io_event_type_summary(events: list) -> str:
+    event_types = sorted({
+        _io_request_text((event or {}).get("event_type") or (event or {}).get("type"), 80)
+        for event in events
+        if isinstance(event, dict)
+    })
+    event_types = [item for item in event_types if item]
+    if not event_types:
+        return "none"
+    return ",".join(event_types[:12])
+
+
+@app.post("/v1/io/context/events")
+async def io_context_events(request: Request):
+    """io 感知事件入口：只写入设备/环境数据，不调用模型、不写 conversations。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_json"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "invalid_payload"})
+
+    device_id = _io_request_text(body.get("device_id") or body.get("deviceId"), 128)
+    if not device_id:
+        return JSONResponse(status_code=400, content={"error": "device_id_required"})
+
+    events = body.get("events")
+    if not isinstance(events, list) or not events:
+        return JSONResponse(status_code=400, content={"error": "events_required"})
+    if len(events) > 100:
+        return JSONResponse(status_code=413, content={"error": "too_many_events", "max_events": 100})
+
+    result = await save_io_context_events(
+        device_id=device_id,
+        app_instance_id=_io_request_text(body.get("app_instance_id") or body.get("appInstanceId"), 128),
+        source_client=_io_request_text(body.get("source_client"), 64) or "io",
+        timezone_name=_io_request_text(body.get("timezone"), 64),
+        schema_version=_io_schema_version(body.get("schema_version")),
+        events=events,
+    )
+    print(
+        "📱 io感知事件入库: "
+        f"device_hash={_short_hash_text(device_id)} | "
+        f"events_received={len(events)} | "
+        f"event_types={_io_event_type_summary(events)} | "
+        f"inserted={result.get('inserted', 0)} | "
+        f"duplicates={result.get('duplicates', 0)} | "
+        f"skipped={result.get('skipped', 0)} | "
+        f"latest_updated={result.get('latest_updated', 0)}",
+        flush=True,
+    )
+    return {
+        "status": "ok",
+        "received": result.get("received", 0),
+        "inserted": result.get("inserted", 0),
+        "duplicates": result.get("duplicates", 0),
+        "skipped": result.get("skipped", 0),
+        "latest_updated": result.get("latest_updated", 0),
     }
 
 
