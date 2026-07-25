@@ -39,7 +39,7 @@ except Exception:
     jwt = None
     RSAAlgorithm = None
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_io_context_events
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, save_io_context_events
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories
 
@@ -2203,6 +2203,227 @@ async def _save_shadow_push_decision_log(
         print(f"⚠️ 主动推送决策日志写入失败: {type(e).__name__}", flush=True)
 
 
+
+SHADOW_MIND_DRIVES = ("longing", "curiosity", "share", "warmth", "concern")
+
+
+def _shadow_mind_clamp(value: int | float) -> int:
+    try:
+        number = int(round(value))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(100, number))
+
+
+def _shadow_mind_minutes(value) -> int:
+    if value in (None, "", "not_applicable", "not_reported"):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _shadow_mind_add_reason(reasons: list, drive: str, reason_code: str, weight: int) -> None:
+    if drive not in SHADOW_MIND_DRIVES:
+        return
+    reasons.append({
+        "drive": drive,
+        "reason_code": _clean_push_decision_code(reason_code, fallback="unspecified", max_len=96),
+        "weight": _shadow_mind_clamp(weight),
+    })
+
+
+def _shadow_mind_silence_band(silence_minutes: int) -> str:
+    if silence_minutes >= 24 * 60:
+        return "silence_24h"
+    if silence_minutes >= 12 * 60:
+        return "silence_12h"
+    if silence_minutes >= 6 * 60:
+        return "silence_6h"
+    if silence_minutes >= 3 * 60:
+        return "silence_3h"
+    if silence_minutes >= 60:
+        return "silence_1h"
+    if silence_minutes >= 30:
+        return "silence_30m"
+    return "recent_contact"
+
+
+def compute_shadow_mind_state(interaction_state: dict, timing_state: dict | None = None) -> dict:
+    """Shadow Mind Phase A：确定性内在状态计算，不参与主动推送 send/skip 判断。"""
+    interaction_state = interaction_state or {}
+    merged = dict(interaction_state)
+    if timing_state:
+        merged.update(timing_state)
+
+    silence = _shadow_mind_minutes(merged.get("silence_minutes"))
+    last_push_minutes = _shadow_mind_minutes(merged.get("last_push_minutes"))
+    unanswered = _shadow_mind_minutes(merged.get("consecutive_unanswered_pushes"))
+    last_role = merged.get("last_effective_role") or "none"
+    replied_after_push = merged.get("user_replied_after_last_push")
+    push_window = merged.get("push_window") or "not_applicable"
+    is_early = bool(merged.get("is_early_window"))
+
+    reasons = []
+    silence_band = _shadow_mind_silence_band(silence)
+
+    longing = 18
+    if silence >= 30:
+        longing += min(42, silence // 45 * 4)
+        _shadow_mind_add_reason(reasons, "longing", silence_band, min(60, silence // 30))
+    if last_role == "user":
+        longing += 8
+        _shadow_mind_add_reason(reasons, "longing", "last_effective_role_user", 12)
+    if unanswered:
+        longing -= min(18, unanswered * 6)
+        _shadow_mind_add_reason(reasons, "longing", "unanswered_pushes_reduce_pressure", unanswered * 8)
+
+    curiosity = 16
+    if last_role == "user":
+        curiosity += 24
+        _shadow_mind_add_reason(reasons, "curiosity", "user_left_recent_thread", 28)
+    if silence >= 180:
+        curiosity += 12
+        _shadow_mind_add_reason(reasons, "curiosity", silence_band, 16)
+    if unanswered >= 2:
+        curiosity -= 10
+        _shadow_mind_add_reason(reasons, "curiosity", "avoid_repeated_questions", 18)
+
+    share = 20
+    if push_window == "normal_window":
+        share += 16
+        _shadow_mind_add_reason(reasons, "share", "normal_window_available", 18)
+    elif is_early:
+        share -= 8
+        _shadow_mind_add_reason(reasons, "share", "early_window_high_bar", 14)
+    if silence >= 240:
+        share += 10
+        _shadow_mind_add_reason(reasons, "share", silence_band, 10)
+    if unanswered:
+        share -= min(12, unanswered * 4)
+
+    warmth = 52
+    if replied_after_push is True:
+        warmth += 12
+        _shadow_mind_add_reason(reasons, "warmth", "user_replied_after_last_push", 20)
+    if last_role == "user":
+        warmth += 6
+        _shadow_mind_add_reason(reasons, "warmth", "conversation_recently_received", 10)
+    if silence >= 360:
+        warmth += 6
+        _shadow_mind_add_reason(reasons, "warmth", "soft_reconnect_after_time", 10)
+
+    concern = 4
+    if silence >= 24 * 60:
+        concern += 30
+    elif silence >= 12 * 60:
+        concern += 22
+    elif silence >= 6 * 60:
+        concern += 14
+    elif silence >= 3 * 60:
+        concern += 8
+    if silence >= 180:
+        _shadow_mind_add_reason(reasons, "concern", "concern_time_only", min(42, silence // 60 * 5))
+    if unanswered >= 3:
+        concern += 6
+        _shadow_mind_add_reason(reasons, "concern", "unanswered_pushes_do_not_escalate", 18)
+    concern = min(concern, 45)
+
+    state = {
+        "longing": _shadow_mind_clamp(longing),
+        "curiosity": _shadow_mind_clamp(curiosity),
+        "share": _shadow_mind_clamp(share),
+        "warmth": _shadow_mind_clamp(warmth),
+        "concern": _shadow_mind_clamp(concern),
+    }
+    inputs = {
+        "silence_minutes": silence,
+        "last_push_minutes": last_push_minutes if merged.get("last_push_minutes") != "not_applicable" else "not_applicable",
+        "last_effective_role": last_role,
+        "user_replied_after_last_push": replied_after_push,
+        "consecutive_unanswered_pushes": unanswered,
+        "push_window": push_window,
+        "is_early_window": is_early,
+    }
+    return {
+        "state": state,
+        "reasons": reasons,
+        "inputs": inputs,
+        "thought_pool": _build_shadow_mind_thought_pool(state, reasons),
+    }
+
+
+def _build_shadow_mind_thought_pool(state: dict, reasons: list) -> list:
+    items = []
+    thresholds = {
+        "longing": (62, "approach"),
+        "curiosity": (58, "ask_or_notice"),
+        "share": (58, "small_share"),
+        "warmth": (68, "affection"),
+        "concern": (32, "gentle_check_in"),
+    }
+    reason_by_drive = {}
+    for item in reasons or []:
+        if isinstance(item, dict) and item.get("drive") not in reason_by_drive:
+            reason_by_drive[item.get("drive")] = item.get("reason_code", "drive_threshold")
+    for drive, (threshold, thought_type) in thresholds.items():
+        intensity = _shadow_mind_clamp((state or {}).get(drive, 0))
+        if intensity < threshold:
+            continue
+        items.append({
+            "thought_type": thought_type,
+            "drive": drive,
+            "intensity": intensity,
+            "reason_code": reason_by_drive.get(drive, "drive_threshold"),
+        })
+    return items
+
+
+def _shadow_mind_json_value(value, fallback):
+    if value in (None, ""):
+        return fallback
+    if isinstance(value, (list, dict)):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return fallback
+        return parsed if isinstance(parsed, type(fallback)) else fallback
+    return fallback
+
+
+def _shadow_mind_public_state(row: dict | None) -> dict | None:
+    if not row:
+        return None
+    computed_at = row.get("computed_at")
+    updated_at = row.get("updated_at")
+    return {
+        "session_id": row.get("session_id", ""),
+        "state": {drive: row.get(drive, 0) for drive in SHADOW_MIND_DRIVES},
+        "reasons": _shadow_mind_json_value(row.get("reasons"), []),
+        "inputs": _shadow_mind_json_value(row.get("inputs"), {}),
+        "computed_at": computed_at.isoformat() if hasattr(computed_at, "isoformat") else computed_at,
+        "updated_at": updated_at.isoformat() if hasattr(updated_at, "isoformat") else updated_at,
+    }
+
+
+def _shadow_mind_public_events(events: list) -> list:
+    public = []
+    for event in events or []:
+        created_at = event.get("created_at")
+        public.append({
+            "drive": event.get("drive", ""),
+            "previous_value": event.get("previous_value"),
+            "new_value": event.get("new_value"),
+            "delta": event.get("delta"),
+            "reason_code": event.get("reason_code", ""),
+            "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+        })
+    return public
+
+
 async def _log_push_decision_diag(session_id: str, reason: str, timing_state: dict | None = None):
     try:
         now_local = _local_now()
@@ -3853,6 +4074,55 @@ async def api_push_status():
     if not MEMORY_ENABLED:
         return {"enabled": False, "reason": "memory_disabled"}
     return await get_push_delivery_status(get_active_session_id())
+
+
+@app.get("/api/shadow/mind/status")
+async def api_shadow_mind_status():
+    """Shadow Mind Phase A 状态（脱敏，只读展示）。"""
+    if not MEMORY_ENABLED:
+        return {"enabled": False, "reason": "memory_disabled"}
+    session_id = get_active_session_id()
+    state = await get_shadow_mind_state(session_id)
+    events = await get_recent_drive_events(session_id, limit=20)
+    return {
+        "enabled": True,
+        "session_id": session_id,
+        "shadow_mind_state": _shadow_mind_public_state(state),
+        "drive_event_log": _shadow_mind_public_events(events),
+    }
+
+
+@app.post("/api/shadow/mind/recompute")
+async def api_shadow_mind_recompute():
+    """手动重算 Shadow Mind Phase A；不调用模型、不触发主动推送。"""
+    if not MEMORY_ENABLED:
+        return {"enabled": False, "reason": "memory_disabled"}
+    session_id = get_active_session_id()
+    now_local = _local_now()
+    interaction_state = await _get_push_interaction_state(session_id, now_local)
+    timing_state = await _get_push_timing_state(session_id, now_local)
+    computed = compute_shadow_mind_state(interaction_state, timing_state)
+    saved = await save_shadow_mind_state(
+        session_id=session_id,
+        state=computed["state"],
+        reasons=computed["reasons"],
+        inputs=computed["inputs"],
+        thought_items=computed["thought_pool"],
+    )
+    events = await get_recent_drive_events(session_id, limit=20)
+    return {
+        "enabled": True,
+        "session_id": session_id,
+        "shadow_mind_state": {
+            "state": saved["state"],
+            "reasons": computed["reasons"],
+            "inputs": computed["inputs"],
+            "thought_pool": computed["thought_pool"],
+        },
+        "event_count": saved["event_count"],
+        "thought_count": saved["thought_count"],
+        "drive_event_log": _shadow_mind_public_events(events),
+    }
 
 
 @app.post("/api/conversations/{session_id}/messages")

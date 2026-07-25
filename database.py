@@ -382,6 +382,60 @@ async def init_tables():
             ON shadow_push_decisions (action, checked_at DESC);
         """)
 
+        # Shadow Mind Phase A：只记录可观察内在状态，不保存聊天正文/prompt/密钥
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS shadow_mind_state (
+                session_id      TEXT PRIMARY KEY,
+                longing         INTEGER DEFAULT 0,
+                curiosity       INTEGER DEFAULT 0,
+                share           INTEGER DEFAULT 0,
+                warmth          INTEGER DEFAULT 0,
+                concern         INTEGER DEFAULT 0,
+                reasons         JSONB DEFAULT '[]'::jsonb,
+                inputs          JSONB DEFAULT '{}'::jsonb,
+                computed_at     TIMESTAMPTZ DEFAULT NOW(),
+                updated_at      TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS thought_pool (
+                id              SERIAL PRIMARY KEY,
+                session_id      TEXT NOT NULL,
+                thought_type    TEXT NOT NULL,
+                drive           TEXT DEFAULT '',
+                intensity       INTEGER DEFAULT 0,
+                reason_code     TEXT DEFAULT '',
+                status          TEXT DEFAULT 'open',
+                metadata        JSONB DEFAULT '{}'::jsonb,
+                created_at      TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_thought_pool_session_status_time
+            ON thought_pool (session_id, status, created_at DESC);
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS drive_event_log (
+                id              SERIAL PRIMARY KEY,
+                session_id      TEXT NOT NULL,
+                drive           TEXT NOT NULL,
+                previous_value  INTEGER,
+                new_value       INTEGER,
+                delta           INTEGER,
+                reason_code     TEXT DEFAULT '',
+                metadata        JSONB DEFAULT '{}'::jsonb,
+                created_at      TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_drive_event_log_session_time
+            ON drive_event_log (session_id, created_at DESC);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_drive_event_log_drive_time
+            ON drive_event_log (drive, created_at DESC);
+        """)
+
         # io 感知事件：只作为设备/环境数据入口，不写 conversations
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS io_context_events (
@@ -639,6 +693,206 @@ async def save_shadow_push_decision(
             int(recent_excerpt_count or 0),
             _decision_text(error_type, 128),
         )
+
+
+
+SHADOW_MIND_DRIVES = ("longing", "curiosity", "share", "warmth", "concern")
+
+
+def _shadow_mind_int(value, default: int = 0) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, min(100, number))
+
+
+def _shadow_mind_text(value, max_len: int = 128) -> str:
+    text = value if isinstance(value, str) else ""
+    text = re.sub(r"[^a-zA-Z0-9_:-]", "", text).strip()
+    return text[:max_len]
+
+
+def _shadow_mind_reason_for_drive(reasons: list, drive: str) -> str:
+    for item in reasons or []:
+        if isinstance(item, dict) and item.get("drive") == drive:
+            code = _shadow_mind_text(item.get("reason_code"), 128)
+            if code:
+                return code
+    return "state_recomputed"
+
+
+async def save_shadow_mind_state(
+    session_id: str,
+    state: dict,
+    reasons: list,
+    inputs: dict,
+    thought_items: list | None = None,
+) -> dict:
+    """保存 Shadow Mind Phase A 状态；只接受数字、reason code 和脱敏 metadata。"""
+    state_values = {drive: _shadow_mind_int((state or {}).get(drive)) for drive in SHADOW_MIND_DRIVES}
+    safe_reasons = []
+    for item in reasons or []:
+        if not isinstance(item, dict):
+            continue
+        drive = item.get("drive")
+        if drive not in SHADOW_MIND_DRIVES:
+            continue
+        safe_reasons.append({
+            "drive": drive,
+            "reason_code": _shadow_mind_text(item.get("reason_code"), 128),
+            "weight": _shadow_mind_int(item.get("weight"), 0),
+        })
+    safe_inputs = {
+        key: value
+        for key, value in (inputs or {}).items()
+        if key in {
+            "silence_minutes",
+            "last_push_minutes",
+            "last_effective_role",
+            "user_replied_after_last_push",
+            "consecutive_unanswered_pushes",
+            "push_window",
+            "is_early_window",
+        }
+    }
+
+    pool = await get_pool()
+    event_count = 0
+    thought_count = 0
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            previous = await conn.fetchrow(
+                """
+                SELECT longing, curiosity, share, warmth, concern
+                FROM shadow_mind_state
+                WHERE session_id = $1
+                """,
+                _decision_text(session_id, 256),
+            )
+            await conn.execute(
+                """
+                INSERT INTO shadow_mind_state (
+                    session_id, longing, curiosity, share, warmth, concern,
+                    reasons, inputs, computed_at, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, NOW(), NOW())
+                ON CONFLICT (session_id) DO UPDATE SET
+                    longing = EXCLUDED.longing,
+                    curiosity = EXCLUDED.curiosity,
+                    share = EXCLUDED.share,
+                    warmth = EXCLUDED.warmth,
+                    concern = EXCLUDED.concern,
+                    reasons = EXCLUDED.reasons,
+                    inputs = EXCLUDED.inputs,
+                    computed_at = NOW(),
+                    updated_at = NOW()
+                """,
+                _decision_text(session_id, 256),
+                state_values["longing"],
+                state_values["curiosity"],
+                state_values["share"],
+                state_values["warmth"],
+                state_values["concern"],
+                json.dumps(safe_reasons, ensure_ascii=False),
+                json.dumps(safe_inputs, ensure_ascii=False),
+            )
+
+            for drive in SHADOW_MIND_DRIVES:
+                old_value = int(previous[drive]) if previous else None
+                new_value = state_values[drive]
+                if old_value == new_value:
+                    continue
+                await conn.execute(
+                    """
+                    INSERT INTO drive_event_log (
+                        session_id, drive, previous_value, new_value,
+                        delta, reason_code, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                    """,
+                    _decision_text(session_id, 256),
+                    drive,
+                    old_value,
+                    new_value,
+                    None if old_value is None else new_value - old_value,
+                    _shadow_mind_reason_for_drive(safe_reasons, drive),
+                    json.dumps({"phase": "A"}, ensure_ascii=False),
+                )
+                event_count += 1
+
+            for item in thought_items or []:
+                if not isinstance(item, dict):
+                    continue
+                drive = item.get("drive")
+                if drive not in SHADOW_MIND_DRIVES:
+                    continue
+                status = await conn.execute(
+                    """
+                    INSERT INTO thought_pool (
+                        session_id, thought_type, drive, intensity,
+                        reason_code, status, metadata
+                    )
+                    SELECT $1, $2, $3, $4, $5, 'open', $6::jsonb
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM thought_pool
+                        WHERE session_id = $1
+                          AND thought_type = $2
+                          AND drive = $3
+                          AND reason_code = $5
+                          AND status = 'open'
+                          AND created_at > NOW() - INTERVAL '6 hours'
+                    )
+                    """,
+                    _decision_text(session_id, 256),
+                    _shadow_mind_text(item.get("thought_type"), 64) or "drive_signal",
+                    drive,
+                    _shadow_mind_int(item.get("intensity")),
+                    _shadow_mind_text(item.get("reason_code"), 128) or "drive_threshold",
+                    json.dumps({"phase": "A"}, ensure_ascii=False),
+                )
+                if status.endswith("1"):
+                    thought_count += 1
+
+    return {
+        "state": state_values,
+        "event_count": event_count,
+        "thought_count": thought_count,
+    }
+
+
+async def get_shadow_mind_state(session_id: str) -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT session_id, longing, curiosity, share, warmth, concern,
+                   reasons, inputs, computed_at, updated_at
+            FROM shadow_mind_state
+            WHERE session_id = $1
+            """,
+            _decision_text(session_id, 256),
+        )
+    return dict(row) if row else None
+
+
+async def get_recent_drive_events(session_id: str, limit: int = 20) -> list:
+    pool = await get_pool()
+    safe_limit = max(1, min(100, int(limit or 20)))
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT drive, previous_value, new_value, delta, reason_code, created_at
+            FROM drive_event_log
+            WHERE session_id = $1
+            ORDER BY created_at DESC, id DESC
+            LIMIT $2
+            """,
+            _decision_text(session_id, 256),
+            safe_limit,
+        )
+    return [dict(row) for row in rows]
 
 
 def _io_text(value, max_len: int = 128) -> str:
