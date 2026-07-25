@@ -21,7 +21,7 @@ import re
 import hashlib
 import logging
 import httpx
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date as date_cls
 from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Request
@@ -153,12 +153,38 @@ def _env_int(key: str, default: int) -> int:
         print(f"⚠️ 环境变量 {key} 值无效，回退默认值 {default}")
         return default
 
+
+def _env_float(key: str, default: float) -> float:
+    raw = os.getenv(key)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"⚠️ 环境变量 {key} 值无效，回退默认值 {default}")
+        return default
+
 # 主动推送配置
 PUSH_SECRET = os.getenv("PUSH_SECRET", "")
 PUSH_MAX_PER_DAY = _env_int("PUSH_MAX_PER_DAY", 7)
 PUSH_HARD_MINIMUM_MINUTES = 30
 PUSH_NORMAL_MIN_MINUTES = 120
 PUSH_NORMAL_JITTER_MINUTES = 90
+PUSH_DECISION_NORMAL_COOLDOWN_MINUTES = _env_int("PUSH_DECISION_NORMAL_COOLDOWN_MINUTES", 30)
+PUSH_DECISION_SKIP_COOLDOWN_MINUTES = (
+    _env_int("PUSH_DECISION_SKIP_COOLDOWN_1_MINUTES", 60),
+    _env_int("PUSH_DECISION_SKIP_COOLDOWN_2_MINUTES", 90),
+    _env_int("PUSH_DECISION_SKIP_COOLDOWN_3_MINUTES", 120),
+)
+PUSH_DECISION_COST_INPUT_PER_MILLION = _env_float("PUSH_DECISION_COST_INPUT_PER_MILLION", 2.50)
+PUSH_DECISION_COST_OUTPUT_PER_MILLION = _env_float("PUSH_DECISION_COST_OUTPUT_PER_MILLION", 10.00)
+PUSH_DECISION_COOLDOWN_BYPASS_REASONS = {
+    "user_message_received",
+    "birthday",
+    "anniversary",
+    "hard_event",
+    "important_event",
+}
 BARK_DEVICE_KEY = os.getenv("BARK_DEVICE_KEY", "")
 BARK_API_URL = os.getenv("BARK_API_URL", "https://api.day.app/push")
 BARK_TITLE = os.getenv("BARK_TITLE", "Rora")
@@ -1676,6 +1702,171 @@ async def _get_push_timing_state(session_id: str, now_local: datetime) -> dict:
     return _build_push_timing_state(now_local, last_generated_at, last_delivered_at, target_minutes)
 
 
+def _shadow_decision_cooldown_minutes(consecutive_skips: int) -> int:
+    if consecutive_skips <= 0:
+        return max(0, PUSH_DECISION_NORMAL_COOLDOWN_MINUTES)
+    index = min(consecutive_skips, len(PUSH_DECISION_SKIP_COOLDOWN_MINUTES)) - 1
+    return max(0, PUSH_DECISION_SKIP_COOLDOWN_MINUTES[index])
+
+
+def _is_push_decision_cooldown_bypass_reason(reason: str) -> bool:
+    return reason in PUSH_DECISION_COOLDOWN_BYPASS_REASONS
+
+
+def _parse_month_day(value: str):
+    try:
+        month_text, day_text = (value or "").split("-", 1)
+        month = int(month_text)
+        day = int(day_text)
+    except Exception:
+        return None
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    return month, day
+
+
+def _important_date_matches_today(
+    *,
+    today: date_cls,
+    date_text: str = "",
+    date_start: str = "",
+    date_end: str = "",
+    event_year: int | None = None,
+) -> bool:
+    if event_year and today.year < int(event_year):
+        return False
+
+    value = (date_text or "").strip()
+    if len(value) == 10:
+        try:
+            return today == date_cls.fromisoformat(value)
+        except Exception:
+            return False
+    if len(value) == 5:
+        month_day = _parse_month_day(value)
+        return bool(month_day and (today.month, today.day) == month_day)
+
+    start = _parse_month_day((date_start or "").strip())
+    end = _parse_month_day((date_end or "").strip())
+    if start and end:
+        current = (today.month, today.day)
+        if start <= end:
+            return start <= current <= end
+        return current >= start or current <= end
+    return False
+
+
+async def _get_active_hard_event_bypass_reason(now_local: datetime) -> str:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT event_type, date_text, date_start, date_end, event_year
+            FROM important_dates
+            WHERE cooldown_bypass = TRUE
+            """
+        )
+    today = now_local.date()
+    for row in rows:
+        if _important_date_matches_today(
+            today=today,
+            date_text=row["date_text"],
+            date_start=row["date_start"],
+            date_end=row["date_end"],
+            event_year=row["event_year"],
+        ):
+            return "hard_event"
+    return ""
+
+
+async def _get_shadow_decision_cooldown_state(session_id: str, now_local: datetime) -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT action, reason, checked_at
+            FROM shadow_push_decisions
+            WHERE session_id = $1
+              AND action IN ('send', 'skip', 'error')
+            ORDER BY checked_at DESC, id DESC
+            LIMIT 20
+            """,
+            session_id,
+        )
+        last_user_at = await conn.fetchval(
+            """
+            SELECT created_at
+            FROM conversations
+            WHERE session_id = $1
+              AND role = 'user'
+              AND COALESCE(content, '') <> ''
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            session_id,
+        )
+
+    if not rows:
+        return {
+            "decision_cooldown_active": False,
+            "decision_cooldown_reason": "no_prior_decision",
+            "decision_cooldown_minutes": 0,
+            "decision_cooldown_remaining_minutes": 0,
+            "decision_consecutive_skips": 0,
+            "decision_cooldown_bypass": "none",
+        }
+
+    latest = rows[0]
+    latest_at = latest["checked_at"]
+    latest_action = latest["action"] or ""
+    latest_at_utc = _to_utc(latest_at)
+    last_user_utc = _to_utc(last_user_at)
+    bypass_reason = "user_message_received"
+    if latest_at_utc and last_user_utc and last_user_utc > latest_at_utc and _is_push_decision_cooldown_bypass_reason(bypass_reason):
+        return {
+            "decision_cooldown_active": False,
+            "decision_cooldown_reason": bypass_reason,
+            "decision_cooldown_minutes": 0,
+            "decision_cooldown_remaining_minutes": 0,
+            "decision_consecutive_skips": 0,
+            "decision_cooldown_bypass": "user_message_received",
+        }
+
+    hard_event_reason = await _get_active_hard_event_bypass_reason(now_local)
+    if hard_event_reason and _is_push_decision_cooldown_bypass_reason(hard_event_reason):
+        return {
+            "decision_cooldown_active": False,
+            "decision_cooldown_reason": hard_event_reason,
+            "decision_cooldown_minutes": 0,
+            "decision_cooldown_remaining_minutes": 0,
+            "decision_consecutive_skips": 0,
+            "decision_cooldown_bypass": hard_event_reason,
+        }
+
+    consecutive_skips = 0
+    for row in rows:
+        if row["action"] == "skip":
+            consecutive_skips += 1
+            continue
+        break
+
+    cooldown_minutes = _shadow_decision_cooldown_minutes(consecutive_skips)
+    elapsed_minutes = _minutes_between(now_local, latest_at)
+    elapsed_int = elapsed_minutes if isinstance(elapsed_minutes, int) else 0
+    remaining = max(0, cooldown_minutes - elapsed_int)
+    active = cooldown_minutes > 0 and remaining > 0
+    return {
+        "decision_cooldown_active": active,
+        "decision_cooldown_reason": "decision_cooldown" if active else "decision_cooldown_elapsed",
+        "decision_cooldown_minutes": cooldown_minutes,
+        "decision_cooldown_elapsed_minutes": elapsed_int,
+        "decision_cooldown_remaining_minutes": remaining,
+        "decision_consecutive_skips": consecutive_skips,
+        "decision_last_action": latest_action,
+        "decision_cooldown_bypass": "none",
+    }
+
+
 async def should_generate_push(
     session_id: str,
     *,
@@ -1727,6 +1918,17 @@ async def should_generate_push(
                 "max_per_day": PUSH_MAX_PER_DAY,
                 **timing_state,
             }
+
+    if enforce_cooldown:
+        decision_cooldown = await _get_shadow_decision_cooldown_state(session_id, now_local)
+        if decision_cooldown.get("decision_cooldown_active"):
+            return {
+                "should_push": False,
+                "reason": "decision_cooldown",
+                **timing_state,
+                **decision_cooldown,
+            }
+        timing_state.update(decision_cooldown)
 
     return {"should_push": True, "reason": timing_state["push_window"], **timing_state}
 
@@ -2537,6 +2739,53 @@ async def get_push_delivery_status(session_id: str) -> dict:
     }
 
 
+def _extract_usage_tokens(data: dict) -> tuple[int, int, int]:
+    usage = data.get("usage") if isinstance(data, dict) else None
+    if not isinstance(usage, dict):
+        return 0, 0, 0
+    prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    completion_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+    return max(0, prompt_tokens), max(0, completion_tokens), max(0, total_tokens)
+
+
+def _estimate_shadow_decision_cost_usd(prompt_tokens: int, completion_tokens: int) -> float:
+    cost = (
+        prompt_tokens * PUSH_DECISION_COST_INPUT_PER_MILLION
+        + completion_tokens * PUSH_DECISION_COST_OUTPUT_PER_MILLION
+    ) / 1_000_000
+    return round(max(0.0, cost), 8)
+
+
+async def _record_shadow_decision_token_usage(session_id: str, model: str, data: dict) -> None:
+    prompt_tokens, completion_tokens, total_tokens = _extract_usage_tokens(data)
+    if total_tokens <= 0:
+        print("📊 主动推送决策 Token: not_reported", flush=True)
+        return
+    estimated_cost = _estimate_shadow_decision_cost_usd(prompt_tokens, completion_tokens)
+    try:
+        await save_token_usage(
+            session_id,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            usage_type="shadow_push_decision",
+            estimated_cost_usd=estimated_cost,
+        )
+    except Exception as e:
+        print(f"⚠️ 主动推送决策Token记录失败: {type(e).__name__}", flush=True)
+        return
+    print(
+        "📊 主动推送决策Token: "
+        f"prompt_tokens={prompt_tokens} | "
+        f"completion_tokens={completion_tokens} | "
+        f"total_tokens={total_tokens} | "
+        f"estimated_cost_usd={estimated_cost:.8f}",
+        flush=True,
+    )
+
+
 async def generate_shadow_push(session_id: str, timing_state: dict | None = None) -> dict:
     recent_rows = await get_recent_conversation_messages(session_id, limit=16)
     recent_messages = _clean_history_for_push(recent_rows)
@@ -2655,6 +2904,7 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
             error_type="invalid_response_json",
         )
         return {"pushed": False, "reason": "invalid_response_json"}
+    await _record_shadow_decision_token_usage(session_id, DEFAULT_MODEL, data)
     raw_reply = ""
     try:
         raw_reply = data["choices"][0]["message"].get("content") or ""

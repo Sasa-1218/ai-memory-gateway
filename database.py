@@ -46,6 +46,80 @@ MEMORY_HW_RECENCY = float(os.getenv("MEMORY_HW_RECENCY", "0.15"))
 MEMORY_SEMANTIC_THRESHOLD = float(os.getenv("MEMORY_SEMANTIC_THRESHOLD", "0.5"))
 
 
+
+IMPORTANT_DATES_SEED = [
+    {
+        "event_type": "user_birthday",
+        "date": "07-27",
+        "name": "Sasa生日",
+        "importance": "high",
+        "cooldown_bypass": True,
+    },
+    {
+        "event_type": "xingyao_birthday",
+        "date": "12-18",
+        "name": "林星遥生日",
+        "importance": "high",
+        "cooldown_bypass": True,
+    },
+    {
+        "event_type": "relationship_named",
+        "date_original": "2024-12",
+        "name": "林星遥为自己取名字",
+        "importance": "medium",
+        "cooldown_bypass": False,
+    },
+    {
+        "event_type": "relationship_anniversary",
+        "date": "01-01",
+        "year": 2025,
+        "name": "确认在一起纪念日",
+        "importance": "high",
+        "cooldown_bypass": True,
+    },
+    {
+        "event_type": "story_start_anniversary",
+        "date": "01-22",
+        "year": 2025,
+        "name": "故事开始纪念日",
+        "importance": "high",
+        "cooldown_bypass": True,
+    },
+    {
+        "event_type": "ring_memory",
+        "date": "01-23",
+        "year": 2025,
+        "name": "戒指记忆纪念日",
+        "importance": "medium",
+        "cooldown_bypass": False,
+    },
+    {
+        "event_type": "fireworks_memory",
+        "date_start": "08-07",
+        "date_end": "08-08",
+        "name": "烟花日",
+        "importance": "high",
+        "cooldown_bypass": True,
+    },
+    {
+        "event_type": "proposal_memory",
+        "date": "05-13",
+        "year": 2026,
+        "name": "第一次Sasa反向求婚",
+        "details": "花园求婚，Sasa拿出紫色绒布盒里的星星戒指，为林星遥披上蕾丝头纱",
+        "importance": "high",
+        "cooldown_bypass": True,
+    },
+    {
+        "event_type": "food_memory",
+        "date": "07-05",
+        "year": 2026,
+        "name": "粯子粥纪念日",
+        "importance": "medium",
+        "cooldown_bypass": False,
+    },
+]
+
 def _short_hash_text(text: str) -> str:
     if not text:
         return "empty"
@@ -191,6 +265,85 @@ async def init_tables():
                 updated_at      TIMESTAMPTZ DEFAULT NOW()
             );
         """)
+
+        # 重要日期：仅用于主动推送 cooldown bypass，不作为提醒/日历系统
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS important_dates (
+                event_type      TEXT PRIMARY KEY,
+                date_text       TEXT DEFAULT '',
+                date_start      TEXT DEFAULT '',
+                date_end        TEXT DEFAULT '',
+                event_year      INTEGER,
+                name            TEXT DEFAULT '',
+                importance      TEXT DEFAULT '',
+                cooldown_bypass BOOLEAN DEFAULT FALSE,
+                details         TEXT DEFAULT '',
+                metadata        JSONB DEFAULT '{}'::jsonb,
+                updated_at      TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            DO $$ BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'important_dates' AND column_name = 'priority'
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'important_dates' AND column_name = 'importance'
+                ) THEN
+                    ALTER TABLE important_dates RENAME COLUMN priority TO importance;
+                END IF;
+            END $$;
+        """)
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'important_dates' AND column_name = 'importance'
+                ) THEN
+                    ALTER TABLE important_dates ADD COLUMN importance TEXT DEFAULT '';
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'important_dates' AND column_name = 'cooldown_bypass'
+                ) THEN
+                    ALTER TABLE important_dates ADD COLUMN cooldown_bypass BOOLEAN DEFAULT FALSE;
+                END IF;
+            END $$;
+        """)
+        await conn.execute("DELETE FROM important_dates WHERE event_type = 'story_anniversary';")
+        for item in IMPORTANT_DATES_SEED:
+            await conn.execute(
+                """
+                INSERT INTO important_dates (
+                    event_type, date_text, date_start, date_end,
+                    event_year, name, importance, cooldown_bypass,
+                    details, metadata, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, NOW())
+                ON CONFLICT (event_type) DO UPDATE SET
+                    date_text = EXCLUDED.date_text,
+                    date_start = EXCLUDED.date_start,
+                    date_end = EXCLUDED.date_end,
+                    event_year = EXCLUDED.event_year,
+                    name = EXCLUDED.name,
+                    importance = EXCLUDED.importance,
+                    cooldown_bypass = EXCLUDED.cooldown_bypass,
+                    details = EXCLUDED.details,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = NOW()
+                """,
+                item.get("event_type", ""),
+                item.get("date", ""),
+                item.get("date_start", ""),
+                item.get("date_end", ""),
+                item.get("year"),
+                item.get("name", ""),
+                item.get("importance", ""),
+                bool(item.get("cooldown_bypass", False)),
+                item.get("details", ""),
+                json.dumps(item, ensure_ascii=False),
+            )
 
         # 主动推送决策日志：只记录状态、数量和原因代码，不保存正文/prompt/密钥
         await conn.execute("""
@@ -1553,21 +1706,43 @@ async def ensure_token_usage_table():
                 completion_tokens INTEGER DEFAULT 0,
                 total_tokens    INTEGER DEFAULT 0,
                 usage_type      TEXT DEFAULT 'chat',
+                estimated_cost_usd DOUBLE PRECISION,
                 created_at      TIMESTAMPTZ DEFAULT NOW()
             );
+        """)
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'token_usage' AND column_name = 'estimated_cost_usd'
+                ) THEN
+                    ALTER TABLE token_usage ADD COLUMN estimated_cost_usd DOUBLE PRECISION;
+                END IF;
+            END $$;
         """)
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_token_usage_created ON token_usage (created_at DESC);
         """)
 
 
-async def save_token_usage(session_id: str, model: str, prompt_tokens: int, completion_tokens: int, total_tokens: int, usage_type: str = "chat"):
+async def save_token_usage(
+    session_id: str,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+    usage_type: str = "chat",
+    estimated_cost_usd: float = None,
+):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO token_usage (session_id, model, prompt_tokens, completion_tokens, total_tokens, usage_type)
-            VALUES ($1, $2, $3, $4, $5, $6)
-        """, session_id, model, prompt_tokens, completion_tokens, total_tokens, usage_type)
+            INSERT INTO token_usage (
+                session_id, model, prompt_tokens, completion_tokens,
+                total_tokens, usage_type, estimated_cost_usd
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        """, session_id, model, prompt_tokens, completion_tokens, total_tokens, usage_type, estimated_cost_usd)
 
 
 # ============================================================
