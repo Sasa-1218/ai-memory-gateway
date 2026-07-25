@@ -24,6 +24,10 @@ Give your AI long-term memory. A lightweight proxy gateway that adds a memory la
 - **设置面板** — 在 Dashboard 中直接管理所有运行时配置，热更新无需重启。支持模型列表动态拉取、可搜索下拉选择
 - **零成本起步** — 可部署在 Render、Zeabur 等平台的免费额度内
 
+## 📚 设计文档
+
+- [主动推送系统设计](docs/proactive-push-design.md)
+
 ## 🏗️ 架构
 
 ```
