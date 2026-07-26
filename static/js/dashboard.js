@@ -270,9 +270,9 @@ function renderTable(mems, startIndex) {
             revertBtn = '<button class="btn btn-warning btn-sm" onclick="revertMerge(' + m.id + ')">撤回</button>';
         }
         
-        // 恢复按钮（只有已归档的记忆显示）
+        // 归档表示不参与 AI 检索，但仍保留并可恢复。
         let restoreBtn = '';
-        let deleteBtn = '<button class="btn btn-danger btn-sm" onclick="delMem(' + m.id + ')">删除</button>';
+        let deleteBtn = '<button class="btn btn-warning btn-sm" onclick="delMem(' + m.id + ')">归档</button>';
         if (isInactive) {
             restoreBtn = '<button class="btn btn-success btn-sm" onclick="restoreMem(' + m.id + ')">恢复</button>';
             deleteBtn = '<button class="btn btn-danger btn-sm" onclick="delMem(' + m.id + ', true)">永久删除</button>';
@@ -307,12 +307,13 @@ function filterAndSort() {
     const q = document.getElementById('searchBox').value.trim().toLowerCase();
     const sort = document.getElementById('sortSelect').value;
     const dateVal = document.getElementById('dateFilter').value;
-    const showInactiveEl = document.getElementById('showInactive');
-    const showInactive = showInactiveEl ? showInactiveEl.checked : false;
+    const activityEl = document.getElementById('memoryActivityFilter');
+    const activity = activityEl ? activityEl.value : 'active';
     
     let mems = allMemories;
     if (currentLayer !== 'all') mems = mems.filter(m => (m.layer || 1) == currentLayer);
-    if (!showInactive) mems = mems.filter(m => m.is_active !== false);
+    if (activity === 'active') mems = mems.filter(m => m.is_active !== false);
+    if (activity === 'archived') mems = mems.filter(m => m.is_active === false);
     if (q) mems = mems.filter(m => m.content.toLowerCase().includes(q) || (m.title && m.title.toLowerCase().includes(q)));
     if (dateVal) mems = mems.filter(m => m.created_at && fmtTime(m.created_at).slice(0, 10) === dateVal);
     
@@ -495,8 +496,9 @@ async function saveMem(id) {
 async function delMem(id, hard = false) {
     const confirmMsg = hard 
         ? '确定永久删除 #' + id + '？此操作不可撤销！'
-        : '确定删除 #' + id + '？（软删除，可恢复）';
+        : '确定归档 #' + id + '？\n\n归档后这条记忆不会参与 AI 检索，但仍可在“只看归档”中恢复。';
     if (!confirm(confirmMsg)) return;
+    if (hard && !confirm('二次确认：真的永久删除 #' + id + ' 吗？删除后无法恢复。')) return;
     try {
         const soft = !hard;
         const resp = await fetch('/api/memories/' + id + '?soft=' + soft, { method: 'DELETE' });
@@ -571,22 +573,22 @@ async function batchSave() {
 
 async function batchDelete() {
     const checked = [...document.querySelectorAll('.mem-check:checked')].map(c => parseInt(c.value));
-    if (checked.length === 0) { showManageMsg('error', '请先勾选要删除的记忆'); return; }
-    if (!confirm('确定删除选中的 ' + checked.length + ' 条记忆？此操作不可撤销。')) return;
+    if (checked.length === 0) { showManageMsg('error', '请先勾选要归档的记忆'); return; }
+    if (!confirm('确定归档选中的 ' + checked.length + ' 条记忆？\n\n归档后这些记忆不会参与 AI 检索，但仍可在“只看归档”中恢复。')) return;
     try {
-        const resp = await fetch('/api/memories/batch-delete', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ids: checked})
-        });
-        const data = await resp.json();
-        if (data.error) {
-            showManageMsg('error', '❌ ' + data.error);
-        } else {
-            showManageMsg('success', '✅ 已删除 ' + data.deleted + ' 条');
-            clearSelection();
-            loadMemories();
+        let archived = 0;
+        for (const id of checked) {
+            const resp = await fetch('/api/memories/' + id + '?soft=true', { method: 'DELETE' });
+            const data = await resp.json();
+            if (data.error) {
+                showManageMsg('error', '❌ 归档 #' + id + ' 失败: ' + data.error);
+                return;
+            }
+            archived += 1;
         }
+        showManageMsg('success', '✅ 已归档 ' + archived + ' 条');
+        clearSelection();
+        loadMemories();
     } catch(e) {
         showManageMsg('error', '❌ ' + e.message);
     }
@@ -1596,6 +1598,7 @@ function formatConvTime(isoStr) {
 
 let _threadData = { threads: [], active_session_id: '' };
 let _summaryEditSid = '';
+let _summaryOriginalText = '';
 
 async function loadThreads() {
     try {
@@ -1798,6 +1801,7 @@ async function openSummaryModal(sessionId) {
         }
         
         document.getElementById('summary-editor').value = summary;
+        _summaryOriginalText = summary;
         updateSummaryCharCount();
         document.getElementById('summaryModal').style.display = 'flex';
     } catch(e) {
@@ -1808,6 +1812,7 @@ async function openSummaryModal(sessionId) {
 function closeSummaryModal() {
     document.getElementById('summaryModal').style.display = 'none';
     _summaryEditSid = '';
+    _summaryOriginalText = '';
 }
 
 function updateSummaryCharCount() {
@@ -1823,6 +1828,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function saveSummary() {
     const summary = document.getElementById('summary-editor').value;
+    if (summary === _summaryOriginalText) {
+        closeSummaryModal();
+        return;
+    }
+    if (!confirm('确定覆盖保存当前摘要吗？\n\n这会替换该 session 当前摘要内容，不是追加。')) return;
     
     try {
         const resp = await fetch('/api/partition/summary', {

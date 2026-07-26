@@ -81,10 +81,11 @@
                         <button class="layer-tab" data-layer="3" onclick="switchLayer(3)">核心记忆 <span id="count-layer-3">0</span></button>
                         <button class="layer-tab" data-layer="2" onclick="switchLayer(2)">事件记忆 <span id="count-layer-2">0</span></button>
                         <button class="layer-tab" data-layer="1" onclick="switchLayer(1)">原始碎片 <span id="count-layer-1">0</span></button>
-                        <label class="checkbox-label" style="margin-left:auto;">
-                            <input type="checkbox" id="showInactive" onchange="memCurrentPage=1;filterAndSort()">
-                            <span>显示已归档</span>
-                        </label>
+                        <select id="memoryActivityFilter" class="select-input" onchange="memCurrentPage=1;filterAndSort()" style="margin-left:auto; max-width: 160px;">
+                            <option value="active">AI可见</option>
+                            <option value="archived">只看归档</option>
+                            <option value="all">全部</option>
+                        </select>
                     </div>
                 </div>
 
@@ -229,7 +230,7 @@
                 <div class="floating-actions">
                     <button class="btn btn-primary" onclick="batchSave()">保存选中</button>
                     <button class="btn btn-secondary" onclick="openMergeModal()">合并选中</button>
-                    <button class="btn btn-danger" onclick="batchDelete()">删除选中</button>
+                    <button class="btn btn-warning" onclick="batchDelete()">归档选中</button>
                     <button class="btn btn-icon" onclick="clearSelection()" title="取消选择">✕</button>
                 </div>
             </div>
@@ -440,7 +441,7 @@
                             <div style="display: flex; gap: 8px;">
                                 <button class="btn btn-danger" onclick="clearSummary()">清空摘要</button>
                                 <button class="btn btn-secondary" onclick="closeSummaryModal()">取消</button>
-                                <button class="btn btn-primary" onclick="saveSummary()">保存</button>
+                                <button class="btn btn-primary" onclick="saveSummary()">覆盖保存</button>
                             </div>
                         </div>
                     </div>

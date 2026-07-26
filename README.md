@@ -27,6 +27,7 @@ Give your AI long-term memory. A lightweight proxy gateway that adds a memory la
 ## 📚 设计文档
 
 - [主动推送系统设计](docs/proactive-push-design.md)
+- [记忆系统设计](docs/memory-design.md)
 注意：主动推送的调度由外部 cron 服务管理，不会随代码部署而自动更改。
 
 ## 🏗️ 架构
