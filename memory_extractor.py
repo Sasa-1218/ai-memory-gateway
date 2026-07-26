@@ -15,15 +15,53 @@ from typing import List, Dict
 API_KEY = os.getenv("API_KEY", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
 
-# 记忆模型专用 API Key（不设则回退到主 API_KEY）
-# 适用于中转站按模型分组、不同模型需要不同 Key 的场景
+# 记忆提取专用配置。缺失时不回退主聊天配置，避免继续误用免费/不稳定模型。
+MEMORY_API_BASE_URL = os.getenv("MEMORY_API_BASE_URL", "")
 MEMORY_API_KEY = os.getenv("MEMORY_API_KEY", "")
+MEMORY_MODEL = os.getenv("MEMORY_MODEL", "")
+MEMORY_API_THINKING = os.getenv("MEMORY_API_THINKING", "")
 
-# 用来提取记忆的模型（便宜的就行）
-MEMORY_MODEL = os.getenv("MEMORY_MODEL", "anthropic/claude-haiku-4")
+
+def _runtime_config_value(key: str) -> str:
+    return str(globals().get(key, "") or "").strip()
+
+
+def get_memory_config():
+    config = {
+        "base_url": _runtime_config_value("MEMORY_API_BASE_URL"),
+        "api_key": _runtime_config_value("MEMORY_API_KEY"),
+        "model": _runtime_config_value("MEMORY_MODEL"),
+        "thinking": _runtime_config_value("MEMORY_API_THINKING"),
+    }
+    missing = []
+    if not config["base_url"]:
+        missing.append("MEMORY_API_BASE_URL")
+    if not config["api_key"]:
+        missing.append("MEMORY_API_KEY")
+    if not config["model"]:
+        missing.append("MEMORY_MODEL")
+    return config, missing
+
+
+def _apply_memory_thinking_option(payload: Dict) -> None:
+    raw = _runtime_config_value("MEMORY_API_THINKING")
+    if not raw:
+        return
+    lowered = raw.lower()
+    if lowered in ("false", "0", "no", "off"):
+        payload["thinking"] = False
+    elif lowered in ("true", "1", "yes", "on"):
+        payload["thinking"] = True
+    else:
+        payload["thinking"] = raw
+
+
+def _log_memory_config_missing(missing: List[str]) -> None:
+    print(f"⚠️ memory_config_missing: missing={','.join(missing)}")
+
 
 def get_memory_api_key() -> str:
-    return MEMORY_API_KEY or API_KEY
+    return _runtime_config_value("MEMORY_API_KEY")
 
 
 EXTRACTION_PROMPT = """你是信息提取专家，负责从对话中识别并提取值得长期记住的关键信息。
@@ -96,8 +134,9 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
     返回：
         记忆列表，格式 [{"content": "...", "importance": N}, ...]
     """
-    if not API_KEY:
-        print("⚠️  API_KEY 未设置，跳过记忆提取")
+    config, missing = get_memory_config()
+    if missing:
+        _log_memory_config_missing(missing)
         return []
 
     if not messages:
@@ -128,22 +167,24 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
     # 调用 LLM 提取记忆
     try:
         async with httpx.AsyncClient(timeout=60) as client:
+            payload = {
+                "model": config["model"],
+                "max_tokens": 1000,
+                "messages": [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": f"请从以下对话中提取新的记忆：\n\n{conversation_text}"},
+                ],
+            }
+            _apply_memory_thinking_option(payload)
             response = await client.post(
-                API_BASE_URL,
+                config["base_url"],
                 headers={
-                    "Authorization": f"Bearer {get_memory_api_key()}",
+                    "Authorization": f"Bearer {config['api_key']}",
                     "Content-Type": "application/json",
                     "HTTP-Referer": "https://midsummer-gateway.local",
                     "X-Title": "Midsummer Memory Extraction",
                 },
-                json={
-                    "model": MEMORY_MODEL,
-                    "max_tokens": 1000,
-                    "messages": [
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": f"请从以下对话中提取新的记忆：\n\n{conversation_text}"},
-                    ],
-                },
+                json=payload,
             )
 
             if response.status_code != 200:
@@ -231,23 +272,30 @@ async def score_memories(texts: List[str]) -> List[Dict]:
     if not texts:
         return []
 
+    config, missing = get_memory_config()
+    if missing:
+        _log_memory_config_missing(missing)
+        return [{"content": t, "importance": 5} for t in texts]
+
     memories_text = "\n".join(f"- {t}" for t in texts)
     prompt = SCORING_PROMPT.format(memories_text=memories_text)
 
     try:
         async with httpx.AsyncClient(timeout=60) as client:
+            payload = {
+                "model": config["model"],
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+                "max_tokens": 4000,
+            }
+            _apply_memory_thinking_option(payload)
             response = await client.post(
-                API_BASE_URL,
+                config["base_url"],
                 headers={
-                    "Authorization": f"Bearer {get_memory_api_key()}",
+                    "Authorization": f"Bearer {config['api_key']}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": MEMORY_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0,
-                    "max_tokens": 4000,
-                },
+                json=payload,
             )
 
             if response.status_code != 200:
