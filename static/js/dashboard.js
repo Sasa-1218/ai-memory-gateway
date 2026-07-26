@@ -335,14 +335,18 @@ function filterAndSort() {
     renderTable(pageMems, start);
     renderMemPagination(totalItems, totalPages);
     
-    const parts = [];
-    if (q || dateVal || currentLayer !== 'all') {
-        parts.push('筛选到 ' + totalItems + ' 条');
-        if (currentLayer !== 'all') parts.push('层级: ' + LAYER_NAMES[currentLayer]);
-        if (dateVal) parts.push('日期: ' + dateVal);
-    } else {
-        parts.push('共 ' + allMemories.filter(m => m.is_active !== false).length + ' 条活跃记忆');
-    }
+    const activeCount = allMemories.filter(m => m.is_active !== false).length;
+    const archivedCount = allMemories.filter(m => m.is_active === false).length;
+    const activityLabel = activity === 'archived' ? '只看归档' : activity === 'all' ? '全部' : 'AI可见';
+    const parts = [
+        `${activityLabel}: ${totalItems} 条`,
+        `总计 ${allMemories.length}`,
+        `AI可见 ${activeCount}`,
+        `归档 ${archivedCount}`,
+    ];
+    if (currentLayer !== 'all') parts.push('层级: ' + LAYER_NAMES[currentLayer]);
+    if (dateVal) parts.push('日期: ' + dateVal);
+    if (q) parts.push('搜索中');
     if (totalPages > 1) {
         parts.push(`第 ${memCurrentPage}/${totalPages} 页`);
     }
@@ -1491,7 +1495,7 @@ async function deleteSingleMessage(msgId) {
 
 // 删除对话
 async function deleteConversation(sessionId) {
-    if (!confirm(`确定删除整个对话「${sessionId}」吗？\n\n这不是删除单条消息。删除后只能从回收站恢复。`)) return;
+    if (!confirm(`确定删除整个对话「${sessionId}」吗？\n\n这不是删除单条消息。当前对话删除没有回收站。`)) return;
     if (!confirm(`二次确认：真的要删除整个对话「${sessionId}」吗？\n\n如果只是想删除某一条消息，请取消后进入对话详情，使用单条消息旁边的“删除”。`)) return;
     
     try {
@@ -1549,7 +1553,7 @@ async function batchDeleteConversations() {
 
     const sessionIds = Array.from(checked).map(cb => cb.value);
     const label = checked.length === 1 ? `整个对话「${sessionIds[0]}」` : `选中的 ${checked.length} 个对话`;
-    if (!confirm(`确定删除${label}吗？\n\n这不是删除单条消息。删除后只能从回收站恢复。`)) return;
+    if (!confirm(`确定删除${label}吗？\n\n这不是删除单条消息。当前对话删除没有回收站。`)) return;
     if (!confirm(`二次确认：真的要删除${label}吗？\n\n如果只是想删除单条消息，请取消后进入对话详情，使用单条消息旁边的“删除”。`)) return;
     
     try {

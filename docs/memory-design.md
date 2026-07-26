@@ -75,3 +75,56 @@ The current phase must not change:
 - Chat context injection.
 - The current DeepSeek memory-model test.
 - Automatic judgment of core memories.
+
+## Export Format v2 (Future)
+
+Current status:
+
+- `/export/memories` currently provides a basic memory-content export.
+- The current export is mainly useful for viewing, simple backup, and simple migration.
+- It does not guarantee full restoration of the complete memory-system state.
+
+Current export is missing several metadata fields:
+
+- `is_active`
+  - Cannot distinguish AI-visible memories from archived memories.
+- `layer`
+  - Cannot distinguish fragment, event, and core memory layers.
+- `title`
+  - Memory title information is not preserved.
+- `event_date`
+  - Event-level date information is not preserved.
+- `merged_from`
+  - Cannot trace which original fragments were merged into an event memory.
+
+Future Export Format v2 goals:
+
+- Add `schema_version`.
+- Support full memory-state backup and restore.
+- Preserve memory layers.
+- Preserve archive state.
+- Preserve source relationships.
+- Preserve merge lineage.
+
+Expected fields:
+
+```text
+id
+schema_version
+layer
+title
+content
+importance
+is_active
+event_date
+merged_from
+source_session
+created_at
+```
+
+Notes:
+
+- Do not implement this in the current phase.
+- Do not change database structure for this record.
+- Do not change import or export endpoints yet.
+- Revisit after the memory schema and memory model behavior are stable.

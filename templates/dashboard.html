@@ -306,7 +306,7 @@
                         <div class="export-icon" style="font-size: 36px; color: var(--primary); display: flex; align-items: center;"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></div>
                         <div class="export-text">
                             <h3>导出全部记忆</h3>
-                            <p>将所有记忆导出为 JSON 格式，包含完整的元数据（权重、来源、时间等）</p>
+                            <p>将记忆库全部导出为 JSON，包括已归档记忆；导出总数不等于 AI 可见数量</p>
                         </div>
                     </div>
                     <div class="export-stats" id="export-stats">
@@ -319,6 +319,7 @@
                     <h4>小贴士</h4>
                     <ul>
                         <li>导出的 JSON 可以通过「导入记忆 → JSON 备份恢复」功能导入</li>
+                        <li>备份会包含归档记忆，方便迁移和追溯合并来源</li>
                         <li>建议定期备份，以防数据丢失</li>
                         <li>导出文件可用于迁移到其他部署实例</li>
                     </ul>
@@ -708,6 +709,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.9"></script>
+    <script src="/static/js/dashboard.js?v=3.10"></script>
 </body>
 </html>
