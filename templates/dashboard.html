@@ -484,16 +484,26 @@
                         <label class="toggle"><input type="checkbox" id="set-MEMORY_ENABLED"><span class="toggle-slider"></span></label>
                     </div>
                     <div class="settings-field">
+                        <label>记忆模型 API Base URL (MEMORY_API_BASE_URL)</label>
+                        <input type="text" id="set-MEMORY_API_BASE_URL" class="input" placeholder="https://api.deepseek.com/v1/chat/completions">
+                        <small class="form-hint">记忆提取专用接口，不再回退到主聊天接口</small>
+                    </div>
+                    <div class="settings-field">
                         <label>记忆提取 / 整理模型</label>
                         <div class="combo-box" id="combo-MEMORY_MODEL">
-                            <input type="text" id="set-MEMORY_MODEL" class="combo-input" placeholder="搜索或输入模型名（留空用默认）" autocomplete="off">
+                            <input type="text" id="set-MEMORY_MODEL" class="combo-input" placeholder="例如 deepseek-v4-flash" autocomplete="off">
                             <div class="combo-dropdown" id="dropdown-MEMORY_MODEL"></div>
                         </div>
                     </div>
                     <div class="settings-field">
                         <label>记忆模型 API Key (MEMORY_API_KEY)</label>
                         <input type="text" id="set-MEMORY_API_KEY" class="input" placeholder="sk-...">
-                        <small class="form-hint" id="set-MEMORY_API_KEY-hint">不设则使用主 API Key，适用于中转站不同模型需要不同 Key 的场景</small>
+                        <small class="form-hint" id="set-MEMORY_API_KEY-hint">打码显示，留空不改；缺失时记忆提取会跳过并记录 memory_config_missing</small>
+                    </div>
+                    <div class="settings-field">
+                        <label>记忆模型思考模式 (MEMORY_API_THINKING)</label>
+                        <input type="text" id="set-MEMORY_API_THINKING" class="input" placeholder="留空 / true / false / provider-specific value">
+                        <small class="form-hint">可选。当前 DeepSeek flash 可留空，需要时再按模型文档填写</small>
                     </div>
                     <div class="settings-field">
                         <label>最大注入记忆数 (MAX_MEMORIES_INJECT)</label>
