@@ -1210,7 +1210,7 @@ function renderConvList(conversations, isSearch = false) {
         <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px;">
             <input type="checkbox" id="conv-select-all" onchange="toggleConvSelectAll(this.checked)"> 全选
         </label>
-        <button class="btn btn-sm" onclick="batchDeleteConversations()" id="conv-batch-delete-btn" style="display: none; font-size: 12px;">${ICONS.trash(13)} 批量删除</button>
+        <button class="btn btn-sm" onclick="batchDeleteConversations()" id="conv-batch-delete-btn" style="display: none; font-size: 12px;">${ICONS.trash(13)} 删除对话</button>
         <button class="btn btn-sm" onclick="batchMergeSessions()" id="conv-batch-merge-btn" style="display: none; font-size: 12px;">${ICONS.gitMerge(13)} 合并到...</button>
         <span id="conv-selected-count" style="color: var(--text-muted); font-size: 12px; display: none;"></span>
     </div>`;
@@ -1320,12 +1320,6 @@ async function loadConvMessages(sessionId, append = false) {
         
         // 渲染消息
         let html = '';
-        if (!append) {
-            html += `<div style="margin-bottom: 12px; display: flex; gap: 8px; justify-content: flex-end;">
-                <button class="btn btn-sm" onclick="deleteConversation('${escapeHtml(sessionId)}')">${ICONS.trash(13)} 删除对话</button>
-            </div>`;
-        }
-
         // 读取自定义角色显示名称（从设置缓存或直接读取 DOM）
         const userDisplay = document.getElementById('set-role_display_user')?.value || '👤 用户';
         const assistantDisplay = document.getElementById('set-role_display_assistant')?.value || '🤖 助手';
@@ -1455,7 +1449,8 @@ async function deleteSingleMessage(msgId) {
 
 // 删除对话
 async function deleteConversation(sessionId) {
-    if (!confirm('确定删除这个对话吗？（可在回收站恢复）')) return;
+    if (!confirm(`确定删除整个对话「${sessionId}」吗？\n\n这不是删除单条消息。删除后只能从回收站恢复。`)) return;
+    if (!confirm(`二次确认：真的要删除整个对话「${sessionId}」吗？\n\n如果只是想删除某一条消息，请取消后进入对话详情，使用单条消息旁边的“删除”。`)) return;
     
     try {
         const resp = await fetch(`/api/conversations/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
@@ -1493,6 +1488,7 @@ function updateConvSelectionCount() {
         countEl.style.display = '';
         countEl.textContent = `已选 ${checked.length} 个`;
         btnEl.style.display = '';
+        btnEl.innerHTML = checked.length === 1 ? `${ICONS.trash(13)} 删除对话` : `${ICONS.trash(13)} 批量删除`;
         if (mergeBtn) mergeBtn.style.display = '';
     } else {
         countEl.style.display = 'none';
@@ -1508,10 +1504,11 @@ function updateConvSelectionCount() {
 async function batchDeleteConversations() {
     const checked = document.querySelectorAll('.conv-checkbox:checked');
     if (checked.length === 0) return;
-    
-    if (!confirm(`确定删除选中的 ${checked.length} 个对话吗？（可在回收站恢复）`)) return;
-    
+
     const sessionIds = Array.from(checked).map(cb => cb.value);
+    const label = checked.length === 1 ? `整个对话「${sessionIds[0]}」` : `选中的 ${checked.length} 个对话`;
+    if (!confirm(`确定删除${label}吗？\n\n这不是删除单条消息。删除后只能从回收站恢复。`)) return;
+    if (!confirm(`二次确认：真的要删除${label}吗？\n\n如果只是想删除单条消息，请取消后进入对话详情，使用单条消息旁边的“删除”。`)) return;
     
     try {
         const resp = await fetch('/api/conversations/batch-delete', {
