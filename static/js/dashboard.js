@@ -767,6 +767,46 @@ function closeConsolidateModal() {
     document.getElementById('consolidateModal').style.display = 'none';
 }
 
+function formatDateInputLocal(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
+
+function setConsolidateRange(range) {
+    const startEl = document.getElementById('consolidateDateStart');
+    const endEl = document.getElementById('consolidateDateEnd');
+    const today = new Date();
+    const start = new Date(today);
+    const end = new Date(today);
+
+    if (range === 'today') {
+        // start/end already point at today.
+    } else if (range === 'yesterday') {
+        start.setDate(today.getDate() - 1);
+        end.setDate(today.getDate() - 1);
+    } else if (range === 'last7') {
+        start.setDate(today.getDate() - 6);
+    } else if (range === 'all_fragments') {
+        const fragments = allMemories
+            .filter(m => (m.layer || 1) === 1 && m.is_active !== false && m.created_at)
+            .map(m => fmtTime(m.created_at).slice(0, 10))
+            .filter(Boolean)
+            .sort();
+        if (fragments.length === 0) {
+            showManageMsg('info', '当前没有可整理的未归档碎片');
+            return;
+        }
+        startEl.value = fragments[0];
+        endEl.value = fragments[fragments.length - 1];
+        return;
+    }
+
+    startEl.value = formatDateInputLocal(start);
+    endEl.value = formatDateInputLocal(end);
+}
+
 async function doConsolidate() {
     const startDate = document.getElementById('consolidateDateStart').value;
     const endDate = document.getElementById('consolidateDateEnd').value;
