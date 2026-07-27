@@ -130,6 +130,9 @@ MEMORY_API_THINKING = os.getenv("MEMORY_API_THINKING", "")
 def get_memory_api_key() -> str:
     return MEMORY_API_KEY
 
+def get_memory_api_base_url() -> str:
+    return MEMORY_API_BASE_URL
+
 # 摘要模型专用的独立接口地址/Key（不设则回退到 MEMORY_API_KEY/API_BASE_URL）
 # 用于把摘要压缩这块单独指到 DeepSeek/GLM 等官方接口，跳过 OpenRouter，省手续费
 # 例：SUMMARY_API_BASE_URL=https://api.deepseek.com/v1/chat/completions
@@ -4450,8 +4453,13 @@ async def consolidate_memories_for_date_range(start_date, end_date):
     # 调用 AI 进行整理
     prompt = CONSOLIDATION_PROMPT.format(fragments=fragments_text)
     
-    # 使用环境变量配置的模型，默认 haiku 节省成本
-    consolidation_model = os.getenv("MEMORY_MODEL", "") or os.getenv("DEFAULT_MODEL", "anthropic/claude-haiku-4.5")
+    # 使用独立记忆模型配置，避免混用聊天主接口。
+    consolidation_model = MEMORY_MODEL
+    memory_url = get_memory_api_base_url()
+    memory_key = get_memory_api_key()
+    if not memory_url or not memory_key or not consolidation_model:
+        print("⚠️ 整理记忆配置缺失: memory_config_missing")
+        return {"status": "error", "error": "memory_config_missing"}
     
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -4459,9 +4467,9 @@ async def consolidate_memories_for_date_range(start_date, end_date):
             last_error = None
             for attempt in range(3):
                 response = await client.post(
-                    API_BASE_URL,
+                    memory_url,
                     headers={
-                        "Authorization": f"Bearer {get_memory_api_key()}",
+                        "Authorization": f"Bearer {memory_key}",
                         "Content-Type": "application/json"
                     },
                     json={
@@ -4511,9 +4519,9 @@ async def consolidate_memories_for_date_range(start_date, end_date):
                             # 方案3：让 AI 重新格式化
                             print(f"⚠️ JSON解析失败，尝试让AI修复: {e}")
                             fix_resp = await client.post(
-                                API_BASE_URL,
+                                memory_url,
                                 headers={
-                                    "Authorization": f"Bearer {get_memory_api_key()}",
+                                    "Authorization": f"Bearer {memory_key}",
                                     "Content-Type": "application/json"
                                 },
                                 json={
