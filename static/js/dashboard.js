@@ -111,7 +111,7 @@ function initSakuraPetals() {
         const tone = index % 3 === 0
             ? ['#fffbfc', '#e79bb3']
             : (index % 3 === 1 ? ['#fff7fa', '#df7fa0'] : ['#fff2f6', '#c9668a']);
-        petal.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${tone[0]}"/><stop offset="100%" stop-color="${tone[1]}"/></linearGradient></defs><path d="M12 21 C7 15.5 4 11.5 4 9 C4 6.5 6.2 5.2 8.3 5.8 C10 6.3 11.2 8.2 12 10.8 C12.8 8.2 14 6.3 15.7 5.8 C17.8 5.2 20 6.5 20 9 C20 11.5 17 15.5 12 21 Z" fill="url(#${gradId})"/></svg>`;
+        petal.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${tone[0]}"/><stop offset="100%" stop-color="${tone[1]}"/></linearGradient></defs><path d="M12 3 C17 3 20 8 18 14 C16 19 14 21 12 22 C10 21 8 19 6 14 C4 8 7 3 12 3 Z" fill="url(#${gradId})"/></svg>`;
         petal.style.setProperty('--petal-x', `${Math.random() * 108 - 4}vw`);
         petal.style.setProperty('--petal-size', `${13 + Math.random() * 11}px`);
         petal.style.setProperty('--petal-duration', `${24 + Math.random() * 22}s`);
