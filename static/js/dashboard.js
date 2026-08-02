@@ -41,6 +41,8 @@ let pendingJsonData = null;
 let currentLayer = 'all';
 let memCurrentPage = 1;
 const MEM_PER_PAGE = 50;
+let experienceCards = [];
+let currentExperienceCardId = null;
 
 const LAYER_NAMES = {
     1: '碎片',
@@ -107,6 +109,9 @@ function switchSection(name) {
     }
     if (name === 'conversations') {
         loadConversationList(1);
+    }
+    if (name === 'experience-cards') {
+        loadExperienceCards();
     }
     if (name === 'threads') {
         loadThreads();
@@ -238,6 +243,203 @@ async function loadMemories() {
     } catch(e) {
         showManageMsg('error', '加载失败：' + e.message);
     }
+}
+
+// ============================================
+// 共同经历卡片草稿审核（Phase 1 不参与聊天召回）
+// ============================================
+const EXPERIENCE_STATUS_LABELS = {
+    pending: '待检查',
+    approved: 'AI 可见',
+    archived: '仅归档',
+    deleted: '回收站',
+    superseded: '已被纠正'
+};
+
+async function loadExperienceCards() {
+    const list = document.getElementById('experienceCardList');
+    if (!list) return;
+    const status = document.getElementById('experienceCardStatus')?.value || '';
+    list.innerHTML = '<div class="card" style="padding:20px; color:var(--text-muted);">正在加载...</div>';
+    try {
+        const query = status ? `?status=${encodeURIComponent(status)}` : '';
+        const resp = await fetch('/api/experience-cards' + query);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        experienceCards = data.cards || [];
+        const stats = document.getElementById('experienceCardStats');
+        if (stats) stats.textContent = `${experienceCards.length} 张；当前召回未接入`;
+        renderExperienceCards();
+    } catch (e) {
+        list.innerHTML = `<div class="card" style="padding:20px; color:var(--danger);">加载失败：${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderExperienceCards() {
+    const list = document.getElementById('experienceCardList');
+    if (!list) return;
+    const query = (document.getElementById('experienceCardSearch')?.value || '').trim().toLowerCase();
+    const cards = experienceCards.filter(card => {
+        if (!query) return true;
+        return `${card.title || ''}\n${card.event_summary || ''}`.toLowerCase().includes(query);
+    });
+    if (!cards.length) {
+        list.innerHTML = '<div class="card" style="padding:24px; color:var(--text-muted);">共同经历卡片尚未接入自动生成；当前为空是正常的。之后生成的卡片会先进入待检查，人工批准后才可能 AI 可见。</div>';
+        return;
+    }
+    list.innerHTML = cards.map(card => {
+        const status = EXPERIENCE_STATUS_LABELS[card.review_status] || card.review_status;
+        const visible = card.review_status === 'approved' && card.ai_visible;
+        const details = Array.isArray(card.key_details) ? card.key_details : [];
+        let actions = `<button class="btn btn-sm btn-secondary" onclick="openExperienceCard(${card.id})">查看与编辑</button>`;
+        if (card.review_status === 'deleted') {
+            actions += ` <button class="btn btn-sm btn-primary" onclick="restoreExperienceCard(${card.id})">恢复到待检查</button>`;
+        } else {
+            actions += ` <button class="btn btn-sm btn-warning" onclick="setExperienceCardStatus(${card.id}, 'archived', false)">仅归档</button>`;
+            actions += ` <button class="btn btn-sm btn-danger" onclick="deleteExperienceCard(${card.id})">删除</button>`;
+        }
+        return `<article class="card" style="padding:16px;">
+            <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start; flex-wrap:wrap;">
+                <div style="min-width:0; flex:1;">
+                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+                        <strong>${escapeHtml(card.title || '未命名经历')}</strong>
+                        <span style="font-size:12px; color:var(--text-muted);">${escapeHtml(status)}</span>
+                        <span style="font-size:12px; color:${visible ? 'var(--success)' : 'var(--text-muted)'};">${visible ? 'AI 可见' : '隔离中'}</span>
+                    </div>
+                    <div style="white-space:pre-wrap; line-height:1.65; color:var(--text-light);">${escapeHtml(card.event_summary || '')}</div>
+                    ${details.length ? `<div style="margin-top:10px; color:var(--text-muted); font-size:13px;">线索：${details.map(escapeHtml).join(' · ')}</div>` : ''}
+                    <div style="margin-top:8px; color:var(--text-muted); font-size:12px;">Session：${escapeHtml(card.source_session_id || '-')} · 来源消息 ${Array.isArray(card.source_message_ids) ? card.source_message_ids.length : 0} 条</div>
+                </div>
+                <div style="display:flex; gap:6px; flex-wrap:wrap;">${actions}</div>
+            </div>
+        </article>`;
+    }).join('');
+}
+
+function listToTextarea(value) {
+    return Array.isArray(value) ? value.map(item => typeof item === 'string' ? item : JSON.stringify(item)).join('\n') : '';
+}
+
+function textareaToList(id, maxItems = null) {
+    let items = (document.getElementById(id)?.value || '').split('\n').map(item => item.trim()).filter(Boolean);
+    if (maxItems !== null) items = items.slice(0, maxItems);
+    return items;
+}
+
+function correctionsToJson(value) {
+    return JSON.stringify(Array.isArray(value) ? value : [], null, 2);
+}
+
+function parseCorrectionsJson() {
+    const raw = (document.getElementById('experienceCardCorrections')?.value || '').trim();
+    let value;
+    try {
+        value = raw ? JSON.parse(raw) : [];
+    } catch (e) {
+        throw new Error('明确纠正必须是有效的 JSON 数组');
+    }
+    if (!Array.isArray(value)) {
+        throw new Error('明确纠正必须是 JSON 数组');
+    }
+    for (const item of value) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)
+            || typeof item.old_claim !== 'string' || typeof item.new_claim !== 'string') {
+            throw new Error('每条明确纠正必须包含字符串 old_claim 和 new_claim');
+        }
+    }
+    return value;
+}
+
+async function openExperienceCard(id) {
+    try {
+        const resp = await fetch(`/api/experience-cards/${id}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const card = data.card;
+        currentExperienceCardId = id;
+        document.getElementById('experienceCardModalId').textContent = `#${id}`;
+        document.getElementById('experienceCardTitle').value = card.title || '';
+        document.getElementById('experienceCardSummary').value = card.event_summary || '';
+        document.getElementById('experienceCardInteraction').value = card.interaction_trace || '';
+        document.getElementById('experienceCardDetails').value = listToTextarea(card.key_details);
+        document.getElementById('experienceCardCorrections').value = correctionsToJson(card.explicit_corrections);
+        document.getElementById('experienceCardAgreements').value = listToTextarea(card.explicit_agreements);
+        document.getElementById('experienceCardThreads').value = listToTextarea(card.open_threads);
+        document.getElementById('experienceCardReason').value = card.revision_reason || '';
+        const sourceBox = document.getElementById('experienceCardSources');
+        const messages = data.source_messages || [];
+        sourceBox.innerHTML = messages.length ? messages.map(message => `
+            <div style="padding:10px; border-bottom:1px solid var(--border);">
+                <div style="font-size:12px; color:var(--text-muted); margin-bottom:5px;">#${message.id} · ${escapeHtml(message.role || '')} · ${escapeHtml(String(message.created_at || ''))}</div>
+                <div style="white-space:pre-wrap; line-height:1.55;">${escapeHtml(message.content || '')}</div>
+            </div>`).join('') : '<span style="color:var(--text-muted);">没有找到对应原始消息。</span>';
+        document.getElementById('experienceCardModal').style.display = 'flex';
+    } catch (e) {
+        alert('读取经历草稿失败：' + e.message);
+    }
+}
+
+function closeExperienceCardModal() {
+    document.getElementById('experienceCardModal').style.display = 'none';
+    currentExperienceCardId = null;
+}
+
+async function saveExperienceCard(reviewStatus, aiVisible) {
+    if (!currentExperienceCardId) return;
+    let explicitCorrections;
+    try {
+        explicitCorrections = parseCorrectionsJson();
+    } catch (e) {
+        alert('保存失败：' + e.message);
+        return;
+    }
+    const body = {
+        title: document.getElementById('experienceCardTitle').value.trim(),
+        event_summary: document.getElementById('experienceCardSummary').value.trim(),
+        interaction_trace: document.getElementById('experienceCardInteraction').value.trim(),
+        key_details: textareaToList('experienceCardDetails', 3),
+        explicit_corrections: explicitCorrections,
+        explicit_agreements: textareaToList('experienceCardAgreements'),
+        open_threads: textareaToList('experienceCardThreads'),
+        revision_reason: document.getElementById('experienceCardReason').value.trim(),
+        review_status: reviewStatus,
+        ai_visible: aiVisible
+    };
+    try {
+        const resp = await fetch(`/api/experience-cards/${currentExperienceCardId}`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        closeExperienceCardModal();
+        await loadExperienceCards();
+    } catch (e) {
+        alert('保存失败：' + e.message);
+    }
+}
+
+async function setExperienceCardStatus(id, reviewStatus, aiVisible) {
+    const resp = await fetch(`/api/experience-cards/${id}`, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({review_status: reviewStatus, ai_visible: aiVisible})
+    });
+    if (!resp.ok) {
+        alert(`更新失败：HTTP ${resp.status}`);
+        return;
+    }
+    await loadExperienceCards();
+}
+
+async function deleteExperienceCard(id) {
+    if (!confirm('将这张经历草稿移入回收站吗？它不会被永久删除。')) return;
+    const resp = await fetch(`/api/experience-cards/${id}`, {method: 'DELETE'});
+    if (!resp.ok) alert(`删除失败：HTTP ${resp.status}`);
+    await loadExperienceCards();
+}
+
+async function restoreExperienceCard(id) {
+    const resp = await fetch(`/api/experience-cards/${id}/restore`, {method: 'POST'});
+    if (!resp.ok) alert(`恢复失败：HTTP ${resp.status}`);
+    await loadExperienceCards();
 }
 
 function renderTable(mems, startIndex) {

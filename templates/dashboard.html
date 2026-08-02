@@ -20,6 +20,10 @@
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg></span>
                     <span class="nav-label">记忆管理</span>
                 </a>
+                <a href="#" class="nav-item" data-section="experience-cards">
+                    <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="8" x2="16" y1="13" y2="13"/><line x1="8" x2="16" y1="17" y2="17"/></svg></span>
+                    <span class="nav-label">经历草稿</span>
+                </a>
                 <a href="#" class="nav-item" data-section="import">
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg></span>
                     <span class="nav-label">导入记忆</span>
@@ -162,6 +166,83 @@
                     <div id="backfill-mem-msg" style="margin-top: 8px;"></div>
                 </div>
             </section>
+
+            <!-- 共同经历卡片审核 Section -->
+            <section id="section-experience-cards" class="section">
+                <div class="section-header">
+                    <h1>共同经历草稿</h1>
+                    <p class="section-desc">新卡片默认隔离，只有人工批准并设为 AI 可见后才具备未来召回资格</p>
+                </div>
+
+                <div class="card toolbar-card">
+                    <div class="toolbar" style="flex-wrap:wrap;">
+                        <select id="experienceCardStatus" class="select-input" onchange="loadExperienceCards()">
+                            <option value="pending">待检查</option>
+                            <option value="approved">AI 可见</option>
+                            <option value="archived">仅归档</option>
+                            <option value="superseded">已被纠正</option>
+                            <option value="deleted">回收站</option>
+                            <option value="">全部</option>
+                        </select>
+                        <input id="experienceCardSearch" class="search-input" placeholder="搜索标题或事件内容" oninput="renderExperienceCards()">
+                        <button class="btn btn-secondary" onclick="loadExperienceCards()">刷新</button>
+                        <span id="experienceCardStats" style="color:var(--text-muted); font-size:13px;"></span>
+                    </div>
+                </div>
+
+                <div id="experienceCardMsg" class="msg-container"></div>
+                <div id="experienceCardList" style="display:grid; gap:12px;"></div>
+            </section>
+
+            <div id="experienceCardModal" class="modal" style="display:none;">
+                <div class="modal-content" style="max-width:960px; max-height:90vh; overflow:auto;">
+                    <h3>审核共同经历草稿 <span id="experienceCardModalId" style="color:var(--text-muted);"></span></h3>
+                    <div class="form-group">
+                        <label class="form-label">标题</label>
+                        <input id="experienceCardTitle" class="form-input">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">事件经过</label>
+                        <textarea id="experienceCardSummary" class="textarea" rows="8"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">双方互动</label>
+                        <textarea id="experienceCardInteraction" class="textarea" rows="5"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">检索线索（每行一项，最多3项）</label>
+                        <textarea id="experienceCardDetails" class="textarea" rows="3"></textarea>
+                    </div>
+                    <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px;">
+                        <div class="form-group">
+                            <label class="form-label">明确纠正（JSON 数组，每项包含 old_claim / new_claim）</label>
+                            <textarea id="experienceCardCorrections" class="textarea" rows="8" spellcheck="false"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">明确约定（每行一项）</label>
+                            <textarea id="experienceCardAgreements" class="textarea" rows="4"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">待跟进（每行一项）</label>
+                            <textarea id="experienceCardThreads" class="textarea" rows="4"></textarea>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">修改原因（可选）</label>
+                        <input id="experienceCardReason" class="form-input" placeholder="例如：修正人物主语或动机顺序">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">原始消息证据</label>
+                        <div id="experienceCardSources" style="display:grid; gap:8px; padding:12px; background:var(--bg-card); border:1px solid var(--border); max-height:320px; overflow:auto;"></div>
+                    </div>
+                    <div class="modal-actions" style="flex-wrap:wrap;">
+                        <button class="btn btn-secondary" onclick="closeExperienceCardModal()">关闭</button>
+                        <button class="btn btn-secondary" onclick="saveExperienceCard('pending', false)">保存为待检查</button>
+                        <button class="btn btn-warning" onclick="saveExperienceCard('archived', false)">仅归档</button>
+                        <button class="btn btn-primary" onclick="saveExperienceCard('approved', true)">批准并允许 AI</button>
+                    </div>
+                </div>
+            </div>
 
             <!-- 合并弹窗 -->
             <div id="mergeModal" class="modal" style="display:none;">
@@ -709,6 +790,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.10"></script>
+    <script src="/static/js/dashboard.js?v=3.11"></script>
 </body>
 </html>

@@ -24,7 +24,7 @@ import httpx
 from datetime import datetime, timedelta, timezone, date as date_cls
 from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -39,8 +39,14 @@ except Exception:
     jwt = None
     RSAAlgorithm = None
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, save_io_context_events
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
+from experience_cards import (
+    REVIEW_STATUSES,
+    normalize_card_update,
+    restore_card_update,
+    soft_delete_card_update,
+)
 from memory_extractor import extract_memories, score_memories
 
 # ============================================================
@@ -4316,6 +4322,57 @@ async def api_search_memories(q: str = "", limit: int = 20):
         return {"results": out, "total": len(out)}
     except Exception as e:
         return {"error": str(e), "results": []}
+
+
+# ============================================================
+# 共同经历卡片草稿（Dashboard 审核；Phase 1 不参与聊天召回）
+# ============================================================
+
+@app.get("/api/experience-cards")
+async def api_list_experience_cards(status: str = None, limit: int = 500):
+    if status and status not in REVIEW_STATUSES:
+        raise HTTPException(status_code=400, detail="invalid_review_status")
+    cards = await list_experience_cards(status, max(1, min(limit, 1000)))
+    return {"cards": cards, "total": len(cards), "retrieval_enabled": False}
+
+
+@app.get("/api/experience-cards/{card_id}")
+async def api_get_experience_card(card_id: int):
+    card = await get_experience_card(card_id)
+    if not card:
+        raise HTTPException(status_code=404, detail="experience_card_not_found")
+    source_messages = await get_experience_card_source_messages(card_id)
+    return {"card": card, "source_messages": source_messages, "retrieval_enabled": False}
+
+
+@app.put("/api/experience-cards/{card_id}")
+async def api_update_experience_card(card_id: int, request: Request):
+    try:
+        update = normalize_card_update(await request.json())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not update:
+        raise HTTPException(status_code=400, detail="empty_update")
+    card = await update_experience_card(card_id, update)
+    if not card:
+        raise HTTPException(status_code=404, detail="experience_card_not_found")
+    return {"status": "ok", "card": card, "retrieval_enabled": False}
+
+
+@app.delete("/api/experience-cards/{card_id}")
+async def api_delete_experience_card(card_id: int):
+    card = await update_experience_card(card_id, soft_delete_card_update())
+    if not card:
+        raise HTTPException(status_code=404, detail="experience_card_not_found")
+    return {"status": "ok", "card": card}
+
+
+@app.post("/api/experience-cards/{card_id}/restore")
+async def api_restore_experience_card(card_id: int):
+    card = await update_experience_card(card_id, restore_card_update())
+    if not card:
+        raise HTTPException(status_code=404, detail="experience_card_not_found")
+    return {"status": "ok", "card": card}
 
 
 @app.put("/api/memories/{memory_id}")

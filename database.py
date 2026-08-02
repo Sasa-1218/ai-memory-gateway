@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 
 import asyncpg
 
+from experience_cards import apply_card_update
+
 # 时区偏移（和 main.py 保持一致）
 TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "8"))
 
@@ -218,6 +220,44 @@ async def init_tables():
                 created_at      TIMESTAMPTZ DEFAULT NOW(),
                 last_accessed   TIMESTAMPTZ DEFAULT NOW()
             );
+        """)
+
+        # 共同经历卡片草稿。Phase 1 仅用于 Dashboard 人工审核，聊天检索不读取此表。
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS shared_experience_cards (
+                id                      BIGSERIAL PRIMARY KEY,
+                source_session_id       TEXT NOT NULL,
+                title                   TEXT NOT NULL DEFAULT '',
+                event_summary           TEXT NOT NULL DEFAULT '',
+                interaction_trace       TEXT NOT NULL DEFAULT '',
+                key_details             JSONB NOT NULL DEFAULT '[]'::jsonb,
+                explicit_corrections    JSONB NOT NULL DEFAULT '[]'::jsonb,
+                explicit_agreements     JSONB NOT NULL DEFAULT '[]'::jsonb,
+                open_threads            JSONB NOT NULL DEFAULT '[]'::jsonb,
+                source_message_ids      BIGINT[] NOT NULL DEFAULT '{}',
+                review_status           TEXT NOT NULL DEFAULT 'pending',
+                ai_visible              BOOLEAN NOT NULL DEFAULT FALSE,
+                supersedes_card_id      BIGINT REFERENCES shared_experience_cards(id),
+                revision_reason         TEXT NOT NULL DEFAULT '',
+                generator_model         TEXT NOT NULL DEFAULT '',
+                prompt_version          TEXT NOT NULL DEFAULT '',
+                approved_at             TIMESTAMPTZ,
+                created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                CONSTRAINT shared_experience_cards_status_check
+                    CHECK (review_status IN ('pending', 'approved', 'archived', 'deleted', 'superseded')),
+                CONSTRAINT shared_experience_cards_visibility_check
+                    CHECK (NOT ai_visible OR review_status = 'approved')
+            );
+        """)
+        await _validate_shared_experience_cards_schema(conn)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_shared_experience_cards_review
+            ON shared_experience_cards (review_status, ai_visible, created_at DESC);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_shared_experience_cards_session
+            ON shared_experience_cards (source_session_id, created_at DESC);
         """)
         
         await conn.execute("""
@@ -1850,6 +1890,195 @@ async def delete_memories_batch(memory_ids: list):
         await conn.execute(
             "DELETE FROM memories WHERE id = ANY($1::int[])", memory_ids
         )
+
+
+# ============================================================
+# 共同经历卡片草稿（Phase 1：仅 Dashboard 审核，不参与聊天检索）
+# ============================================================
+
+_EXPERIENCE_CARD_JSON_FIELDS = (
+    "key_details", "explicit_corrections", "explicit_agreements", "open_threads"
+)
+
+_EXPERIENCE_CARD_REQUIRED_COLUMNS = {
+    "id", "source_session_id", "title", "event_summary", "interaction_trace",
+    "key_details", "explicit_corrections", "explicit_agreements", "open_threads",
+    "source_message_ids", "review_status", "ai_visible", "supersedes_card_id",
+    "revision_reason", "generator_model", "prompt_version", "approved_at",
+    "created_at", "updated_at",
+}
+_EXPERIENCE_CARD_REQUIRED_CONSTRAINTS = {
+    "shared_experience_cards_status_check",
+    "shared_experience_cards_visibility_check",
+}
+
+
+async def _validate_shared_experience_cards_schema(conn) -> None:
+    """Read-only guard against an older experimental table with schema drift."""
+    columns = await conn.fetch("""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'shared_experience_cards'
+    """)
+    constraints = await conn.fetch("""
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'shared_experience_cards'::regclass
+    """)
+    column_names = {row["column_name"] for row in columns}
+    constraint_names = {row["conname"] for row in constraints}
+    missing_columns = sorted(_EXPERIENCE_CARD_REQUIRED_COLUMNS - column_names)
+    missing_constraints = sorted(_EXPERIENCE_CARD_REQUIRED_CONSTRAINTS - constraint_names)
+    if missing_columns or missing_constraints:
+        raise RuntimeError(
+            "shared_experience_cards_schema_mismatch: "
+            f"missing_columns={missing_columns}; "
+            f"missing_constraints={missing_constraints}"
+        )
+
+
+def _experience_card_dict(row) -> dict:
+    item = dict(row)
+    for key in _EXPERIENCE_CARD_JSON_FIELDS:
+        value = item.get(key)
+        if isinstance(value, str):
+            try:
+                item[key] = json.loads(value)
+            except json.JSONDecodeError:
+                item[key] = []
+        elif not isinstance(value, list):
+            item[key] = []
+    item["source_message_ids"] = list(item.get("source_message_ids") or [])
+    return item
+
+async def create_experience_card_draft(
+    source_session_id: str,
+    card: dict,
+    generator_model: str = "",
+    prompt_version: str = "",
+):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO shared_experience_cards (
+                source_session_id, title, event_summary, interaction_trace,
+                key_details, explicit_corrections, explicit_agreements,
+                open_threads, source_message_ids, review_status, ai_visible,
+                generator_model, prompt_version
+            ) VALUES (
+                $1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
+                $8::jsonb, $9::bigint[], 'pending', FALSE, $10, $11
+            )
+            RETURNING *
+        """,
+            source_session_id,
+            str(card.get("title") or ""),
+            str(card.get("event_summary") or ""),
+            str(card.get("interaction_trace") or ""),
+            json.dumps((card.get("key_details") or [])[:3], ensure_ascii=False),
+            json.dumps(card.get("explicit_corrections") or [], ensure_ascii=False),
+            json.dumps(card.get("explicit_agreements") or [], ensure_ascii=False),
+            json.dumps(card.get("open_threads") or [], ensure_ascii=False),
+            [int(value) for value in card.get("source_message_ids") or []],
+            generator_model,
+            prompt_version,
+        )
+        return _experience_card_dict(row)
+
+
+async def list_experience_cards(review_status: str = None, limit: int = 500):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if review_status:
+            rows = await conn.fetch("""
+                SELECT * FROM shared_experience_cards
+                WHERE review_status = $1
+                ORDER BY created_at DESC, id DESC
+                LIMIT $2
+            """, review_status, limit)
+        else:
+            rows = await conn.fetch("""
+                SELECT * FROM shared_experience_cards
+                ORDER BY created_at DESC, id DESC
+                LIMIT $1
+            """, limit)
+        return [_experience_card_dict(row) for row in rows]
+
+
+async def get_experience_card(card_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM shared_experience_cards WHERE id = $1", card_id
+        )
+        return _experience_card_dict(row) if row else None
+
+
+async def get_experience_card_source_messages(card_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        card = await conn.fetchrow("""
+            SELECT source_session_id, source_message_ids
+            FROM shared_experience_cards WHERE id = $1
+        """, card_id)
+        if not card:
+            return []
+        rows = await conn.fetch("""
+            SELECT id, role, content, created_at
+            FROM conversations
+            WHERE session_id = $1
+              AND id = ANY($2::bigint[])
+            ORDER BY created_at ASC, id ASC
+        """, card["source_session_id"], card["source_message_ids"] or [])
+        return [dict(row) for row in rows]
+
+
+async def update_experience_card(card_id: int, update: dict):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        current = await conn.fetchrow(
+            "SELECT * FROM shared_experience_cards WHERE id = $1", card_id
+        )
+        if not current:
+            return None
+        values = apply_card_update(_experience_card_dict(current), update)
+        status = values["review_status"]
+        visible = values["ai_visible"]
+        row = await conn.fetchrow("""
+            UPDATE shared_experience_cards SET
+                title = $2,
+                event_summary = $3,
+                interaction_trace = $4,
+                key_details = $5::jsonb,
+                explicit_corrections = $6::jsonb,
+                explicit_agreements = $7::jsonb,
+                open_threads = $8::jsonb,
+                review_status = $9,
+                ai_visible = $10,
+                revision_reason = $11,
+                approved_at = CASE
+                    WHEN $9 = 'approved' AND approved_at IS NULL THEN NOW()
+                    WHEN $9 <> 'approved' THEN NULL
+                    ELSE approved_at
+                END,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING *
+        """,
+            card_id,
+            str(values.get("title") or ""),
+            str(values.get("event_summary") or ""),
+            str(values.get("interaction_trace") or ""),
+            json.dumps((values.get("key_details") or [])[:3], ensure_ascii=False),
+            json.dumps(values.get("explicit_corrections") or [], ensure_ascii=False),
+            json.dumps(values.get("explicit_agreements") or [], ensure_ascii=False),
+            json.dumps(values.get("open_threads") or [], ensure_ascii=False),
+            status,
+            visible,
+            str(values.get("revision_reason") or ""),
+        )
+        return _experience_card_dict(row)
 
 
 # ============================================================
