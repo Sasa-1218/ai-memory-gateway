@@ -85,6 +85,8 @@ html[data-dashboard-theme="memory-garden"] .modal-content {
     background: rgba(255, 250, 252, 0.91);
     border: 1px solid rgba(218, 145, 169, 0.3);
     backdrop-filter: blur(10px);
+    box-shadow: 0 10px 30px rgba(126, 75, 93, 0.10),
+                inset 0 1px 0 rgba(255, 255, 255, 0.7);
 }
 
 html[data-dashboard-theme="memory-garden"] .main-content {
@@ -96,8 +98,30 @@ html[data-dashboard-theme="memory-garden"] .section-header h1 {
 }
 
 html[data-dashboard-theme="memory-garden"] .nav-item.active {
-    background: #d86f91;
-    box-shadow: 0 5px 14px rgba(216, 111, 145, 0.2);
+    background: rgba(216, 111, 145, 0.12);
+    color: var(--primary-dark);
+    box-shadow: inset 3px 0 0 var(--primary);
+}
+
+html[data-dashboard-theme="memory-garden"] .nav-item.active .nav-icon svg {
+    stroke: var(--primary-dark);
+}
+
+html[data-dashboard-theme="memory-garden"] .layer-tab.active {
+    background: rgba(216, 111, 145, 0.12);
+    border-color: var(--primary);
+    color: var(--primary-dark);
+}
+
+html[data-dashboard-theme="memory-garden"] .layer-tab.active span {
+    background: rgba(216, 111, 145, 0.22);
+    color: var(--primary-dark);
+}
+
+html[data-dashboard-theme="memory-garden"] .section-header h1,
+html[data-dashboard-theme="memory-garden"] .logo-text {
+    font-family: "Cormorant Garamond", Georgia, serif;
+    font-weight: 600;
 }
 
 html[data-dashboard-theme="memory-garden"] .section-header {
@@ -128,11 +152,9 @@ html[data-dashboard-theme="memory-garden"] .sakura-petals {
     top: -12vh;
     left: var(--petal-x);
     width: var(--petal-size);
-    height: calc(var(--petal-size) * 0.72);
-    border-radius: 72% 28% 68% 32%;
-    background: linear-gradient(145deg, rgba(255, 247, 250, 0.92), rgba(218, 119, 151, 0.72));
-    box-shadow: 0 3px 8px rgba(151, 79, 103, 0.1);
+    height: var(--petal-size);
     opacity: 0;
+    filter: drop-shadow(0 3px 6px rgba(151, 79, 103, 0.12));
     transform-origin: 35% 60%;
     animation: sakuraFall var(--petal-duration) linear infinite;
     animation-delay: var(--petal-delay);
@@ -140,12 +162,15 @@ html[data-dashboard-theme="memory-garden"] .sakura-petals {
     will-change: transform;
 }
 
-.sakura-petal:nth-child(3n) {
-    background: linear-gradient(145deg, rgba(255, 255, 255, 0.95), rgba(244, 187, 204, 0.78));
+.sakura-petal svg {
+    display: block;
+    width: 100%;
+    height: 100%;
 }
 
 .sakura-petal:nth-child(4n) {
-    width: calc(var(--petal-size) * 0.72);
+    width: calc(var(--petal-size) * 0.78);
+    height: calc(var(--petal-size) * 0.78);
 }
 
 html[data-dashboard-theme="memory-garden"] .sakura-petal {
