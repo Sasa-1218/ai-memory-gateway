@@ -55,6 +55,7 @@ const LAYER_NAMES = {
 // 初始化
 // ============================================
 document.addEventListener('DOMContentLoaded', () => {
+    applyDashboardTheme(localStorage.getItem('dashboard_theme') || 'memory-garden');
     // 💡 解决“失忆”核心步骤1：网页刚打开时，立刻去缓存拿之前存的名字
     const localUser = localStorage.getItem('role_display_user');
     if (localUser && document.getElementById('set-role_display_user')) {
@@ -77,6 +78,23 @@ document.addEventListener('DOMContentLoaded', () => {
     // 加载导出统计
     loadExportStats();
 });
+
+function applyDashboardTheme(theme) {
+    const selected = theme === 'base' ? 'base' : 'memory-garden';
+    if (selected === 'base') {
+        document.documentElement.removeAttribute('data-dashboard-theme');
+    } else {
+        document.documentElement.setAttribute('data-dashboard-theme', selected);
+    }
+    localStorage.setItem('dashboard_theme', selected);
+    const label = document.getElementById('dashboardThemeLabel');
+    if (label) label.textContent = selected === 'base' ? '回忆花园' : '基础样式';
+}
+
+function toggleDashboardTheme() {
+    const current = document.documentElement.getAttribute('data-dashboard-theme');
+    applyDashboardTheme(current === 'memory-garden' ? 'base' : 'memory-garden');
+}
 
 
 // ============================================

@@ -31,6 +31,95 @@
     --transition: all 0.2s ease;
 }
 
+/* 可回退的私人回忆花园主题。基础主题仍由 :root 提供。 */
+html[data-dashboard-theme="memory-garden"] {
+    color-scheme: light;
+    --primary: #d86f91;
+    --primary-dark: #bd5879;
+    --primary-light: #ed9eb4;
+    --text: #4f3f46;
+    --text-light: #77636b;
+    --text-muted: #a78e98;
+    --bg: #fff7f9;
+    --card: rgba(255, 253, 253, 0.94);
+    --border: #e8cbd5;
+    --border-light: #f2e1e7;
+    --success: #62886b;
+    --success-bg: #edf6ef;
+    --danger: #bb5969;
+    --danger-bg: #fff0f2;
+    --danger-hover: #9e4656;
+    --info: #6f829f;
+    --info-bg: #f0f4f8;
+    --shadow-sm: 0 2px 8px rgba(126, 75, 93, 0.05);
+    --shadow: 0 8px 24px rgba(126, 75, 93, 0.07);
+    --shadow-md: 0 12px 30px rgba(126, 75, 93, 0.1);
+    --radius: 8px;
+    --radius-sm: 8px;
+}
+
+html[data-dashboard-theme="memory-garden"] body {
+    background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.72), transparent 42%),
+        linear-gradient(160deg, #fff9fa 0%, #fceef2 58%, #f3f7f0 100%);
+    background-attachment: fixed;
+}
+
+html[data-dashboard-theme="memory-garden"] body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.2;
+    background-image: repeating-linear-gradient(
+        0deg,
+        transparent 0,
+        transparent 31px,
+        rgba(216, 111, 145, 0.08) 32px
+    );
+    z-index: -1;
+}
+
+html[data-dashboard-theme="memory-garden"] .sidebar {
+    background: rgba(255, 251, 252, 0.96);
+    border-right: 1px solid var(--border-light);
+    box-shadow: 4px 0 24px rgba(126, 75, 93, 0.06);
+}
+
+html[data-dashboard-theme="memory-garden"] .sidebar-header {
+    background: linear-gradient(180deg, rgba(255, 238, 244, 0.72), transparent);
+}
+
+html[data-dashboard-theme="memory-garden"] .card,
+html[data-dashboard-theme="memory-garden"] .modal-content {
+    border: 1px solid rgba(232, 203, 213, 0.72);
+    backdrop-filter: blur(10px);
+}
+
+html[data-dashboard-theme="memory-garden"] .section-header h1 {
+    color: #6b4856;
+}
+
+html[data-dashboard-theme="memory-garden"] .nav-item.active {
+    background: #d86f91;
+    box-shadow: 0 5px 14px rgba(216, 111, 145, 0.2);
+}
+
+.theme-toggle {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    text-align: left;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+    }
+}
+
 /* ============================================
    重置与基础
    ============================================ */
