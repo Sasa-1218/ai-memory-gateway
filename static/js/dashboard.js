@@ -57,6 +57,7 @@ const LAYER_NAMES = {
 // ============================================
 document.addEventListener('DOMContentLoaded', () => {
     applyDashboardTheme(localStorage.getItem('dashboard_theme') || 'memory-garden');
+    initSakuraPetals();
     // 💡 解决“失忆”核心步骤1：网页刚打开时，立刻去缓存拿之前存的名字
     const localUser = localStorage.getItem('role_display_user');
     if (localUser && document.getElementById('set-role_display_user')) {
@@ -95,6 +96,31 @@ function applyDashboardTheme(theme) {
 function toggleDashboardTheme() {
     const current = document.documentElement.getAttribute('data-dashboard-theme');
     applyDashboardTheme(current === 'memory-garden' ? 'base' : 'memory-garden');
+}
+
+function initSakuraPetals() {
+    const layer = document.getElementById('sakuraPetals');
+    if (!layer || layer.dataset.ready === '1') return;
+    layer.dataset.ready = '1';
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const count = reducedMotion ? 6 : Math.max(14, Math.min(22, Math.round(window.innerWidth / 82)));
+    for (let index = 0; index < count; index += 1) {
+        const petal = document.createElement('span');
+        petal.className = 'sakura-petal';
+        petal.style.setProperty('--petal-x', `${Math.random() * 108 - 4}vw`);
+        petal.style.setProperty('--petal-size', `${10 + Math.random() * 9}px`);
+        petal.style.setProperty('--petal-duration', `${24 + Math.random() * 22}s`);
+        petal.style.setProperty('--petal-delay', `${-Math.random() * 44}s`);
+        petal.style.setProperty('--petal-sway', `${Math.random() * 90 - 45}px`);
+        petal.style.setProperty('--petal-end-sway', `${Math.random() * 150 - 75}px`);
+        petal.style.setProperty('--petal-opacity', `${0.28 + Math.random() * 0.34}`);
+        if (reducedMotion) {
+            petal.style.animation = 'none';
+            petal.style.top = `${8 + Math.random() * 84}vh`;
+            petal.style.opacity = '0.2';
+        }
+        layer.appendChild(petal);
+    }
 }
 
 
@@ -155,7 +181,11 @@ function selectedMemoryInspectorSources() {
 }
 
 function memoryInspectorTypeLabel(type) {
-    return {memory: 'Memory', summary_part: 'Summary Part', experience_card: '共同经历卡'}[type] || type || '候选';
+    return {memory: '记忆', summary_part: '近期摘要', experience_card: '共同经历卡'}[type] || type || '候选';
+}
+
+function memoryInspectorStatusLabel(status) {
+    return {active: '使用中', pending: '待检查', approved: '已批准', archived: '已归档'}[status] || status || '未报告';
 }
 
 function renderInspectorList(items, emptyText) {
@@ -183,12 +213,12 @@ function renderMemoryInspectorResults(results) {
                 </div>
                 <p class="inspector-snippet">${escapeHtml(item.snippet || '')}</p>
                 <div class="inspector-field"><b>匹配线索</b><div>${renderInspectorList(item.matched_terms, '未报告')}</div></div>
-                ${item.key_details?.length ? `<div class="inspector-field"><b>Key details</b><div>${renderInspectorList(item.key_details, '')}</div></div>` : ''}
+                ${item.key_details?.length ? `<div class="inspector-field"><b>检索细节</b><div>${renderInspectorList(item.key_details, '')}</div></div>` : ''}
                 <dl class="inspector-meta">
-                    <div><dt>Session</dt><dd>${escapeHtml(item.source_session_id || '未报告')}</dd></div>
-                    <div><dt>Message IDs</dt><dd>${escapeHtml((item.source_message_ids || []).join(', ') || '未报告')}</dd></div>
+                    <div><dt>来源会话</dt><dd>${escapeHtml(item.source_session_id || '未报告')}</dd></div>
+                    <div><dt>来源消息 ID</dt><dd>${escapeHtml((item.source_message_ids || []).join(', ') || '未报告')}</dd></div>
                     <div><dt>预估 token</dt><dd>${Number(item.estimated_tokens || 0)}</dd></div>
-                    <div><dt>状态</dt><dd>${escapeHtml(item.review_status || '未报告')} · ${visibleText}</dd></div>
+                    <div><dt>状态</dt><dd>${escapeHtml(memoryInspectorStatusLabel(item.review_status))} · ${visibleText}</dd></div>
                 </dl>
                 <div class="inspector-result-actions">${sourceButton}</div>
             </article>`;

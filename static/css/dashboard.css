@@ -60,24 +60,14 @@ html[data-dashboard-theme="memory-garden"] {
 
 html[data-dashboard-theme="memory-garden"] body {
     background:
-        linear-gradient(135deg, rgba(255, 255, 255, 0.72), transparent 42%),
-        linear-gradient(160deg, #fff9fa 0%, #fceef2 58%, #f3f7f0 100%);
+        radial-gradient(ellipse at 78% 10%, rgba(255, 255, 255, 0.82), transparent 27%),
+        radial-gradient(ellipse at 20% 18%, rgba(255, 208, 222, 0.64), transparent 34%),
+        linear-gradient(150deg, #fceef2 0%, #f4dbe3 62%, #efd2dc 100%);
     background-attachment: fixed;
 }
 
 html[data-dashboard-theme="memory-garden"] body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    opacity: 0.2;
-    background-image: repeating-linear-gradient(
-        0deg,
-        transparent 0,
-        transparent 31px,
-        rgba(216, 111, 145, 0.08) 32px
-    );
-    z-index: -1;
+    opacity: 0;
 }
 
 html[data-dashboard-theme="memory-garden"] .sidebar {
@@ -92,8 +82,13 @@ html[data-dashboard-theme="memory-garden"] .sidebar-header {
 
 html[data-dashboard-theme="memory-garden"] .card,
 html[data-dashboard-theme="memory-garden"] .modal-content {
-    border: 1px solid rgba(232, 203, 213, 0.72);
+    background: rgba(255, 250, 252, 0.91);
+    border: 1px solid rgba(218, 145, 169, 0.3);
     backdrop-filter: blur(10px);
+}
+
+html[data-dashboard-theme="memory-garden"] .main-content {
+    background: rgba(255, 247, 250, 0.2);
 }
 
 html[data-dashboard-theme="memory-garden"] .section-header h1 {
@@ -103,6 +98,66 @@ html[data-dashboard-theme="memory-garden"] .section-header h1 {
 html[data-dashboard-theme="memory-garden"] .nav-item.active {
     background: #d86f91;
     box-shadow: 0 5px 14px rgba(216, 111, 145, 0.2);
+}
+
+html[data-dashboard-theme="memory-garden"] .section-header {
+    border-bottom: 1px solid rgba(216, 111, 145, 0.18);
+    padding-bottom: 14px;
+}
+
+html[data-dashboard-theme="memory-garden"] .btn-primary {
+    box-shadow: 0 4px 12px rgba(189, 88, 121, 0.16);
+}
+
+.sakura-petals {
+    position: fixed;
+    inset: 0;
+    z-index: 4;
+    overflow: hidden;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.6s ease;
+}
+
+html[data-dashboard-theme="memory-garden"] .sakura-petals {
+    opacity: 0.8;
+}
+
+.sakura-petal {
+    position: absolute;
+    top: -12vh;
+    left: var(--petal-x);
+    width: var(--petal-size);
+    height: calc(var(--petal-size) * 0.72);
+    border-radius: 72% 28% 68% 32%;
+    background: linear-gradient(145deg, rgba(255, 247, 250, 0.92), rgba(218, 119, 151, 0.72));
+    box-shadow: 0 3px 8px rgba(151, 79, 103, 0.1);
+    opacity: 0;
+    transform-origin: 35% 60%;
+    animation: sakuraFall var(--petal-duration) linear infinite;
+    animation-delay: var(--petal-delay);
+    animation-play-state: paused;
+    will-change: transform;
+}
+
+.sakura-petal:nth-child(3n) {
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.95), rgba(244, 187, 204, 0.78));
+}
+
+.sakura-petal:nth-child(4n) {
+    width: calc(var(--petal-size) * 0.72);
+}
+
+html[data-dashboard-theme="memory-garden"] .sakura-petal {
+    animation-play-state: running;
+}
+
+@keyframes sakuraFall {
+    0% { opacity: 0; transform: translate3d(0, -14vh, 0) rotate(-25deg); }
+    12% { opacity: var(--petal-opacity); }
+    48% { transform: translate3d(var(--petal-sway), 48vh, 0) rotate(190deg); }
+    80% { opacity: var(--petal-opacity); }
+    100% { opacity: 0; transform: translate3d(var(--petal-end-sway), 114vh, 0) rotate(430deg); }
 }
 
 .theme-toggle {
