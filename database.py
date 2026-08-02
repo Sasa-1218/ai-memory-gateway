@@ -480,6 +480,60 @@ async def init_tables():
                 updated_at      TIMESTAMPTZ DEFAULT NOW()
             );
         """)
+        for column_sql in (
+            "ADD COLUMN IF NOT EXISTS valence INTEGER DEFAULT 20",
+            "ADD COLUMN IF NOT EXISTS arousal INTEGER DEFAULT 24",
+            "ADD COLUMN IF NOT EXISTS connection INTEGER DEFAULT 72",
+            "ADD COLUMN IF NOT EXISTS tension INTEGER DEFAULT 10",
+            "ADD COLUMN IF NOT EXISTS hurt INTEGER DEFAULT 4",
+            "ADD COLUMN IF NOT EXISTS fatigue INTEGER DEFAULT 20",
+        ):
+            await conn.execute(f"ALTER TABLE shadow_mind_state {column_sql}")
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS shadow_mind_event_log (
+                id                  BIGSERIAL PRIMARY KEY,
+                event_key           TEXT NOT NULL UNIQUE,
+                session_id          TEXT NOT NULL,
+                event_type          TEXT NOT NULL CHECK (event_type IN (
+                    'normal_chat', 'user_replied', 'warm_exchange', 'topic_continued',
+                    'correction_detected', 'boundary_mentioned', 'conflict_possible',
+                    'repair_possible', 'silence_elapsed'
+                )),
+                source_message_ids  BIGINT[] NOT NULL DEFAULT '{}',
+                deltas              JSONB NOT NULL DEFAULT '{}'::jsonb,
+                reason_code         TEXT NOT NULL,
+                confidence          NUMERIC(4,3) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+                created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                computed_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_shadow_mind_event_session_time
+            ON shadow_mind_event_log (session_id, computed_at DESC, id DESC);
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS shadow_mind_state_history (
+                id          BIGSERIAL PRIMARY KEY,
+                session_id  TEXT NOT NULL,
+                event_id    BIGINT REFERENCES shadow_mind_event_log(id) ON DELETE SET NULL,
+                longing     INTEGER NOT NULL,
+                curiosity   INTEGER NOT NULL,
+                share       INTEGER NOT NULL,
+                warmth      INTEGER NOT NULL,
+                concern     INTEGER NOT NULL,
+                valence     INTEGER NOT NULL,
+                arousal     INTEGER NOT NULL,
+                connection  INTEGER NOT NULL,
+                tension     INTEGER NOT NULL,
+                hurt        INTEGER NOT NULL,
+                fatigue     INTEGER NOT NULL,
+                computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_shadow_mind_history_session_time
+            ON shadow_mind_state_history (session_id, computed_at DESC, id DESC);
+        """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS thought_pool (
                 id              SERIAL PRIMARY KEY,
@@ -951,6 +1005,7 @@ async def get_shadow_mind_state(session_id: str) -> dict | None:
         row = await conn.fetchrow(
             """
             SELECT session_id, longing, curiosity, share, warmth, concern,
+                   valence, arousal, connection, tension, hurt, fatigue,
                    reasons, inputs, computed_at, updated_at
             FROM shadow_mind_state
             WHERE session_id = $1
@@ -958,6 +1013,203 @@ async def get_shadow_mind_state(session_id: str) -> dict | None:
             _decision_text(session_id, 256),
         )
     return dict(row) if row else None
+
+
+async def settle_shadow_mind_rules(
+    session_id: str,
+    event_type: str,
+    source_message_ids: list[int] | None = None,
+    event_key: str = "",
+    computed_at: datetime | None = None,
+) -> dict:
+    """Atomically apply one deterministic A2 transition and write only changed state."""
+    from shadow_mind_rules import BASE_STATE, EVENT_TYPES, STATE_FIELDS, settle_elapsed, settle_normal_chat
+
+    if event_type not in EVENT_TYPES:
+        raise ValueError("shadow_mind_event_type_invalid")
+    if event_type not in {"normal_chat", "silence_elapsed"}:
+        raise ValueError("shadow_mind_event_not_implemented")
+    safe_session = _decision_text(session_id, 256)
+    safe_ids = sorted({int(value) for value in (source_message_ids or []) if int(value) > 0})
+    now = computed_at or datetime.now(dt_timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt_timezone.utc)
+    now = now.astimezone(dt_timezone.utc)
+    safe_key = _decision_text(event_key, 128)
+    if not safe_key:
+        safe_key = f"elapsed:{safe_session}:{now.strftime('%Y%m%d%H')}" if event_type == "silence_elapsed" else ""
+    if not safe_key:
+        raise ValueError("shadow_mind_event_key_missing")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", safe_session)
+            existing_event = await conn.fetchval(
+                "SELECT id FROM shadow_mind_event_log WHERE event_key = $1", safe_key
+            )
+            if existing_event:
+                return {"changed": False, "duplicate": True, "event_id": existing_event}
+
+            row = await conn.fetchrow(
+                """
+                SELECT session_id, longing, curiosity, share, warmth, concern,
+                       valence, arousal, connection, tension, hurt, fatigue,
+                       computed_at
+                FROM shadow_mind_state
+                WHERE session_id = $1
+                FOR UPDATE
+                """,
+                safe_session,
+            )
+            if row:
+                old_state = {field: row[field] for field in STATE_FIELDS}
+                last_computed_at = row["computed_at"] or now
+            else:
+                old_state = dict(BASE_STATE)
+                last_computed_at = now
+
+            if event_type == "normal_chat":
+                new_state, deltas, reason_code, confidence = settle_normal_chat(old_state, now)
+            else:
+                new_state, deltas, reason_code, confidence = settle_elapsed(old_state, last_computed_at, now)
+            if not deltas:
+                if not row:
+                    await conn.execute(
+                        """
+                        INSERT INTO shadow_mind_state (
+                            session_id, longing, curiosity, share, warmth, concern,
+                            valence, arousal, connection, tension, hurt, fatigue,
+                            reasons, inputs, computed_at, updated_at
+                        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'[]'::jsonb,'{}'::jsonb,$13,$13)
+                        ON CONFLICT (session_id) DO NOTHING
+                        """,
+                        safe_session, *[old_state[field] for field in STATE_FIELDS], now,
+                    )
+                return {"changed": False, "duplicate": False, "event_id": None, "state": old_state}
+
+            event_id = await conn.fetchval(
+                """
+                INSERT INTO shadow_mind_event_log (
+                    event_key, session_id, event_type, source_message_ids,
+                    deltas, reason_code, confidence, created_at, computed_at
+                ) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$8)
+                RETURNING id
+                """,
+                safe_key, safe_session, event_type, safe_ids,
+                json.dumps(deltas, ensure_ascii=False), reason_code, confidence, now,
+            )
+            await conn.execute(
+                """
+                INSERT INTO shadow_mind_state (
+                    session_id, longing, curiosity, share, warmth, concern,
+                    valence, arousal, connection, tension, hurt, fatigue,
+                    reasons, inputs, computed_at, updated_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15,$15)
+                ON CONFLICT (session_id) DO UPDATE SET
+                    longing=EXCLUDED.longing, curiosity=EXCLUDED.curiosity, share=EXCLUDED.share,
+                    warmth=EXCLUDED.warmth, concern=EXCLUDED.concern, valence=EXCLUDED.valence,
+                    arousal=EXCLUDED.arousal, connection=EXCLUDED.connection, tension=EXCLUDED.tension,
+                    hurt=EXCLUDED.hurt, fatigue=EXCLUDED.fatigue, reasons=EXCLUDED.reasons,
+                    inputs=EXCLUDED.inputs, computed_at=EXCLUDED.computed_at, updated_at=EXCLUDED.updated_at
+                """,
+                safe_session, *[new_state[field] for field in STATE_FIELDS],
+                json.dumps([{"reason_code": reason_code}], ensure_ascii=False),
+                json.dumps({"event_type": event_type, "source_message_count": len(safe_ids)}, ensure_ascii=False),
+                now,
+            )
+            await conn.execute(
+                """
+                INSERT INTO shadow_mind_state_history (
+                    session_id, event_id, longing, curiosity, share, warmth, concern,
+                    valence, arousal, connection, tension, hurt, fatigue, computed_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                """,
+                safe_session, event_id, *[new_state[field] for field in STATE_FIELDS], now,
+            )
+    return {"changed": True, "duplicate": False, "event_id": event_id, "state": new_state, "deltas": deltas}
+
+
+async def get_shadow_mind_a2_events(session_id: str, limit: int = 50) -> list:
+    pool = await get_pool()
+    safe_limit = max(1, min(200, int(limit or 50)))
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, event_type, source_message_ids, deltas, reason_code,
+                   confidence, created_at, computed_at
+            FROM shadow_mind_event_log
+            WHERE session_id = $1
+            ORDER BY computed_at DESC, id DESC LIMIT $2
+            """,
+            _decision_text(session_id, 256), safe_limit,
+        )
+    return [dict(row) for row in rows]
+
+
+async def get_shadow_mind_history(session_id: str, limit: int = 100) -> list:
+    pool = await get_pool()
+    safe_limit = max(1, min(300, int(limit or 100)))
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT longing, curiosity, share, warmth, concern, valence, arousal,
+                   connection, tension, hurt, fatigue, computed_at
+            FROM shadow_mind_state_history
+            WHERE session_id = $1
+            ORDER BY computed_at DESC, id DESC LIMIT $2
+            """,
+            _decision_text(session_id, 256), safe_limit,
+        )
+    return [dict(row) for row in reversed(rows)]
+
+
+async def get_latest_normal_turn_message_ids(session_id: str) -> list[int]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, role, metadata
+            FROM conversations
+            WHERE session_id = $1 AND role IN ('user', 'assistant')
+            ORDER BY created_at DESC, id DESC LIMIT 4
+            """,
+            _decision_text(session_id, 256),
+        )
+    selected = []
+    for row in rows:
+        if row["role"] == "assistant" and row["metadata"]:
+            try:
+                metadata = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+            except (TypeError, ValueError):
+                metadata = {}
+            if isinstance(metadata, dict) and metadata.get("is_push"):
+                continue
+        selected.append(int(row["id"]))
+        if len(selected) == 2:
+            break
+    return sorted(selected)
+
+
+async def get_shadow_mind_event_source_messages(session_id: str, event_id: int) -> list:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        ids = await conn.fetchval(
+            "SELECT source_message_ids FROM shadow_mind_event_log WHERE id=$1 AND session_id=$2",
+            int(event_id), _decision_text(session_id, 256),
+        )
+        if not ids:
+            return []
+        rows = await conn.fetch(
+            """
+            SELECT id, role, content, created_at
+            FROM conversations
+            WHERE session_id=$1 AND id=ANY($2::bigint[])
+            ORDER BY created_at, id
+            """,
+            _decision_text(session_id, 256), list(ids),
+        )
+    return [dict(row) for row in rows]
 
 
 async def get_recent_drive_events(session_id: str, limit: int = 20) -> list:

@@ -40,7 +40,7 @@ except Exception:
     jwt = None
     RSAAlgorithm = None
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch, get_memories_by_ids_readonly
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, settle_shadow_mind_rules, get_shadow_mind_a2_events, get_shadow_mind_history, get_latest_normal_turn_message_ids, get_shadow_mind_event_source_messages, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch, get_memories_by_ids_readonly
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from experience_cards import (
     REVIEW_STATUSES,
@@ -112,6 +112,9 @@ MEMORY_EXTRACT_INTERVAL = int(os.getenv("MEMORY_EXTRACT_INTERVAL", "1"))
 
 # 记忆提取+注入总开关（false时数据库仍连接、消息仍存储，但不提取也不注入记忆）
 MEMORY_EXTRACT_ENABLED = os.getenv("MEMORY_EXTRACT_ENABLED", "true").lower() == "true"
+
+# Shadow Mind Phase A2: deterministic, zero-model state settlement.
+SHADOW_MIND_RULES_ENABLED = os.getenv("SHADOW_MIND_RULES_ENABLED", "false").lower() == "true"
 
 # 分区缓存
 CACHE_PARTITION_ENABLED = os.getenv("CACHE_PARTITION_ENABLED", "false").lower() == "true"
@@ -2508,7 +2511,10 @@ def _shadow_mind_public_state(row: dict | None) -> dict | None:
     updated_at = row.get("updated_at")
     return {
         "session_id": row.get("session_id", ""),
-        "state": {drive: row.get(drive, 0) for drive in SHADOW_MIND_DRIVES},
+        "state": {
+            field: row.get(field, 0)
+            for field in SHADOW_MIND_DRIVES + ("valence", "arousal", "connection", "tension", "hurt", "fatigue")
+        },
         "reasons": _shadow_mind_json_value(row.get("reasons"), []),
         "inputs": _shadow_mind_json_value(row.get("inputs"), {}),
         "computed_at": computed_at.isoformat() if hasattr(computed_at, "isoformat") else computed_at,
@@ -2529,6 +2535,36 @@ def _shadow_mind_public_events(events: list) -> list:
             "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
         })
     return public
+
+
+def _shadow_mind_a2_public_events(events: list) -> list:
+    public = []
+    for event in events or []:
+        computed_at = event.get("computed_at")
+        created_at = event.get("created_at")
+        public.append({
+            "id": event.get("id"),
+            "event_type": event.get("event_type", ""),
+            "source_message_ids": list(event.get("source_message_ids") or []),
+            "deltas": _shadow_mind_json_value(event.get("deltas"), {}),
+            "reason_code": event.get("reason_code", ""),
+            "confidence": float(event.get("confidence") or 0),
+            "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            "computed_at": computed_at.isoformat() if hasattr(computed_at, "isoformat") else computed_at,
+        })
+    return public
+
+
+def _shadow_mind_public_history(rows: list) -> list:
+    result = []
+    fields = SHADOW_MIND_DRIVES + ("valence", "arousal", "connection", "tension", "hurt", "fatigue")
+    for row in rows or []:
+        computed_at = row.get("computed_at")
+        result.append({
+            "state": {field: row.get(field, 0) for field in fields},
+            "computed_at": computed_at.isoformat() if hasattr(computed_at, "isoformat") else computed_at,
+        })
+    return result
 
 
 async def _log_push_decision_diag(session_id: str, reason: str, timing_state: dict | None = None):
@@ -3361,6 +3397,7 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
     global _round_counter
     
     try:
+        shadow_mind_normal_turn_saved = False
         # Debug: 打印存储分支判断依据
         print(f"💾 process_memories_background: user_msg={bool(user_msg)}, tool_messages={len(tool_messages) if tool_messages else 0}, "
               f"assistant_tool_calls={len(assistant_tool_calls) if assistant_tool_calls else 0}, skip={skip_conversation_log}")
@@ -3411,12 +3448,35 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                     updated = await update_last_assistant_message(session_id, assistant_msg, model)
                     if updated:
                         print(f"🔄 检测到re-roll，已覆盖最后一条assistant回复")
+                        shadow_mind_normal_turn_saved = True
                     else:
                         await save_message(session_id, "user", user_msg, model)
                         await save_message(session_id, "assistant", assistant_msg, model, metadata=assistant_meta)
+                        shadow_mind_normal_turn_saved = True
                 else:
                     await save_message(session_id, "user", user_msg, model)
                     await save_message(session_id, "assistant", assistant_msg, model, metadata=assistant_meta)
+                    shadow_mind_normal_turn_saved = True
+
+        # Shadow Mind is isolated from conversation persistence and all downstream jobs.
+        # Failures here are diagnostic only and must never block memory/summary/card work.
+        if SHADOW_MIND_RULES_ENABLED and shadow_mind_normal_turn_saved:
+            try:
+                source_ids = await get_latest_normal_turn_message_ids(session_id)
+                if source_ids:
+                    event_key = "normal_chat:" + session_id + ":" + "-".join(str(value) for value in source_ids)
+                    await settle_shadow_mind_rules(
+                        session_id=session_id,
+                        event_type="normal_chat",
+                        source_message_ids=source_ids,
+                        event_key=hashlib.sha256(event_key.encode("utf-8")).hexdigest()[:32],
+                    )
+            except Exception as shadow_error:
+                print(
+                    "shadow_mind_settle_failed "
+                    f"event_type=normal_chat error_type={type(shadow_error).__name__}",
+                    flush=True,
+                )
         
         # 2. 检查是否需要提取记忆
         if not MEMORY_EXTRACT_ENABLED:
@@ -4185,50 +4245,73 @@ async def api_push_status():
 
 @app.get("/api/shadow/mind/status")
 async def api_shadow_mind_status():
-    """Shadow Mind Phase A 状态（脱敏，只读展示）。"""
+    """Shadow Mind A2 state; reads lazily settle elapsed time when enabled."""
     if not MEMORY_ENABLED:
         return {"enabled": False, "reason": "memory_disabled"}
     session_id = get_active_session_id()
+    if SHADOW_MIND_RULES_ENABLED:
+        try:
+            now = datetime.now(timezone.utc)
+            key = hashlib.sha256(f"silence:{session_id}:{now:%Y%m%d%H}".encode("utf-8")).hexdigest()[:32]
+            await settle_shadow_mind_rules(session_id, "silence_elapsed", [], key, now)
+        except Exception as shadow_error:
+            print(
+                "shadow_mind_settle_failed "
+                f"event_type=silence_elapsed error_type={type(shadow_error).__name__}",
+                flush=True,
+            )
     state = await get_shadow_mind_state(session_id)
-    events = await get_recent_drive_events(session_id, limit=20)
+    events = await get_shadow_mind_a2_events(session_id, limit=50)
+    history = await get_shadow_mind_history(session_id, limit=100)
     return {
-        "enabled": True,
+        "enabled": SHADOW_MIND_RULES_ENABLED,
+        "phase": "A2",
         "session_id": session_id,
         "shadow_mind_state": _shadow_mind_public_state(state),
-        "drive_event_log": _shadow_mind_public_events(events),
+        "event_log": _shadow_mind_a2_public_events(events),
+        "history": _shadow_mind_public_history(history),
+    }
+
+
+@app.post("/api/shadow/mind/settle")
+async def api_shadow_mind_settle():
+    """Dashboard-only lazy debug settlement; no model or production side effects."""
+    if not MEMORY_ENABLED:
+        return {"enabled": False, "reason": "memory_disabled"}
+    if not SHADOW_MIND_RULES_ENABLED:
+        return {"enabled": False, "reason": "rules_disabled"}
+    session_id = get_active_session_id()
+    now = datetime.now(timezone.utc)
+    key = hashlib.sha256(f"manual-silence:{session_id}:{now:%Y%m%d%H}".encode("utf-8")).hexdigest()[:32]
+    result = await settle_shadow_mind_rules(session_id, "silence_elapsed", [], key, now)
+    return {
+        "enabled": True,
+        "changed": bool(result.get("changed")),
+        "duplicate": bool(result.get("duplicate")),
     }
 
 
 @app.post("/api/shadow/mind/recompute")
 async def api_shadow_mind_recompute():
-    """手动重算 Shadow Mind Phase A；不调用模型、不触发主动推送。"""
+    """Compatibility route name; A2 remains the only enabled settlement path."""
+    return await api_shadow_mind_settle()
+
+
+@app.get("/api/shadow/mind/events/{event_id}/messages")
+async def api_shadow_mind_event_messages(event_id: int):
     if not MEMORY_ENABLED:
-        return {"enabled": False, "reason": "memory_disabled"}
-    session_id = get_active_session_id()
-    now_local = _local_now()
-    interaction_state = await _get_push_interaction_state(session_id, now_local)
-    timing_state = await _get_push_timing_state(session_id, now_local)
-    computed = compute_shadow_mind_state(interaction_state, timing_state)
-    saved = await save_shadow_mind_state(
-        session_id=session_id,
-        state=computed["state"],
-        reasons=computed["reasons"],
-        inputs=computed["inputs"],
-        thought_items=computed["thought_pool"],
-    )
-    events = await get_recent_drive_events(session_id, limit=20)
+        return {"enabled": False, "reason": "memory_disabled", "messages": []}
+    rows = await get_shadow_mind_event_source_messages(get_active_session_id(), event_id)
     return {
-        "enabled": True,
-        "session_id": session_id,
-        "shadow_mind_state": {
-            "state": saved["state"],
-            "reasons": computed["reasons"],
-            "inputs": computed["inputs"],
-            "thought_pool": computed["thought_pool"],
-        },
-        "event_count": saved["event_count"],
-        "thought_count": saved["thought_count"],
-        "drive_event_log": _shadow_mind_public_events(events),
+        "messages": [
+            {
+                "id": row.get("id"),
+                "role": row.get("role", ""),
+                "content": row.get("content", ""),
+                "created_at": row["created_at"].isoformat() if hasattr(row.get("created_at"), "isoformat") else row.get("created_at"),
+            }
+            for row in rows
+        ]
     }
 
 

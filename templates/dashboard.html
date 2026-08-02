@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=3.10">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=3.11">
 </head>
 <body>
     <div id="sakuraPetals" class="sakura-petals" aria-hidden="true"></div>
@@ -36,6 +36,10 @@
                 <a href="#" class="nav-item" data-section="memory-inspector">
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg></span>
                     <span class="nav-label">召回测试</span>
+                </a>
+                <a href="#" class="nav-item" data-section="shadow-mind">
+                    <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8Z"/><path d="M3.5 12h4l1.5-3 3 7 2-4h6.5"/></svg></span>
+                    <span class="nav-label">内在状态</span>
                 </a>
                 <a href="#" class="nav-item" data-section="import">
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg></span>
@@ -255,12 +259,45 @@
                 </div>
             </section>
 
+            <section id="section-shadow-mind" class="section">
+                <div class="section-header shadow-mind-heading">
+                    <div>
+                        <h1>内在状态</h1>
+                        <p class="section-desc">规则观察层，不调用模型，也不参与聊天或主动推送</p>
+                    </div>
+                    <button id="shadowMindSettleBtn" class="btn btn-secondary" type="button" onclick="settleShadowMind()">结算经过时间</button>
+                </div>
+                <div id="shadowMindNotice" class="card shadow-mind-notice">正在读取状态…</div>
+                <div class="shadow-mind-group">
+                    <h2>靠近动力</h2>
+                    <div id="shadowMindDrives" class="shadow-mind-grid"></div>
+                </div>
+                <div class="shadow-mind-group">
+                    <h2>当前感受</h2>
+                    <div id="shadowMindEmotions" class="shadow-mind-grid"></div>
+                </div>
+                <div class="card shadow-mind-log-card">
+                    <div class="shadow-mind-log-head"><h2>最近变化</h2><span id="shadowMindUpdatedAt"></span></div>
+                    <div id="shadowMindEventLog" class="shadow-mind-event-log"></div>
+                </div>
+            </section>
+
             <div id="memoryInspectorSourceModal" class="modal" style="display:none;">
                 <div class="modal-content" style="max-width:900px; max-height:88vh; overflow:auto;">
                     <h3>原始消息上下文</h3>
                     <div id="memoryInspectorSourceMessages" class="inspector-source-messages"></div>
                     <div class="modal-actions">
                         <button class="btn btn-secondary" type="button" onclick="closeMemoryInspectorSourceModal()">关闭</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="shadowMindSourceModal" class="modal" style="display:none;">
+                <div class="modal-content" style="max-width:900px; max-height:88vh; overflow:auto;">
+                    <h3>状态变化对应的原始消息</h3>
+                    <div id="shadowMindSourceMessages" class="inspector-source-messages"></div>
+                    <div class="modal-actions">
+                        <button class="btn btn-secondary" type="button" onclick="closeShadowMindSourceModal()">关闭</button>
                     </div>
                 </div>
             </div>

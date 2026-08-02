@@ -164,12 +164,145 @@ function switchSection(name) {
     if (name === 'experience-cards') {
         loadExperienceCards();
     }
+    if (name === 'shadow-mind') {
+        loadShadowMind();
+    }
     if (name === 'threads') {
         loadThreads();
     }
     if (name === 'settings') {
         loadSettings();
     }
+}
+
+// ============================================
+// Shadow Mind Phase A2（规则观察层）
+// ============================================
+const shadowMindLabels = {
+    longing: '想靠近', curiosity: '想继续了解', share: '想主动分享', warmth: '亲昵柔软', concern: '基于事实的关切',
+    valence: '愉快 / 难受', arousal: '激动程度', connection: '亲近感', tension: '紧张感', hurt: '被刺痛感', fatigue: '疲惫感'
+};
+const shadowMindDriveFields = ['longing', 'curiosity', 'share', 'warmth', 'concern'];
+const shadowMindEmotionFields = ['valence', 'arousal', 'connection', 'tension', 'hurt', 'fatigue'];
+const shadowMindReasonLabels = {
+    normal_chat_completed: '完成一轮正常聊天',
+    elapsed_time_settlement: '按经过时间结算',
+    elapsed_below_change_threshold: '尚未达到变化阈值'
+};
+
+function shadowMindSparkline(field, history) {
+    const values = (history || []).map(item => Number(item.state?.[field])).filter(Number.isFinite);
+    if (values.length < 2) return '<div class="shadow-sparkline-empty">等待更多变化</div>';
+    const min = field === 'valence' ? -100 : 0;
+    const max = 100;
+    const points = values.map((value, index) => {
+        const x = values.length === 1 ? 0 : index * 100 / (values.length - 1);
+        const y = 30 - ((value - min) / (max - min)) * 28;
+        return `${x.toFixed(1)},${Math.max(1, Math.min(29, y)).toFixed(1)}`;
+    }).join(' ');
+    return `<svg class="shadow-sparkline" viewBox="0 0 100 30" preserveAspectRatio="none" aria-label="最近变化曲线"><polyline points="${points}"></polyline></svg>`;
+}
+
+function renderShadowMindMetrics(containerId, fields, state, history) {
+    const box = document.getElementById(containerId);
+    if (!box) return;
+    box.innerHTML = fields.map(field => {
+        const value = Number(state?.[field] ?? 0);
+        const minimum = field === 'valence' ? -100 : 0;
+        const width = Math.max(0, Math.min(100, field === 'valence' ? (value + 100) / 2 : value));
+        return `<article class="card shadow-mind-metric">
+            <div class="shadow-mind-metric-head"><span>${shadowMindLabels[field]}</span><b>${value}</b></div>
+            <div class="shadow-mind-meter"><i style="width:${width}%"></i></div>
+            ${shadowMindSparkline(field, history)}
+            <small>${minimum} ～ 100</small>
+        </article>`;
+    }).join('');
+}
+
+function formatShadowMindDeltas(deltas) {
+    return Object.entries(deltas || {}).map(([field, value]) => {
+        const number = Number(value);
+        return `${shadowMindLabels[field] || field} ${number > 0 ? '+' : ''}${number}`;
+    }).join('，') || '数值未变化';
+}
+
+function renderShadowMindEvents(events) {
+    const box = document.getElementById('shadowMindEventLog');
+    if (!box) return;
+    if (!events?.length) {
+        box.innerHTML = '<div class="inspector-empty">还没有状态变化记录。开启规则后，正常聊天保存成功或读取状态时才会按需结算。</div>';
+        return;
+    }
+    box.innerHTML = events.map(event => {
+        const ids = event.source_message_ids || [];
+        const sourceButton = ids.length ? `<button class="btn btn-sm btn-secondary" onclick="openShadowMindSources(${Number(event.id)})">查看原始消息</button>` : '';
+        const reason = shadowMindReasonLabels[event.reason_code] || event.reason_code || event.event_type || '';
+        return `<article class="shadow-mind-event">
+            <div><b>${escapeHtml(reason)}</b><span>${escapeHtml(formatConvTime(event.computed_at || event.created_at))}</span></div>
+            <p>${escapeHtml(formatShadowMindDeltas(event.deltas))}</p>
+            <footer><span>${ids.length ? `来源消息：${ids.map(id => '#' + Number(id)).join('、')}` : '时间惰性结算'}</span>${sourceButton}</footer>
+        </article>`;
+    }).join('');
+}
+
+async function loadShadowMind() {
+    const notice = document.getElementById('shadowMindNotice');
+    try {
+        const response = await fetch('/api/shadow/mind/status');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || '读取失败');
+        const state = data.shadow_mind_state?.state || {};
+        renderShadowMindMetrics('shadowMindDrives', shadowMindDriveFields, state, data.history || []);
+        renderShadowMindMetrics('shadowMindEmotions', shadowMindEmotionFields, state, data.history || []);
+        renderShadowMindEvents(data.event_log || []);
+        if (notice) {
+            notice.className = 'card shadow-mind-notice' + (data.enabled ? ' enabled' : ' disabled');
+            notice.textContent = data.enabled
+                ? '规则观察已开启。这里只展示可验证事实驱动的状态，不会影响 Rora 的回复或主动推送。'
+                : '规则观察当前关闭。请在服务环境中设置 SHADOW_MIND_RULES_ENABLED=true 后再观察。';
+        }
+        document.getElementById('shadowMindSettleBtn').disabled = !data.enabled;
+        document.getElementById('shadowMindUpdatedAt').textContent = data.shadow_mind_state?.computed_at ? `最近结算：${formatConvTime(data.shadow_mind_state.computed_at)}` : '';
+    } catch (error) {
+        if (notice) notice.textContent = `读取失败：${error.message}`;
+    }
+}
+
+async function settleShadowMind() {
+    const button = document.getElementById('shadowMindSettleBtn');
+    button.disabled = true;
+    try {
+        const response = await fetch('/api/shadow/mind/settle', {method: 'POST'});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || '结算失败');
+        await loadShadowMind();
+    } catch (error) {
+        alert(`结算失败：${error.message}`);
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function openShadowMindSources(eventId) {
+    const modal = document.getElementById('shadowMindSourceModal');
+    const box = document.getElementById('shadowMindSourceMessages');
+    modal.style.display = 'flex';
+    box.innerHTML = '<div class="inspector-muted">加载中…</div>';
+    try {
+        const response = await fetch(`/api/shadow/mind/events/${Number(eventId)}/messages`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || '读取失败');
+        box.innerHTML = data.messages?.length ? data.messages.map(message => `<div class="inspector-source-message">
+            <small>#${Number(message.id)} · ${escapeHtml(message.role || '')} · ${escapeHtml(formatConvTime(message.created_at))}</small>
+            <div>${escapeHtml(message.content || '')}</div>
+        </div>`).join('') : '<div class="inspector-muted">没有可显示的原始消息。</div>';
+    } catch (error) {
+        box.textContent = `读取失败：${error.message}`;
+    }
+}
+
+function closeShadowMindSourceModal() {
+    document.getElementById('shadowMindSourceModal').style.display = 'none';
 }
 
 // ============================================
