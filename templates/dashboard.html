@@ -216,6 +216,16 @@
                         <label class="form-label">标题</label>
                         <input id="experienceCardTitle" class="form-input">
                     </div>
+                    <div style="display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px;">
+                        <div class="form-group">
+                            <label class="form-label">事件开始日期（不确定可留空）</label>
+                            <input id="experienceCardDateStart" class="form-input" type="date">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">事件结束日期（单日与开始相同）</label>
+                            <input id="experienceCardDateEnd" class="form-input" type="date">
+                        </div>
+                    </div>
                     <div class="form-group">
                         <label class="form-label">事件经过</label>
                         <textarea id="experienceCardSummary" class="textarea" rows="8"></textarea>
@@ -225,8 +235,8 @@
                         <textarea id="experienceCardInteraction" class="textarea" rows="5"></textarea>
                     </div>
                     <div class="form-group">
-                        <label class="form-label">检索线索（每行一项，最多3项）</label>
-                        <textarea id="experienceCardDetails" class="textarea" rows="3"></textarea>
+                        <label class="form-label">检索线索（每行一项，最多6项）</label>
+                        <textarea id="experienceCardDetails" class="textarea" rows="5"></textarea>
                     </div>
                     <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px;">
                         <div class="form-group">

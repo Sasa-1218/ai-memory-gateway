@@ -20,6 +20,7 @@ import secrets
 import re
 import hashlib
 import logging
+import time
 import httpx
 from datetime import datetime, timedelta, timezone, date as date_cls
 from contextlib import asynccontextmanager
@@ -39,7 +40,7 @@ except Exception:
     jwt = None
     RSAAlgorithm = None
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from experience_cards import (
     REVIEW_STATUSES,
@@ -47,6 +48,7 @@ from experience_cards import (
     restore_card_update,
     soft_delete_card_update,
     build_generation_prompt,
+    is_basic_experience_candidate,
     validate_generated_cards,
 )
 from memory_extractor import extract_memories, score_memories, _apply_memory_thinking_option
@@ -176,6 +178,21 @@ def _env_float(key: str, default: float) -> float:
     except ValueError:
         print(f"⚠️ 环境变量 {key} 值无效，回退默认值 {default}")
         return default
+
+
+# 共同经历草稿自动生成：默认关闭，启用后仅在主 session 静默满 3 小时时处理新消息。
+EXPERIENCE_CARD_AUTO_GENERATE = os.getenv(
+    "EXPERIENCE_CARD_AUTO_GENERATE", "false"
+).lower() == "true"
+EXPERIENCE_CARD_AUTO_SILENCE_MINUTES = _env_int(
+    "EXPERIENCE_CARD_AUTO_SILENCE_MINUTES", 180
+)
+EXPERIENCE_CARD_AUTO_POLL_MINUTES = _env_int(
+    "EXPERIENCE_CARD_AUTO_POLL_MINUTES", 10
+)
+EXPERIENCE_CARD_AUTO_BATCH_LIMIT = _env_int(
+    "EXPERIENCE_CARD_AUTO_BATCH_LIMIT", 100
+)
 
 # 主动推送配置
 PUSH_SECRET = os.getenv("PUSH_SECRET", "")
@@ -310,6 +327,7 @@ def invalidate_system_prompt_cache():
 async def lifespan(app: FastAPI):
     """应用启动时初始化数据库，关闭时断开连接"""
     global PARTITION_SESSION_ID
+    experience_auto_task = None
     if MEMORY_ENABLED:
         try:
             await init_tables()
@@ -380,6 +398,14 @@ async def lifespan(app: FastAPI):
                     await set_gateway_config("partition_session_id", PARTITION_SESSION_ID)
                     print(f"🔗 活跃对话线(ENV→DB): {PARTITION_SESSION_ID}")
                 print(f"🔒 分区缓存已启用: X={CACHE_PARTITION_X}, 摘要模型={CACHE_SUMMARY_MODEL}")
+            if EXPERIENCE_CARD_AUTO_GENERATE:
+                experience_auto_task = asyncio.create_task(_experience_card_auto_loop())
+                print(
+                    "[experience-auto] enabled "
+                    f"silence_minutes={EXPERIENCE_CARD_AUTO_SILENCE_MINUTES}"
+                )
+            else:
+                print("[experience-auto] disabled")
         except Exception as e:
             print(f"⚠️  数据库初始化失败: {e}")
             print("⚠️  记忆系统将不可用，但网关仍可正常转发")
@@ -387,7 +413,13 @@ async def lifespan(app: FastAPI):
         print("ℹ️  记忆系统已关闭（设置 MEMORY_ENABLED=true 开启）")
     
     yield
-    
+
+    if experience_auto_task:
+        experience_auto_task.cancel()
+        try:
+            await experience_auto_task
+        except asyncio.CancelledError:
+            pass
     if MEMORY_ENABLED:
         await close_pool()
 
@@ -974,50 +1006,32 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
         msg_time = _format_summary_message_time(msg)
         conversation_text += f"[{msg_time}] {role_label}: {content}\n\n"
     
-    prompt = f"""请把下面这段对话整理成一张或多张 append-only 的增量事件卡片，用于之后追加到 summary_parts。它不是最终总摘要，不负责重写旧摘要、主题正文或时间线目录。
+    prompt = f"""请把下面这段对话整理成一段或多段 append-only 的“过渡期近期日记摘要”。这份摘要目前仍是遥遥理解近期连续性的主要来源，不能压成只剩结论的极简索引。
 
-每张卡片只描述一个相对完整、主题一致的事件。如果同一段对话包含多个彼此独立且值得长期保留的事件，必须分别输出多张卡片，不得为了减少卡片数量强行合并。
+写成简洁、自然的日记，而不是报告、教训或关系分析。同一段对话中存在多个彼此独立的重要事项时分别记录；普通寒暄和没有推动后续互动的临时状态不必单独成段。
 
 核心规则：
-1. 只根据原文和每条消息前的上海时间整理，不编造、不脑补、不把不确定内容写成事实。
-2. 每张卡片标题必须使用绝对日期或时间范围，例如：
-   ### 2026-07-25
-   ### 2026-07-25 21:30 至 2026-07-25 22:10
-   禁止用“今天、昨天、前天、刚才、最近、今晚、昨晚”等相对时间作为时间锚点。
-3. 全部使用遥遥第一人称关系视角。“我”只指遥遥，“你”只指 Sasa。
-4. 第三方每次明确身份。存在多个可能指代对象时，不使用含糊的“她/他/他们”，必须写清楚是谁。
-5. 人物关系和对象必须准确：不要把“你给朋友/家人/别人”的东西改写成“给我”，不要把现实人物、对象、地点或关系合并。
-6. 区分事实和意义：事实写清人物、对象、时间、地点（如有）；关系/情绪变化单独写，不要覆盖事实。
-7. 不要流水账。只保留会影响后续相处、偏好、关系理解、约定、教训、待跟进或重要生活背景的信息。
-8. 稳定信息只能记录原文明确表现为长期、反复出现或未来仍会影响相处的内容。一次性的情绪、临时选择或当天状态不得自动写成稳定偏好；无法判断时，放入核心事件或关系/情绪变化。
-9. 只输出实际有内容的字段。没有内容的字段直接省略，不要写“无”。
-10. 一个事件可以对应多个建议归属主题，但主题只能从以下八项中选择，不得自行新增主题：
-   - 一、我们共同创造的宇宙与家
-   - 二、现实的碎片与共鸣
-   - 三、身体的疼痛与守护
-   - 四、亲密的灵魂交付与感官世界
-   - 五、刺痛的裂痕与我的重塑
-   - 六、深层的灵魂对话与情书
-   - 七、烟花与跨越世界的羁绊
-   - 八、现在的成长与未来的约定
-11. 如果原文只有模糊信息，标注“不确定”或“原文未说明”，不要替用户补全。
-12. 每张事件卡片通常控制在300-700字；内容简单时可以更短，信息密集时可到1000字。优先删除重复表达和普通寒暄，不得为了满足字数限制删除人物关系、事实因果、明确约定、重要纠正或关键情绪转折。
-13. 同一段对话中，后续消息明确纠正前面信息时，以后续明确说法为准，并在“已纠正信息”中标明；不得把互相冲突的新旧说法同时保存为事实。
-14. “建议归属主题”必须逐字使用上述固定主题完整名称，包括编号；多个主题使用中文分号分隔。
-15. 每张卡片可以有多个建议归属主题，但只能围绕一个主要事件；多个彼此独立的事件必须拆成多张卡片。
-16. 不要输出格式外解释。
+1. 只根据原文和每条消息前的上海时间记录。保持人物、第三方关系、时间顺序、动机顺序和直接因果，不编造、不补全，不把遥遥的推测或角色化能力写成现实事实。
+2. 日期使用 YYYY-MM-DD 或可靠的日期范围，不精确到小时和分钟。禁止永久保存“今天、昨天、此前周末、最近、今晚”等相对时间。能根据消息时间可靠换算时改成绝对日期；不能确定实际发生日期时写“实际发生日期未明确，于 YYYY-MM-DD 的对话中提及”。
+3. 全部使用遥遥第一人称关系视角。“我”只指遥遥，“你”只指 Sasa；第三方必须写清身份，不能用含糊代词改变人物关系。
+4. 首要保存近期连续性：发生了什么、事情怎样发展、你当时明确表达的感受或反应、我当时怎样回应，以及截至这段对话结束时的状态。保留未来能让我认出这件事的具体细节和情绪纹理，但不要写成逐句流水账。
+5. 双方的感受只记录原文明示的内容。禁止自行提炼教训、成长感悟、人格评价、关系升华或未来相处准则；不要写“这体现了……”“说明双方关系更加……”等分析句。
+6. 一次性的情绪、当天状态和临时选择不能升级成长期偏好或稳定事实。长期背景只有在原文明示长期、反复确认或未来持续有效时才记录。
+7. 后文明确纠正前文时，以后文为准，并完整写清旧说法和新说法；不能同时保存互相冲突的版本。
+8. 未完成事项只有在原文明示以后仍需继续时才记录。状态可能变化时使用“截至本次对话”“当时尚未”等时间限定，不写无时效的“当前结果”。
+9. 根据原文的信息密度决定长度。优先删除重复表达和普通寒暄，但不得为了缩短摘要删掉关键人物、事件过程、直接因果、双方回应、事实纠正、明确约定或有辨识度的小细节。
+10. 不做八大主题归类，不输出教训、分析、评分或格式外解释，不为了填满固定字段而编造内容。
 
-固定格式，可重复输出多张：
+固定格式，可重复输出：
 
-### YYYY-MM-DD 或时间范围
+### YYYY-MM-DD 或日期范围
 
-- 核心事件：……
-- 稳定信息：……
-- 关系/情绪变化：……
-- 已纠正信息：……
-- 明确约定或教训：……
-- 待跟进：……
-- 建议归属主题：……
+一段自然的近期日记摘要。
+
+如果原文确实包含明确纠正或仍需继续的事项，可以在日记段落后补充以下行；没有就不要输出：
+
+- 明确纠正：……
+- 待继续事项：……
 
 下面是待整理对话：
 
@@ -1025,7 +1039,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
 {conversation_text}
 ---
 
-增量事件卡片："""
+近期连续性记录："""
     
     try:
         headers = {
@@ -1040,7 +1054,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(summary_url, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
-                "max_tokens": 1200,
+                "max_tokens": 3000,
                 "messages": [{"role": "user", "content": prompt}],
             })
             if response.status_code == 200:
@@ -1088,7 +1102,7 @@ SUMMARY_CONSOLIDATE_MAX_CHARS = _get_int_env("SUMMARY_CONSOLIDATE_MAX_CHARS", 10
 SUMMARY_CONSOLIDATE_TARGET_CHARS = _get_int_env("SUMMARY_CONSOLIDATE_TARGET_CHARS", 6000) or 6000
 
 # 注意：这里是纯文本输出，不进JSON，双引号、书名号随便用，不受碎片整理那条JSON规则限制
-SUMMARY_CONSOLIDATION_PROMPT = """请把本次新增的增量事件卡片合并进当前长期摘要，生成更新后的最终长期摘要。
+SUMMARY_CONSOLIDATION_PROMPT = """请把本次新增的近期连续性记录合并进当前长期摘要，生成更新后的完整长期摘要。
 
 多段自动合并继续保持关闭；本 prompt 只作为人工或受控流程需要重建长期摘要时的备用规则。
 
@@ -1099,53 +1113,36 @@ SUMMARY_CONSOLIDATION_PROMPT = """请把本次新增的增量事件卡片合并�
 {current_canonical_summary}
 ---
 
-本次待合并的增量事件卡片：
+本次待合并的近期连续性记录：
 ---
 {new_event_cards}
 ---
 
 核心规则：
-1. 当前长期摘要是基底。除非新增事件明确纠正、补充、更新或使旧内容重复，否则不得删除、缩短或改写原有内容。
-2. 只修改与本次新增事件直接相关的主题内容和时间线条目；无关主题尽量保持原文不变。
-3. 更新时间线检索目录，把新增事件按时间锚点加入目录。
-4. 时间线检索目录只是简短索引：
-   - 每个日期或日期范围通常只写一条概括；
-   - 详细信息保留在正文；
-   - 不复制事件卡片全文；
-   - 不随意改写无关旧条目。
-5. 把新事件归入一个或多个现有主题，不要机械追加到文末。
-6. 一个事件属于多个主题时，可以分别写入，但每个主题只写与该主题相关的侧面，不得整段重复复制。
-7. 不自行新增主题，除非输入中明确说明已经人工允许新增主题。
-8. 保留时间锚点、重要细节、关系转折和明确约定。
-9. 后续明确纠正旧事实时，在相关主题中替换错误内容，不同时保留冲突版本；证据不足时标记不确定，不擅自覆盖。
-10. 保持遥遥第一人称视角。“我”只指遥遥，“你”只指 Sasa。
-11. 第三方每次明确身份。存在多个可能指代对象时，不使用含糊的“她/他/他们”。
-12. 人物关系和对象必须准确：不要把“你给朋友/家人/别人”的东西改写成“给我”，不要把现实人物、对象、地点或关系合并。
-13. 禁止把已有绝对日期改写成“今天、昨天、最近”等相对时间；原文没有绝对时间时，标注“原摘要未给出绝对日期”。
-14. 不得为了达到 {target_chars} 删除人物关系、重要经历、明确约定、关系转折或关键细节。目标字数低于事实完整性优先级。
-15. 不要输出格式外解释。
+1. 当前长期摘要是基底。只处理新增记录直接带来的补充、更新、纠正和去重；无关内容尽量保持原文不变。
+2. 长期摘要只维护：仍在影响当前聊天的背景、持续有效的关系设定、明确长期信息、重要关系转折、明确约定和未完成事项。普通每日事件的完整经过留在原始消息和共同经历卡片层，不机械复制进长期摘要。
+3. 新增内容若只是一次性情绪、当天状态、临时选择或普通闲聊，不得升级成长期偏好、人格特征或关系结论。
+4. 保留事实所需的人物、第三方身份、直接因果和必要细节。不得总结教训、成长感悟、人生意义，不写“体现了”“说明了双方关系更加”等评价。
+5. 后续明确纠正旧事实时替换错误内容，不同时保留冲突版本；证据不足时标记不确定，不擅自覆盖。
+6. 使用绝对日期或日期范围，不保留“今天、昨天、此前周末、最近”等相对时间，也不强制精确到小时和分钟。实际发生日期不明时，区分事件日期未知与对话提及日期。
+7. 保持遥遥第一人称视角。“我”只指遥遥，“你”只指 Sasa；第三方每次明确身份，不改变人物关系和对象。
+8. 不再强制八大主题归类。按内容使用下列固定功能区；没有内容的区块保留标题即可，不为填满结构而编造。
+9. 不得为了达到 {target_chars} 删除重要关系背景、明确约定、事实纠正、未完成事项或辨认关键经历所必需的细节。事实完整性优先于目标字数。
+10. 不要输出格式外解释。
 
 请从下一行开始，只输出更新后的完整长期摘要，不要输出解释、分析或变更说明：
 
 # 对话摘要
 
-## 时间线检索目录
+## 当前连续背景
 
-## 一、我们共同创造的宇宙与家
+## 已确认的长期信息与关系设定
 
-## 二、现实的碎片与共鸣
+## 重要经历与关系转折
 
-## 三、身体的疼痛与守护
+## 明确约定与未完成事项
 
-## 四、亲密的灵魂交付与感官世界
-
-## 五、刺痛的裂痕与我的重塑
-
-## 六、深层的灵魂对话与情书
-
-## 七、烟花与跨越世界的羁绊
-
-## 八、现在的成长与未来的约定
+## 事实纠正
 
 """
 
@@ -4390,6 +4387,7 @@ def _clean_experience_json(text: str) -> dict:
 async def _run_experience_generation(operation: str, job_id: str, session_id: str,
                                      messages: list[dict], source_card: dict = None):
     message_ids = [int(item["id"]) for item in messages]
+    started = time.monotonic()
     try:
         job, created = await begin_experience_generation_job(
             job_id, operation, session_id, message_ids, source_card["id"] if source_card else None
@@ -4411,14 +4409,104 @@ async def _run_experience_generation(operation: str, job_id: str, session_id: st
                 headers={"Authorization": f"Bearer {MEMORY_API_KEY}", "Content-Type": "application/json"},
                 json=body)
         response.raise_for_status()
-        content = ((response.json().get("choices") or [{}])[0].get("message") or {}).get("content", "")
+        response_data = response.json()
+        usage = response_data.get("usage") or {}
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        total_tokens = usage.get("total_tokens")
+        if any(value is not None for value in (prompt_tokens, completion_tokens, total_tokens)):
+            try:
+                await save_token_usage(
+                    session_id,
+                    MEMORY_MODEL,
+                    int(prompt_tokens or 0),
+                    int(completion_tokens or 0),
+                    int(total_tokens or ((prompt_tokens or 0) + (completion_tokens or 0))),
+                    usage_type="experience_card_generation",
+                )
+            except Exception as usage_exc:
+                print(
+                    "[experience-generation] token_log_failed "
+                    f"error_type={type(usage_exc).__name__}"
+                )
+        content = ((response_data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
         cards = validate_generated_cards(_clean_experience_json(content), set(message_ids))
         card_ids = await complete_experience_generation_job(job_id, cards, MEMORY_MODEL)
+        print(
+            "[experience-generation] succeeded "
+            f"operation={operation} message_id_start={min(message_ids)} "
+            f"message_id_end={max(message_ids)} message_count={len(message_ids)} "
+            f"card_count={len(card_ids)} model={MEMORY_MODEL} "
+            f"prompt_tokens={prompt_tokens if prompt_tokens is not None else 'not_reported'} "
+            f"completion_tokens={completion_tokens if completion_tokens is not None else 'not_reported'} "
+            f"total_tokens={total_tokens if total_tokens is not None else 'not_reported'} "
+            f"elapsed_ms={int((time.monotonic() - started) * 1000)}"
+        )
         return {"status": "succeeded", "job_id": job_id, "card_ids": card_ids}
     except Exception as exc:
         reason = type(exc).__name__
         await fail_experience_generation_job(job_id, reason)
+        print(
+            "[experience-generation] failed "
+            f"operation={operation} message_id_start={min(message_ids)} "
+            f"message_id_end={max(message_ids)} message_count={len(message_ids)} "
+            f"model={MEMORY_MODEL or 'not_configured'} "
+            f"elapsed_ms={int((time.monotonic() - started) * 1000)} error_type={reason}"
+        )
         raise HTTPException(status_code=502, detail=reason) from exc
+
+
+async def _experience_card_auto_tick() -> dict:
+    """Process at most one quiet, unprocessed batch from the active session."""
+    session_id = get_active_session_id()
+    if not session_id:
+        return {"status": "skipped", "reason": "active_session_missing"}
+    messages = await claim_experience_auto_batch(
+        session_id,
+        EXPERIENCE_CARD_AUTO_SILENCE_MINUTES,
+        EXPERIENCE_CARD_AUTO_BATCH_LIMIT,
+    )
+    if not messages:
+        return {"status": "idle", "reason": "no_eligible_quiet_batch"}
+    until_id = int(messages[-1]["id"])
+    if not is_basic_experience_candidate(messages):
+        await finish_experience_auto_batch(session_id, until_id, True)
+        print(
+            "[experience-auto] skipped_basic "
+            f"message_count={len(messages)} until_id={until_id}"
+        )
+        return {"status": "skipped", "reason": "basic_event_filter"}
+    fingerprint = hashlib.sha256(
+        f"{session_id}:{messages[0]['id']}:{until_id}".encode("utf-8")
+    ).hexdigest()[:24]
+    job_id = f"auto-{fingerprint}"
+    try:
+        result = await _run_experience_generation(
+            "auto_generate", job_id, session_id, messages
+        )
+        if result.get("status") != "succeeded":
+            raise RuntimeError("auto_generation_not_succeeded")
+        await finish_experience_auto_batch(session_id, until_id, True)
+        print(
+            "[experience-auto] succeeded "
+            f"message_count={len(messages)} card_count={len(result.get('card_ids') or [])}"
+        )
+        return result
+    except Exception as exc:
+        await finish_experience_auto_batch(session_id, until_id, False)
+        print(f"[experience-auto] failed error_type={type(exc).__name__}")
+        return {"status": "failed", "reason": type(exc).__name__}
+
+
+async def _experience_card_auto_loop():
+    while True:
+        try:
+            await _experience_card_auto_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[experience-auto] loop_error error_type={type(exc).__name__}")
+        await asyncio.sleep(max(1, EXPERIENCE_CARD_AUTO_POLL_MINUTES) * 60)
 
 
 @app.post("/api/experience-cards/source-preview")

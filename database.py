@@ -227,6 +227,8 @@ async def init_tables():
             CREATE TABLE IF NOT EXISTS shared_experience_cards (
                 id                      BIGSERIAL PRIMARY KEY,
                 source_session_id       TEXT NOT NULL,
+                event_date_start        DATE,
+                event_date_end          DATE,
                 title                   TEXT NOT NULL DEFAULT '',
                 event_summary           TEXT NOT NULL DEFAULT '',
                 interaction_trace       TEXT NOT NULL DEFAULT '',
@@ -250,6 +252,11 @@ async def init_tables():
                     CHECK (NOT ai_visible OR review_status = 'approved')
             );
         """)
+        await conn.execute("""
+            ALTER TABLE shared_experience_cards
+                ADD COLUMN IF NOT EXISTS event_date_start DATE,
+                ADD COLUMN IF NOT EXISTS event_date_end DATE;
+        """)
         await _validate_shared_experience_cards_schema(conn)
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_shared_experience_cards_review
@@ -262,7 +269,7 @@ async def init_tables():
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS experience_card_generation_jobs (
                 job_id TEXT PRIMARY KEY,
-                operation_type TEXT NOT NULL CHECK (operation_type IN ('manual_generate','regenerate','split')),
+                operation_type TEXT NOT NULL CHECK (operation_type IN ('manual_generate','auto_generate','regenerate','split')),
                 status TEXT NOT NULL CHECK (status IN ('running','succeeded','failed')),
                 source_session_id TEXT NOT NULL,
                 source_message_ids BIGINT[] NOT NULL,
@@ -275,9 +282,25 @@ async def init_tables():
             );
         """)
         await conn.execute("""
+            ALTER TABLE experience_card_generation_jobs
+            DROP CONSTRAINT IF EXISTS experience_card_generation_jobs_operation_type_check;
+            ALTER TABLE experience_card_generation_jobs
+            ADD CONSTRAINT experience_card_generation_jobs_operation_type_check
+            CHECK (operation_type IN ('manual_generate','auto_generate','regenerate','split'));
+        """)
+        await conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_experience_card_jobs_active_card
             ON experience_card_generation_jobs (source_card_id)
             WHERE source_card_id IS NOT NULL AND status = 'running';
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS experience_card_auto_state (
+                source_session_id TEXT PRIMARY KEY,
+                last_processed_message_id BIGINT NOT NULL DEFAULT 0,
+                processing_until_message_id BIGINT,
+                processing_started_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
         """)
         
         await conn.execute("""
@@ -1921,7 +1944,7 @@ _EXPERIENCE_CARD_JSON_FIELDS = (
 )
 
 _EXPERIENCE_CARD_REQUIRED_COLUMNS = {
-    "id", "source_session_id", "title", "event_summary", "interaction_trace",
+    "id", "source_session_id", "event_date_start", "event_date_end", "title", "event_summary", "interaction_trace",
     "key_details", "explicit_corrections", "explicit_agreements", "open_threads",
     "source_message_ids", "review_status", "ai_visible", "supersedes_card_id",
     "revision_reason", "generator_model", "prompt_version", "approved_at",
@@ -1982,21 +2005,23 @@ async def create_experience_card_draft(
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO shared_experience_cards (
-                source_session_id, title, event_summary, interaction_trace,
+                source_session_id, event_date_start, event_date_end, title, event_summary, interaction_trace,
                 key_details, explicit_corrections, explicit_agreements,
                 open_threads, source_message_ids, review_status, ai_visible,
                 generator_model, prompt_version
             ) VALUES (
-                $1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
-                $8::jsonb, $9::bigint[], 'pending', FALSE, $10, $11
+                $1, NULLIF($2, '')::date, NULLIF($3, '')::date, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb,
+                $10::jsonb, $11::bigint[], 'pending', FALSE, $12, $13
             )
             RETURNING *
         """,
             source_session_id,
+            str(card.get("event_date_start") or ""),
+            str(card.get("event_date_end") or ""),
             str(card.get("title") or ""),
             str(card.get("event_summary") or ""),
             str(card.get("interaction_trace") or ""),
-            json.dumps((card.get("key_details") or [])[:3], ensure_ascii=False),
+            json.dumps((card.get("key_details") or [])[:6], ensure_ascii=False),
             json.dumps(card.get("explicit_corrections") or [], ensure_ascii=False),
             json.dumps(card.get("explicit_agreements") or [], ensure_ascii=False),
             json.dumps(card.get("open_threads") or [], ensure_ascii=False),
@@ -2128,6 +2153,84 @@ async def get_experience_source_messages(session_id: str, message_ids: list[int]
         return [dict(row) for row in rows]
 
 
+async def claim_experience_auto_batch(session_id: str, silence_minutes: int,
+                                      limit: int = 100):
+    """Claim one unprocessed, sufficiently quiet message batch for auto generation."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            state = await conn.fetchrow("""
+                SELECT * FROM experience_card_auto_state
+                WHERE source_session_id=$1 FOR UPDATE
+            """, session_id)
+            if not state:
+                baseline_id = await conn.fetchval("""
+                    SELECT COALESCE(MAX(id), 0) FROM conversations
+                    WHERE session_id=$1
+                """, session_id)
+                await conn.execute("""
+                    INSERT INTO experience_card_auto_state
+                    (source_session_id, last_processed_message_id)
+                    VALUES ($1, $2) ON CONFLICT (source_session_id) DO NOTHING
+                """, session_id, baseline_id)
+                return None
+            state = await conn.fetchrow("""
+                SELECT * FROM experience_card_auto_state
+                WHERE source_session_id=$1 FOR UPDATE
+            """, session_id)
+            if (state["processing_until_message_id"] is not None
+                    and state["processing_started_at"] is not None
+                    and state["processing_started_at"] > datetime.now(dt_timezone.utc) - timedelta(minutes=30)):
+                return None
+            latest = await conn.fetchrow("""
+                SELECT id, created_at FROM conversations
+                WHERE session_id=$1 AND id>$2
+                  AND role IN ('user','assistant')
+                  AND COALESCE(content, '') <> ''
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            """, session_id, state["last_processed_message_id"])
+            if not latest:
+                return None
+            now = datetime.now(dt_timezone.utc)
+            latest_at = latest["created_at"]
+            if latest_at.tzinfo is None:
+                latest_at = latest_at.replace(tzinfo=dt_timezone.utc)
+            if now - latest_at < timedelta(minutes=silence_minutes):
+                return None
+            rows = await conn.fetch("""
+                SELECT id, role, content, created_at
+                FROM conversations
+                WHERE session_id=$1 AND id>$2
+                  AND role IN ('user','assistant')
+                  AND COALESCE(content, '') <> ''
+                ORDER BY id ASC
+                LIMIT $3
+            """, session_id, state["last_processed_message_id"], limit)
+            if not rows:
+                return None
+            until_id = int(rows[-1]["id"])
+            await conn.execute("""
+                UPDATE experience_card_auto_state
+                SET processing_until_message_id=$2, processing_started_at=NOW(), updated_at=NOW()
+                WHERE source_session_id=$1
+            """, session_id, until_id)
+            return [dict(row) for row in rows]
+
+
+async def finish_experience_auto_batch(session_id: str, until_message_id: int,
+                                       advance: bool):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE experience_card_auto_state
+            SET last_processed_message_id = CASE WHEN $3 THEN GREATEST(
+                    last_processed_message_id, $2) ELSE last_processed_message_id END,
+                processing_until_message_id=NULL, processing_started_at=NULL, updated_at=NOW()
+            WHERE source_session_id=$1 AND processing_until_message_id=$2
+        """, session_id, until_message_id, advance)
+
+
 async def begin_experience_generation_job(job_id: str, operation: str, session_id: str,
                                           message_ids: list[int], source_card_id: int = None):
     pool = await get_pool()
@@ -2203,12 +2306,13 @@ async def complete_experience_generation_job(job_id: str, cards: list[dict], mod
             for card in cards:
                 new_id = await conn.fetchval("""
                     INSERT INTO shared_experience_cards
-                    (source_session_id,title,event_summary,interaction_trace,key_details,
+                    (source_session_id,event_date_start,event_date_end,title,event_summary,interaction_trace,key_details,
                      explicit_corrections,explicit_agreements,open_threads,source_message_ids,
                      review_status,ai_visible,supersedes_card_id,generator_model,prompt_version)
-                    VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,$9::bigint[],
-                            'pending',FALSE,$10,$11,'manual-v1') RETURNING id
-                """, job["source_session_id"], card["title"], card["event_summary"],
+                    VALUES ($1,NULLIF($2,'')::date,NULLIF($3,'')::date,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,$11::bigint[],
+                            'pending',FALSE,$12,$13,'manual-v1') RETURNING id
+                """, job["source_session_id"], card.get("event_date_start", ""),
+                    card.get("event_date_end", ""), card["title"], card["event_summary"],
                     card["interaction_trace"], json.dumps(card["key_details"], ensure_ascii=False),
                     json.dumps(card["explicit_corrections"], ensure_ascii=False),
                     json.dumps(card["explicit_agreements"], ensure_ascii=False),
@@ -2285,19 +2389,21 @@ async def update_experience_card(card_id: int, update: dict):
         visible = values["ai_visible"]
         row = await conn.fetchrow("""
             UPDATE shared_experience_cards SET
-                title = $2,
-                event_summary = $3,
-                interaction_trace = $4,
-                key_details = $5::jsonb,
-                explicit_corrections = $6::jsonb,
-                explicit_agreements = $7::jsonb,
-                open_threads = $8::jsonb,
-                review_status = $9,
-                ai_visible = $10,
-                revision_reason = $11,
+                event_date_start = NULLIF($2, '')::date,
+                event_date_end = NULLIF($3, '')::date,
+                title = $4,
+                event_summary = $5,
+                interaction_trace = $6,
+                key_details = $7::jsonb,
+                explicit_corrections = $8::jsonb,
+                explicit_agreements = $9::jsonb,
+                open_threads = $10::jsonb,
+                review_status = $11,
+                ai_visible = $12,
+                revision_reason = $13,
                 approved_at = CASE
-                    WHEN $9 = 'approved' AND approved_at IS NULL THEN NOW()
-                    WHEN $9 <> 'approved' THEN NULL
+                    WHEN $11 = 'approved' AND approved_at IS NULL THEN NOW()
+                    WHEN $11 <> 'approved' THEN NULL
                     ELSE approved_at
                 END,
                 updated_at = NOW()
@@ -2305,10 +2411,12 @@ async def update_experience_card(card_id: int, update: dict):
             RETURNING *
         """,
             card_id,
+            str(values.get("event_date_start") or ""),
+            str(values.get("event_date_end") or ""),
             str(values.get("title") or ""),
             str(values.get("event_summary") or ""),
             str(values.get("interaction_trace") or ""),
-            json.dumps((values.get("key_details") or [])[:3], ensure_ascii=False),
+            json.dumps((values.get("key_details") or [])[:6], ensure_ascii=False),
             json.dumps(values.get("explicit_corrections") or [], ensure_ascii=False),
             json.dumps(values.get("explicit_agreements") or [], ensure_ascii=False),
             json.dumps(values.get("open_threads") or [], ensure_ascii=False),

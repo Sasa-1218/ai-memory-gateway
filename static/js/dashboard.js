@@ -285,15 +285,20 @@ function renderExperienceCards() {
         return `${card.title || ''}\n${card.event_summary || ''}`.toLowerCase().includes(query);
     });
     if (!cards.length) {
-        list.innerHTML = '<div class="card" style="padding:24px; color:var(--text-muted);">共同经历卡片尚未接入自动生成；当前为空是正常的。之后生成的卡片会先进入待检查，人工批准后才可能 AI 可见。</div>';
+        list.innerHTML = '<div class="card" style="padding:24px; color:var(--text-muted);">共同经历卡片自动生成当前默认关闭；页面为空是正常的。之后生成的卡片会先进入待检查，人工批准后才可能 AI 可见。</div>';
         return;
     }
     list.innerHTML = cards.map(card => {
         const status = EXPERIENCE_STATUS_LABELS[card.review_status] || card.review_status;
         const visible = card.review_status === 'approved' && card.ai_visible;
+        const dateLabel = card.event_date_start
+            ? (card.event_date_end && card.event_date_end !== card.event_date_start
+                ? `${card.event_date_start} 至 ${card.event_date_end}` : card.event_date_start)
+            : '事件日期未明确';
         const details = Array.isArray(card.key_details) ? card.key_details : [];
         const operationLabel = card.generation_operation === 'split' ? '拆分'
             : card.generation_operation === 'regenerate' ? '重新生成'
+            : card.generation_operation === 'auto_generate' ? '静默后自动生成'
             : card.generation_operation === 'manual_generate' ? '手动生成' : '';
         const sourceRelation = card.supersedes_card_id
             ? `<div style="margin-top:8px; color:var(--text-muted); font-size:12px;">来源：${escapeHtml(operationLabel || '替代候选')} · 旧卡 #${card.supersedes_card_id}${card.replacement_group_size > 1 ? ` · 同组 ${card.replacement_group_size} 张` : ''} · 任务 ${escapeHtml(card.generation_job_status || '-')}</div>`
@@ -319,6 +324,7 @@ function renderExperienceCards() {
                 <div style="min-width:0; flex:1;">
                     <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
                         <strong>${escapeHtml(card.title || '未命名经历')}</strong>
+                        <span style="font-size:12px; color:var(--text-muted);">${escapeHtml(dateLabel)}</span>
                         <span style="font-size:12px; color:var(--text-muted);">${escapeHtml(status)}</span>
                         <span style="font-size:12px; color:${visible ? 'var(--success)' : 'var(--text-muted)'};">${visible ? 'AI 可见' : '隔离中'}</span>
                     </div>
@@ -471,6 +477,8 @@ async function openExperienceCard(id) {
         currentExperienceCardId = id;
         document.getElementById('experienceCardModalId').textContent = `#${id}`;
         document.getElementById('experienceCardTitle').value = card.title || '';
+        document.getElementById('experienceCardDateStart').value = card.event_date_start || '';
+        document.getElementById('experienceCardDateEnd').value = card.event_date_end || '';
         document.getElementById('experienceCardSummary').value = card.event_summary || '';
         document.getElementById('experienceCardInteraction').value = card.interaction_trace || '';
         document.getElementById('experienceCardDetails').value = listToTextarea(card.key_details);
@@ -506,10 +514,12 @@ async function saveExperienceCard(reviewStatus, aiVisible) {
         return;
     }
     const body = {
+        event_date_start: document.getElementById('experienceCardDateStart').value,
+        event_date_end: document.getElementById('experienceCardDateEnd').value,
         title: document.getElementById('experienceCardTitle').value.trim(),
         event_summary: document.getElementById('experienceCardSummary').value.trim(),
         interaction_trace: document.getElementById('experienceCardInteraction').value.trim(),
-        key_details: textareaToList('experienceCardDetails', 3),
+        key_details: textareaToList('experienceCardDetails', 6),
         explicit_corrections: explicitCorrections,
         explicit_agreements: textareaToList('experienceCardAgreements'),
         open_threads: textareaToList('experienceCardThreads'),

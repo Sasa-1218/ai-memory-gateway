@@ -1,7 +1,9 @@
 import asyncio
+import importlib.util
 import os
 import unittest
 import uuid
+from unittest.mock import AsyncMock, patch
 from urllib.parse import urlsplit, urlunsplit
 
 from experience_cards import (
@@ -11,6 +13,7 @@ from experience_cards import (
     restore_card_update,
     soft_delete_card_update,
     build_generation_prompt,
+    is_basic_experience_candidate,
     validate_generated_cards,
     should_auto_supersede,
 )
@@ -55,9 +58,20 @@ class ExperienceCardReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid_review_status"):
             normalize_card_update({"review_status": "visible"})
 
-    def test_key_details_are_limited_to_three(self):
-        update = normalize_card_update({"key_details": ["a", "b", "c", "d"]})
-        self.assertEqual(update["key_details"], ["a", "b", "c"])
+    def test_key_details_are_limited_to_six(self):
+        update = normalize_card_update({
+            "key_details": ["a", "b", "c", "d", "e", "f", "g"]
+        })
+        self.assertEqual(update["key_details"], ["a", "b", "c", "d", "e", "f"])
+
+    def test_event_dates_use_iso_dates_or_empty(self):
+        update = normalize_card_update({
+            "event_date_start": "2026-07-27", "event_date_end": ""
+        })
+        self.assertEqual(update["event_date_start"], "2026-07-27")
+        self.assertEqual(update["event_date_end"], "")
+        with self.assertRaisesRegex(ValueError, "event_date_start_must_be_iso_date"):
+            normalize_card_update({"event_date_start": "此前周末"})
 
     def test_corrections_require_object_items(self):
         with self.assertRaisesRegex(
@@ -150,6 +164,9 @@ class ExperienceCardReviewTests(unittest.TestCase):
         self.assertIn("事件脊柱", SHARED_EXPERIENCE_CARD_PROMPT)
         self.assertIn("不得把后来的担心", SHARED_EXPERIENCE_CARD_PROMPT)
         self.assertIn("虚构能力", SHARED_EXPERIENCE_CARD_PROMPT)
+        self.assertIn("截至本次对话", SHARED_EXPERIENCE_CARD_PROMPT)
+        self.assertIn("3至6条自然检索短语", SHARED_EXPERIENCE_CARD_PROMPT)
+        self.assertIn("内部编号", SHARED_EXPERIENCE_CARD_PROMPT)
         self.assertNotIn("topic_tags", SHARED_EXPERIENCE_CARD_PROMPT)
         self.assertNotIn("事件重要性", SHARED_EXPERIENCE_CARD_PROMPT)
 
@@ -186,6 +203,51 @@ class ExperienceCardReviewTests(unittest.TestCase):
         self.assertFalse(should_auto_supersede({"review_status":"approved","ai_visible":True}))
         self.assertFalse(should_auto_supersede({"review_status":"deleted","ai_visible":False}))
 
+    def test_auto_candidate_requires_both_sides(self):
+        self.assertFalse(is_basic_experience_candidate([
+            {"role": "user", "content": "我今天买到表带了"}
+        ]))
+
+    def test_auto_candidate_skips_short_temporary_state_exchange(self):
+        self.assertFalse(is_basic_experience_candidate([
+            {"role": "user", "content": "我饿了"},
+            {"role": "assistant", "content": "先去吃一点东西。"},
+        ]))
+
+    def test_auto_candidate_keeps_short_specific_event_exchange(self):
+        self.assertTrue(is_basic_experience_candidate([
+            {"role": "user", "content": "我把之前说的酒红色表带买下来了"},
+            {"role": "assistant", "content": "你最后还是选了那条呀。"},
+        ]))
+
+
+@unittest.skipUnless(importlib.util.find_spec("fastapi"), "FastAPI test dependencies are not installed")
+class ExperienceCardAutoTriggerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_no_new_messages_does_not_call_model(self):
+        import main
+        with patch.object(main, "PARTITION_SESSION_ID", "main-session"), \
+                patch.object(main, "claim_experience_auto_batch", AsyncMock(return_value=None)), \
+                patch.object(main, "_run_experience_generation", AsyncMock()) as generate:
+            result = await main._experience_card_auto_tick()
+        self.assertEqual(result["status"], "idle")
+        generate.assert_not_awaited()
+
+    async def test_basic_filter_skip_advances_without_model(self):
+        import main
+        messages = [
+            {"id": 1, "role": "user", "content": "我饿了", "created_at": "now"},
+            {"id": 2, "role": "assistant", "content": "先吃点东西。", "created_at": "now"},
+        ]
+        finish = AsyncMock()
+        with patch.object(main, "PARTITION_SESSION_ID", "main-session"), \
+                patch.object(main, "claim_experience_auto_batch", AsyncMock(return_value=messages)), \
+                patch.object(main, "finish_experience_auto_batch", finish), \
+                patch.object(main, "_run_experience_generation", AsyncMock()) as generate:
+            result = await main._experience_card_auto_tick()
+        self.assertEqual(result["reason"], "basic_event_filter")
+        generate.assert_not_awaited()
+        finish.assert_awaited_once_with("main-session", 2, True)
+
 
 @unittest.skipUnless(
     os.getenv("EXPERIENCE_CARD_TEST_DATABASE_URL"),
@@ -216,6 +278,7 @@ class ExperienceCardDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 CREATE TABLE IF NOT EXISTS shared_experience_cards (
                     id BIGSERIAL PRIMARY KEY,
                     source_session_id TEXT NOT NULL,
+                    event_date_start DATE, event_date_end DATE,
                     title TEXT NOT NULL DEFAULT '', event_summary TEXT NOT NULL DEFAULT '',
                     interaction_trace TEXT NOT NULL DEFAULT '',
                     key_details JSONB NOT NULL DEFAULT '[]',
@@ -237,7 +300,7 @@ class ExperienceCardDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 CREATE TABLE IF NOT EXISTS experience_card_generation_jobs (
                     job_id TEXT PRIMARY KEY,
                     operation_type TEXT NOT NULL CHECK
-                        (operation_type IN ('manual_generate','regenerate','split')),
+                        (operation_type IN ('manual_generate','auto_generate','regenerate','split')),
                     status TEXT NOT NULL CHECK (status IN ('running','succeeded','failed')),
                     source_session_id TEXT NOT NULL, source_message_ids BIGINT[] NOT NULL,
                     source_card_id BIGINT REFERENCES shared_experience_cards(id),
