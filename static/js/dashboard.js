@@ -44,6 +44,7 @@ const MEM_PER_PAGE = 50;
 let experienceCards = [];
 let currentExperienceCardId = null;
 let experiencePreviewMessages = [];
+let memoryInspectorRunning = false;
 
 const LAYER_NAMES = {
     1: '碎片',
@@ -138,6 +139,122 @@ function switchSection(name) {
     if (name === 'settings') {
         loadSettings();
     }
+}
+
+// ============================================
+// Memory Inspector（只读调试）
+// ============================================
+function selectedMemoryInspectorSources() {
+    const choices = [
+        ['inspectorSourceMemories', 'memories'],
+        ['inspectorSourceSummaries', 'summary_parts'],
+        ['inspectorSourceApproved', 'approved_experience_cards'],
+        ['inspectorSourcePending', 'pending_experience_cards']
+    ];
+    return choices.filter(([id]) => document.getElementById(id)?.checked).map(([, value]) => value);
+}
+
+function memoryInspectorTypeLabel(type) {
+    return {memory: 'Memory', summary_part: 'Summary Part', experience_card: '共同经历卡'}[type] || type || '候选';
+}
+
+function renderInspectorList(items, emptyText) {
+    if (!Array.isArray(items) || items.length === 0) return `<span class="inspector-muted">${emptyText}</span>`;
+    return items.map(item => `<span class="inspector-chip">${escapeHtml(String(item))}</span>`).join('');
+}
+
+function renderMemoryInspectorResults(results) {
+    const container = document.getElementById('memoryInspectorResults');
+    if (!container) return;
+    if (!Array.isArray(results) || results.length === 0) {
+        container.innerHTML = '<div class="card inspector-empty">没有找到匹配的候选。这不会改变任何记忆状态。</div>';
+        return;
+    }
+    container.innerHTML = results.map((item, index) => {
+        const visibleText = item.ai_visible ? 'AI 可见' : '仅测试可见';
+        const sourceButton = item.type === 'experience_card' && item.source_message_ids?.length
+            ? `<button class="btn btn-sm btn-secondary" type="button" onclick="openMemoryInspectorSources(${Number(item.id)})">查看原始消息</button>`
+            : '';
+        return `
+            <article class="card inspector-result-card">
+                <div class="inspector-result-head">
+                    <div><span class="inspector-type">${escapeHtml(memoryInspectorTypeLabel(item.type))}</span><h3>${escapeHtml(item.title || '未命名候选')}</h3></div>
+                    <span class="inspector-rank">#${index + 1}</span>
+                </div>
+                <p class="inspector-snippet">${escapeHtml(item.snippet || '')}</p>
+                <div class="inspector-field"><b>匹配线索</b><div>${renderInspectorList(item.matched_terms, '未报告')}</div></div>
+                ${item.key_details?.length ? `<div class="inspector-field"><b>Key details</b><div>${renderInspectorList(item.key_details, '')}</div></div>` : ''}
+                <dl class="inspector-meta">
+                    <div><dt>Session</dt><dd>${escapeHtml(item.source_session_id || '未报告')}</dd></div>
+                    <div><dt>Message IDs</dt><dd>${escapeHtml((item.source_message_ids || []).join(', ') || '未报告')}</dd></div>
+                    <div><dt>预估 token</dt><dd>${Number(item.estimated_tokens || 0)}</dd></div>
+                    <div><dt>状态</dt><dd>${escapeHtml(item.review_status || '未报告')} · ${visibleText}</dd></div>
+                </dl>
+                <div class="inspector-result-actions">${sourceButton}</div>
+            </article>`;
+    }).join('');
+}
+
+async function runMemoryInspector() {
+    if (memoryInspectorRunning) return;
+    const queryInput = document.getElementById('memoryInspectorQuery');
+    const button = document.getElementById('memoryInspectorRun');
+    const status = document.getElementById('memoryInspectorStatus');
+    const previewCard = document.getElementById('memoryInspectorPreviewCard');
+    const query = queryInput?.value.trim() || '';
+    const sources = selectedMemoryInspectorSources();
+    if (!query) { status.textContent = '请先输入一句测试问题。'; return; }
+    if (!sources.length) { status.textContent = '至少选择一个测试数据源。'; return; }
+    memoryInspectorRunning = true;
+    button.disabled = true;
+    button.textContent = '检索中…';
+    status.textContent = '正在只读计算候选，不会保存 query 或改变记忆状态。';
+    previewCard.style.display = 'none';
+    try {
+        const response = await fetch('/api/memory-inspector/search', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({query, sources, limit: 10})
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+        renderMemoryInspectorResults(data.results || []);
+        status.textContent = `命中 ${Number(data.hit_count || 0)} 条 · ${Number(data.elapsed_ms || 0)} ms · 未保存测试 query`;
+        const preview = data.injection_preview || {};
+        document.getElementById('memoryInspectorPreview').textContent = preview.content || '暂无可预览内容。';
+        document.getElementById('memoryInspectorPreviewStats').textContent = `${Number(preview.chars || 0)} 字符 · 约 ${Number(preview.estimated_tokens || 0)} token`;
+        previewCard.style.display = 'block';
+    } catch (error) {
+        renderMemoryInspectorResults([]);
+        status.textContent = `召回测试失败：${error.message}`;
+    } finally {
+        memoryInspectorRunning = false;
+        button.disabled = false;
+        button.textContent = '开始测试';
+    }
+}
+
+async function openMemoryInspectorSources(cardId) {
+    const modal = document.getElementById('memoryInspectorSourceModal');
+    const container = document.getElementById('memoryInspectorSourceMessages');
+    modal.style.display = 'flex';
+    container.innerHTML = '<div class="inspector-muted">加载中…</div>';
+    try {
+        const response = await fetch(`/api/experience-cards/${Number(cardId)}`);
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+        const messages = data.source_messages || [];
+        container.innerHTML = messages.length ? messages.map(message => `
+            <div class="inspector-source-message">
+                <div><b>${escapeHtml(message.role || '未知角色')}</b><span>#${Number(message.id)}</span></div>
+                <p>${escapeHtml(message.content || '')}</p>
+            </div>`).join('') : '<div class="inspector-muted">没有可显示的原始消息。</div>';
+    } catch (error) {
+        container.innerHTML = `<div class="msg error">加载失败：${escapeHtml(error.message)}</div>`;
+    }
+}
+
+function closeMemoryInspectorSourceModal() {
+    document.getElementById('memoryInspectorSourceModal').style.display = 'none';
 }
 
 // ============================================

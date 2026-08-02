@@ -40,7 +40,7 @@ except Exception:
     jwt = None
     RSAAlgorithm = None
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch, get_memories_by_ids_readonly
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from experience_cards import (
     REVIEW_STATUSES,
@@ -52,6 +52,12 @@ from experience_cards import (
     validate_generated_cards,
 )
 from memory_extractor import extract_memories, score_memories, _apply_memory_thinking_option
+from memory_inspector import (
+    build_injection_preview,
+    lexical_score,
+    make_result,
+    matched_terms,
+)
 
 # ============================================================
 # 配置项 —— 全部从环境变量读取，部署时在云平台面板里设置
@@ -4326,6 +4332,141 @@ async def api_search_memories(q: str = "", limit: int = 20):
 # ============================================================
 # 共同经历卡片草稿（Dashboard 审核；Phase 1 不参与聊天召回）
 # ============================================================
+
+_INSPECTOR_SOURCES = {
+    "memories", "summary_parts", "approved_experience_cards",
+    "pending_experience_cards",
+}
+
+
+@app.post("/api/memory-inspector/search")
+async def api_memory_inspector_search(request: Request):
+    """Read-only retrieval preview; never participates in production chat."""
+    started = time.monotonic()
+    try:
+        data = await request.json()
+        query = str(data.get("query") or "").strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="query_required")
+        if len(query) > 500:
+            raise HTTPException(status_code=400, detail="query_too_long")
+        requested = data.get("sources") or ["memories"]
+        if not isinstance(requested, list):
+            raise HTTPException(status_code=400, detail="sources_must_be_list")
+        sources = [str(item) for item in requested if str(item) in _INSPECTOR_SOURCES]
+        if not sources:
+            raise HTTPException(status_code=400, detail="valid_source_required")
+        limit = max(1, min(int(data.get("limit") or 10), 30))
+        keywords = _db_module.extract_search_keywords(query)
+        results = []
+
+        if "memories" in sources:
+            matches = await search_memories(
+                query, limit, touch_accessed=False, log_diagnostics=False
+            )
+            ids = [int(item["id"]) for item in matches]
+            details = {
+                int(item["id"]): item
+                for item in await get_memories_by_ids_readonly(ids)
+            }
+            for match in matches:
+                item = details.get(int(match["id"]), {})
+                content = str(match.get("content") if isinstance(match, dict) else match["content"])
+                terms = matched_terms(query, keywords, content)
+                results.append(make_result(
+                    result_type="memory",
+                    item_id=int(match["id"]),
+                    title=item.get("title") or f"记忆 #{match['id']}",
+                    content=content,
+                    score=float(match["score"]),
+                    terms=terms,
+                    source_session_id=item.get("source_session") or "",
+                    ai_visible=bool(item.get("is_active", True)),
+                    review_status="active" if item.get("is_active", True) else "archived",
+                ))
+
+        if "summary_parts" in sources:
+            session_id = get_active_session_id()
+            state = await get_session_cache_state(session_id) if session_id else {"summary_parts": []}
+            summary_results = []
+            for index, part in enumerate(state.get("summary_parts") or [], start=1):
+                score, terms = lexical_score(query, keywords, part)
+                if score <= 0:
+                    continue
+                summary_results.append(make_result(
+                    result_type="summary_part",
+                    item_id=index,
+                    title=f"近期摘要片段 {index}",
+                    content=part,
+                    score=score,
+                    terms=terms,
+                    source_session_id=session_id,
+                    ai_visible=True,
+                    review_status="active",
+                ))
+            results.extend(sorted(summary_results, key=lambda item: -item["score"])[:limit])
+
+        card_sources = {
+            "approved_experience_cards": "approved",
+            "pending_experience_cards": "pending",
+        }
+        for source_name, status in card_sources.items():
+            if source_name not in sources:
+                continue
+            card_results = []
+            for card in await list_experience_cards(status, 500):
+                searchable = "\n".join([
+                    str(card.get("title") or ""),
+                    str(card.get("event_summary") or ""),
+                    str(card.get("interaction_trace") or ""),
+                    "\n".join(card.get("key_details") or []),
+                ])
+                score, terms = lexical_score(query, keywords, searchable)
+                if score <= 0:
+                    continue
+                card_results.append(make_result(
+                    result_type="experience_card",
+                    item_id=int(card["id"]),
+                    title=card.get("title") or "共同经历",
+                    content="\n".join(filter(None, [
+                        card.get("event_summary"), card.get("interaction_trace")
+                    ])),
+                    score=score,
+                    terms=terms,
+                    source_session_id=card.get("source_session_id") or "",
+                    source_message_ids=card.get("source_message_ids") or [],
+                    ai_visible=bool(card.get("ai_visible")),
+                    review_status=card.get("review_status") or "",
+                    key_details=card.get("key_details") or [],
+                ))
+            results.extend(sorted(card_results, key=lambda item: -item["score"])[:limit])
+
+        results.sort(key=lambda item: (-item["score"], item["type"], str(item["id"])))
+        preview = build_injection_preview(results)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        print(
+            "[memory-inspector] succeeded "
+            f"source_count={len(sources)} hit_count={len(results)} elapsed_ms={elapsed_ms}"
+        )
+        return {
+            "status": "ok",
+            "query_saved": False,
+            "production_retrieval_changed": False,
+            "sources": sources,
+            "results": results,
+            "hit_count": len(results),
+            "elapsed_ms": elapsed_ms,
+            "injection_preview": preview,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        print(
+            "[memory-inspector] failed "
+            f"elapsed_ms={elapsed_ms} error_type={type(exc).__name__}"
+        )
+        raise HTTPException(status_code=500, detail="memory_inspector_failed") from exc
 
 @app.get("/api/experience-cards")
 async def api_list_experience_cards(status: str = None, limit: int = 500):

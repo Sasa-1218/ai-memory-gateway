@@ -1489,7 +1489,8 @@ async def save_memory(content: str, importance: int = 5, source_session: str = "
                 print(f"⚠️ 记忆 {row['id']} embedding自动计算失败: {e}")
 
 
-async def search_memories(query: str, limit: int = 10):
+async def search_memories(query: str, limit: int = 10, touch_accessed: bool = True,
+                          log_diagnostics: bool = True):
     """
     搜索相关记忆
     
@@ -1497,7 +1498,10 @@ async def search_memories(query: str, limit: int = 10):
     否则走纯关键词搜索
     """
     if MEMORY_VECTOR_ENABLED:
-        return await search_memories_hybrid(query, limit)
+        return await search_memories_hybrid(
+            query, limit, touch_accessed=touch_accessed,
+            log_diagnostics=log_diagnostics,
+        )
     
     # ---- 纯关键词搜索 ----
     keywords = extract_search_keywords(query)
@@ -1550,18 +1554,19 @@ async def search_memories(query: str, limit: int = 10):
             before_count = len(results)
             filtered = 0
         
-        _log_memory_search_diag(
-            "keyword",
-            query,
-            candidate_count=before_count,
-            hit_count=len(results),
-            filtered_count=filtered,
-            score_range=_score_range(results),
-            keyword_count=len(keywords),
-            limit=limit,
-        )
+        if log_diagnostics:
+            _log_memory_search_diag(
+                "keyword",
+                query,
+                candidate_count=before_count,
+                hit_count=len(results),
+                filtered_count=filtered,
+                score_range=_score_range(results),
+                keyword_count=len(keywords),
+                limit=limit,
+            )
 
-        if results:
+        if results and touch_accessed:
             ids = [r["id"] for r in results]
             await conn.execute(
                 "UPDATE memories SET last_accessed = NOW() WHERE id = ANY($1::int[])",
@@ -1571,7 +1576,9 @@ async def search_memories(query: str, limit: int = 10):
         return results
 
 
-async def search_memories_hybrid(query: str, limit: int = 10):
+async def search_memories_hybrid(query: str, limit: int = 10,
+                                 touch_accessed: bool = True,
+                                 log_diagnostics: bool = True):
     """
     记忆混合搜索：关键词 + 向量，归一化后四维加权
     
@@ -1678,24 +1685,25 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             sem_total = len(sem_rows)
             sem_passed = sum(1 for r in sem_rows if float(r['similarity']) >= MEMORY_SEMANTIC_THRESHOLD)
             sem_max = max((float(r['similarity']) for r in sem_rows), default=0)
-            if sem_total > 0 and sem_passed == 0:
+            if log_diagnostics and sem_total > 0 and sem_passed == 0:
                 print(f"   🔢 向量路: {sem_total}条候选全被阈值过滤（最高sim={sem_max:.3f}, 阈值={MEMORY_SEMANTIC_THRESHOLD}）")
-            elif sem_total > 0:
+            elif log_diagnostics and sem_total > 0:
                 print(f"   🔢 向量路: {sem_passed}/{sem_total}条通过阈值（最高sim={sem_max:.3f}）")
         
         if not candidates:
-            _log_memory_search_diag(
-                "hybrid" if query_embedding else "keyword",
-                query,
-                candidate_count=0,
-                hit_count=0,
-                filtered_count=0,
-                score_range="not_reported",
-                keyword_count=len(keywords),
-                vector_enabled=bool(query_embedding),
-                semantic_candidates=locals().get("sem_total", 0),
-                semantic_passed=locals().get("sem_passed", 0),
-            )
+            if log_diagnostics:
+                _log_memory_search_diag(
+                    "hybrid" if query_embedding else "keyword",
+                    query,
+                    candidate_count=0,
+                    hit_count=0,
+                    filtered_count=0,
+                    score_range="not_reported",
+                    keyword_count=len(keywords),
+                    vector_enabled=bool(query_embedding),
+                    semantic_candidates=locals().get("sem_total", 0),
+                    semantic_passed=locals().get("sem_passed", 0),
+                )
             return []
         
         # ---- 归一化 + 加权 ----
@@ -1738,22 +1746,23 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             filtered = 0
         
         results = final[:limit]
-        _log_memory_search_diag(
-            "hybrid" if query_embedding else "keyword",
-            query,
-            candidate_count=before_count,
-            hit_count=len(results),
-            filtered_count=filtered,
-            score_range=_score_range(results),
-            keyword_count=len(keywords),
-            vector_enabled=bool(query_embedding),
-            semantic_candidates=locals().get("sem_total", 0),
-            semantic_passed=locals().get("sem_passed", 0),
-            combined_candidates=len(candidates),
-            limit=limit,
-        )
+        if log_diagnostics:
+            _log_memory_search_diag(
+                "hybrid" if query_embedding else "keyword",
+                query,
+                candidate_count=before_count,
+                hit_count=len(results),
+                filtered_count=filtered,
+                score_range=_score_range(results),
+                keyword_count=len(keywords),
+                vector_enabled=bool(query_embedding),
+                semantic_candidates=locals().get("sem_total", 0),
+                semantic_passed=locals().get("sem_passed", 0),
+                combined_candidates=len(candidates),
+                limit=limit,
+            )
         
-        if results:
+        if results and touch_accessed:
             ids = [r["id"] for r in results]
             await conn.execute(
                 "UPDATE memories SET last_accessed = NOW() WHERE id = ANY($1::int[])",
@@ -1761,6 +1770,22 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             )
         
         return [dict(r) for r in results]
+
+
+async def get_memories_by_ids_readonly(memory_ids: list[int]) -> list[dict]:
+    """Read memory metadata without changing access timestamps or state."""
+    if not memory_ids:
+        return []
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, title, content, layer, importance, is_active,
+                   source_session, created_at
+            FROM memories
+            WHERE id = ANY($1::int[])
+        """, memory_ids)
+        by_id = {int(row["id"]): dict(row) for row in rows}
+        return [by_id[mid] for mid in memory_ids if mid in by_id]
 
 
 async def get_pending_memory_embedding_count():
