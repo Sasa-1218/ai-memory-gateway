@@ -1,4 +1,8 @@
+import asyncio
+import os
 import unittest
+import uuid
+from urllib.parse import urlsplit, urlunsplit
 
 from experience_cards import (
     SHARED_EXPERIENCE_CARD_PROMPT,
@@ -6,6 +10,9 @@ from experience_cards import (
     normalize_card_update,
     restore_card_update,
     soft_delete_card_update,
+    build_generation_prompt,
+    validate_generated_cards,
+    should_auto_supersede,
 )
 
 
@@ -145,6 +152,260 @@ class ExperienceCardReviewTests(unittest.TestCase):
         self.assertIn("虚构能力", SHARED_EXPERIENCE_CARD_PROMPT)
         self.assertNotIn("topic_tags", SHARED_EXPERIENCE_CARD_PROMPT)
         self.assertNotIn("事件重要性", SHARED_EXPERIENCE_CARD_PROMPT)
+
+    def test_generated_cards_are_pending_compatible_and_source_scoped(self):
+        payload = {"cards": [{"title":"t","event_summary":"e","interaction_trace":"i",
+            "key_details":[],"explicit_corrections":[],"explicit_agreements":[],
+            "open_threads":[],"source_message_ids":[1,2]}]}
+        cards = validate_generated_cards(payload, {1,2,3})
+        self.assertEqual(cards[0]["source_message_ids"], [1,2])
+
+    def test_generated_source_ids_out_of_scope_are_rejected(self):
+        payload = {"cards": [{"title":"t","event_summary":"e","interaction_trace":"i",
+            "key_details":[],"explicit_corrections":[],"explicit_agreements":[],
+            "open_threads":[],"source_message_ids":[99]}]}
+        with self.assertRaisesRegex(ValueError, "source_message_ids_out_of_scope"):
+            validate_generated_cards(payload, {1,2})
+
+    def test_multiple_cards_may_share_source_ids(self):
+        base = {"title":"t","event_summary":"e","interaction_trace":"i",
+            "key_details":[],"explicit_corrections":[],"explicit_agreements":[],"open_threads":[]}
+        payload = {"cards": [dict(base, source_message_ids=[1,2]), dict(base, source_message_ids=[2,3])]}
+        self.assertEqual(len(validate_generated_cards(payload, {1,2,3})), 2)
+
+    def test_split_prompt_has_only_split_specific_constraint(self):
+        messages = [{"id":1,"role":"user","content":"x","created_at":"now"}]
+        regular = build_generation_prompt(messages, "regenerate")
+        split = build_generation_prompt(messages, "split")
+        self.assertNotIn("不得单独成卡，也不要放进 title", regular)
+        self.assertIn("不得单独成卡，也不要放进 title", split)
+
+    def test_only_pending_or_archived_auto_supersede(self):
+        self.assertTrue(should_auto_supersede({"review_status":"pending","ai_visible":False}))
+        self.assertTrue(should_auto_supersede({"review_status":"archived","ai_visible":False}))
+        self.assertFalse(should_auto_supersede({"review_status":"approved","ai_visible":True}))
+        self.assertFalse(should_auto_supersede({"review_status":"deleted","ai_visible":False}))
+
+
+@unittest.skipUnless(
+    os.getenv("EXPERIENCE_CARD_TEST_DATABASE_URL"),
+    "EXPERIENCE_CARD_TEST_DATABASE_URL is required for PostgreSQL transaction tests",
+)
+class ExperienceCardDatabaseTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import asyncpg
+        import database
+
+        self.asyncpg = asyncpg
+        self.db = database
+        await database.close_pool()
+        self.admin_url = os.environ["EXPERIENCE_CARD_TEST_DATABASE_URL"]
+        self.database_name = f"experience_card_{uuid.uuid4().hex}"
+        admin = await asyncpg.connect(self.admin_url)
+        try:
+            await admin.execute(f'CREATE DATABASE "{self.database_name}"')
+        finally:
+            await admin.close()
+        parsed = urlsplit(self.admin_url)
+        database.DATABASE_URL = urlunsplit(
+            (parsed.scheme, parsed.netloc, f"/{self.database_name}", parsed.query, parsed.fragment)
+        )
+        pool = await database.get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS shared_experience_cards (
+                    id BIGSERIAL PRIMARY KEY,
+                    source_session_id TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '', event_summary TEXT NOT NULL DEFAULT '',
+                    interaction_trace TEXT NOT NULL DEFAULT '',
+                    key_details JSONB NOT NULL DEFAULT '[]',
+                    explicit_corrections JSONB NOT NULL DEFAULT '[]',
+                    explicit_agreements JSONB NOT NULL DEFAULT '[]',
+                    open_threads JSONB NOT NULL DEFAULT '[]',
+                    source_message_ids BIGINT[] NOT NULL DEFAULT '{}',
+                    review_status TEXT NOT NULL DEFAULT 'pending',
+                    ai_visible BOOLEAN NOT NULL DEFAULT FALSE,
+                    supersedes_card_id BIGINT REFERENCES shared_experience_cards(id),
+                    revision_reason TEXT NOT NULL DEFAULT '', generator_model TEXT NOT NULL DEFAULT '',
+                    prompt_version TEXT NOT NULL DEFAULT '', approved_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT shared_experience_cards_status_check CHECK
+                        (review_status IN ('pending','approved','archived','deleted','superseded')),
+                    CONSTRAINT shared_experience_cards_visibility_check CHECK
+                        (NOT ai_visible OR review_status='approved')
+                );
+                CREATE TABLE IF NOT EXISTS experience_card_generation_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    operation_type TEXT NOT NULL CHECK
+                        (operation_type IN ('manual_generate','regenerate','split')),
+                    status TEXT NOT NULL CHECK (status IN ('running','succeeded','failed')),
+                    source_session_id TEXT NOT NULL, source_message_ids BIGINT[] NOT NULL,
+                    source_card_id BIGINT REFERENCES shared_experience_cards(id),
+                    model TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '',
+                    result_card_ids BIGINT[] NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), finished_at TIMESTAMPTZ
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_experience_card_jobs_active_card
+                ON experience_card_generation_jobs(source_card_id)
+                WHERE source_card_id IS NOT NULL AND status='running';
+                TRUNCATE experience_card_generation_jobs, shared_experience_cards RESTART IDENTITY CASCADE;
+            """)
+
+    async def asyncTearDown(self):
+        await self.db.close_pool()
+        admin = await self.asyncpg.connect(self.admin_url)
+        try:
+            await admin.execute(f'DROP DATABASE IF EXISTS "{self.database_name}" WITH (FORCE)')
+        finally:
+            await admin.close()
+
+    async def _card(self, status="pending", visible=False):
+        pool = await self.db.get_pool()
+        async with pool.acquire() as conn:
+            return await conn.fetchval("""
+                INSERT INTO shared_experience_cards
+                (source_session_id,title,event_summary,source_message_ids,review_status,ai_visible)
+                VALUES ('main-session','old','old summary',ARRAY[101,102]::bigint[],$1,$2)
+                RETURNING id
+            """, status, visible)
+
+    @staticmethod
+    def _generated(title="new"):
+        return [{"title":title,"event_summary":"summary","interaction_trace":"interaction",
+            "key_details":[],"explicit_corrections":[],"explicit_agreements":[],
+            "open_threads":[],"source_message_ids":[101,102]}]
+
+    async def test_concurrent_approve_and_split_rechecks_locked_source(self):
+        old_id = await self._card()
+        await self.db.begin_experience_generation_job(
+            "race-job", "split", "main-session", [101, 102], old_id
+        )
+        blocker = await self.asyncpg.connect(self.db.DATABASE_URL)
+        tx = blocker.transaction()
+        await tx.start()
+        await blocker.execute("""
+            UPDATE shared_experience_cards SET review_status='approved',ai_visible=TRUE
+            WHERE id=$1
+        """, old_id)
+        completion = asyncio.create_task(
+            self.db.complete_experience_generation_job(
+                "race-job", self._generated(), "test-model"
+            )
+        )
+        await asyncio.sleep(0.1)
+        self.assertFalse(completion.done())
+        await tx.commit()
+        await blocker.close()
+        new_ids = await completion
+        pool = await self.db.get_pool()
+        async with pool.acquire() as conn:
+            old = await conn.fetchrow(
+                "SELECT review_status,ai_visible FROM shared_experience_cards WHERE id=$1", old_id
+            )
+            candidate = await conn.fetchrow(
+                "SELECT review_status,ai_visible FROM shared_experience_cards WHERE id=$1", new_ids[0]
+            )
+        self.assertEqual((old["review_status"], old["ai_visible"]), ("approved", True))
+        self.assertEqual((candidate["review_status"], candidate["ai_visible"]), ("pending", False))
+
+    async def test_approved_split_replaces_all_candidates_atomically(self):
+        old_id = await self._card("approved", True)
+        await self.db.begin_experience_generation_job(
+            "group-job", "split", "main-session", [101, 102], old_id
+        )
+        cards = self._generated("first") + self._generated("second")
+        new_ids = await self.db.complete_experience_generation_job(
+            "group-job", cards, "test-model"
+        )
+        approved = await self.db.approve_experience_replacement(new_ids[0])
+        self.assertEqual({item["id"] for item in approved}, set(new_ids))
+        pool = await self.db.get_pool()
+        async with pool.acquire() as conn:
+            old = await conn.fetchrow(
+                "SELECT review_status,ai_visible FROM shared_experience_cards WHERE id=$1", old_id
+            )
+            rows = await conn.fetch("""
+                SELECT review_status,ai_visible FROM shared_experience_cards
+                WHERE id=ANY($1::bigint[])
+            """, new_ids)
+        self.assertEqual((old["review_status"], old["ai_visible"]), ("superseded", False))
+        self.assertTrue(all(row["review_status"] == "approved" and row["ai_visible"] for row in rows))
+
+    async def test_duplicate_group_approval_is_serialized(self):
+        old_id = await self._card("approved", True)
+        await self.db.begin_experience_generation_job(
+            "approval-race", "split", "main-session", [101, 102], old_id
+        )
+        new_ids = await self.db.complete_experience_generation_job(
+            "approval-race", self._generated("first") + self._generated("second"), "test-model"
+        )
+        results = await asyncio.gather(
+            self.db.approve_experience_replacement(new_ids[0]),
+            self.db.approve_experience_replacement(new_ids[1]),
+            return_exceptions=True,
+        )
+        self.assertEqual(sum(isinstance(item, list) for item in results), 1)
+        self.assertEqual(sum(isinstance(item, ValueError) for item in results), 1)
+
+    async def test_model_failure_keeps_source_unchanged(self):
+        old_id = await self._card()
+        await self.db.begin_experience_generation_job(
+            "failed-job", "regenerate", "main-session", [101, 102], old_id
+        )
+        await self.db.fail_experience_generation_job("failed-job", "TimeoutError")
+        pool = await self.db.get_pool()
+        async with pool.acquire() as conn:
+            old = await conn.fetchrow(
+                "SELECT review_status,ai_visible FROM shared_experience_cards WHERE id=$1", old_id
+            )
+            count = await conn.fetchval("SELECT COUNT(*) FROM shared_experience_cards")
+        self.assertEqual((old["review_status"], old["ai_visible"]), ("pending", False))
+        self.assertEqual(count, 1)
+
+    async def test_job_idempotency_and_payload_binding(self):
+        old_id = await self._card()
+        first, created = await self.db.begin_experience_generation_job(
+            "same-job", "split", "main-session", [101, 102], old_id
+        )
+        second, created_again = await self.db.begin_experience_generation_job(
+            "same-job", "split", "main-session", [101, 102], old_id
+        )
+        self.assertTrue(created)
+        self.assertFalse(created_again)
+        self.assertEqual(first["job_id"], second["job_id"])
+        with self.assertRaisesRegex(ValueError, "job_id_payload_mismatch"):
+            await self.db.begin_experience_generation_job(
+                "same-job", "regenerate", "main-session", [101, 102], old_id
+            )
+
+    async def test_concurrent_same_job_id_creates_one_job(self):
+        old_id = await self._card()
+        results = await asyncio.gather(
+            self.db.begin_experience_generation_job(
+                "concurrent-job", "split", "main-session", [101, 102], old_id
+            ),
+            self.db.begin_experience_generation_job(
+                "concurrent-job", "split", "main-session", [101, 102], old_id
+            ),
+        )
+        self.assertEqual(sorted(created for _, created in results), [False, True])
+        pool = await self.db.get_pool()
+        async with pool.acquire() as conn:
+            count = await conn.fetchval("""
+                SELECT COUNT(*) FROM experience_card_generation_jobs
+                WHERE job_id='concurrent-job'
+            """)
+        self.assertEqual(count, 1)
+
+    async def test_duplicate_click_on_same_card_is_rejected(self):
+        old_id = await self._card()
+        await self.db.begin_experience_generation_job(
+            "click-one", "split", "main-session", [101, 102], old_id
+        )
+        with self.assertRaisesRegex(ValueError, "job_already_running"):
+            await self.db.begin_experience_generation_job(
+                "click-two", "split", "main-session", [101, 102], old_id
+            )
 
 
 if __name__ == "__main__":

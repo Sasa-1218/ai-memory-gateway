@@ -39,15 +39,17 @@ except Exception:
     jwt = None
     RSAAlgorithm = None
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from experience_cards import (
     REVIEW_STATUSES,
     normalize_card_update,
     restore_card_update,
     soft_delete_card_update,
+    build_generation_prompt,
+    validate_generated_cards,
 )
-from memory_extractor import extract_memories, score_memories
+from memory_extractor import extract_memories, score_memories, _apply_memory_thinking_option
 
 # ============================================================
 # 配置项 —— 全部从环境变量读取，部署时在云平台面板里设置
@@ -4373,6 +4375,114 @@ async def api_restore_experience_card(card_id: int):
     if not card:
         raise HTTPException(status_code=404, detail="experience_card_not_found")
     return {"status": "ok", "card": card}
+
+
+def _clean_experience_json(text: str) -> dict:
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()[1:]
+        if lines and lines[-1].strip() == "```":
+            lines.pop()
+        text = "\n".join(lines)
+    return json.loads(text)
+
+
+async def _run_experience_generation(operation: str, job_id: str, session_id: str,
+                                     messages: list[dict], source_card: dict = None):
+    message_ids = [int(item["id"]) for item in messages]
+    try:
+        job, created = await begin_experience_generation_job(
+            job_id, operation, session_id, message_ids, source_card["id"] if source_card else None
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not created:
+        return {"status": job["status"], "job_id": job_id,
+                "card_ids": list(job.get("result_card_ids") or [])}
+    try:
+        if not MEMORY_API_BASE_URL or not MEMORY_API_KEY or not MEMORY_MODEL:
+            raise ValueError("memory_config_missing")
+        body = {"model": MEMORY_MODEL,
+                "messages": [{"role": "user", "content": build_generation_prompt(messages, operation)}],
+                "temperature": 0.3, "top_p": 0.9, "stream": False}
+        _apply_memory_thinking_option(body)
+        async with httpx.AsyncClient(timeout=240.0) as client:
+            response = await client.post(MEMORY_API_BASE_URL,
+                headers={"Authorization": f"Bearer {MEMORY_API_KEY}", "Content-Type": "application/json"},
+                json=body)
+        response.raise_for_status()
+        content = ((response.json().get("choices") or [{}])[0].get("message") or {}).get("content", "")
+        cards = validate_generated_cards(_clean_experience_json(content), set(message_ids))
+        card_ids = await complete_experience_generation_job(job_id, cards, MEMORY_MODEL)
+        return {"status": "succeeded", "job_id": job_id, "card_ids": card_ids}
+    except Exception as exc:
+        reason = type(exc).__name__
+        await fail_experience_generation_job(job_id, reason)
+        raise HTTPException(status_code=502, detail=reason) from exc
+
+
+@app.post("/api/experience-cards/source-preview")
+async def api_experience_source_preview(request: Request):
+    data = await request.json()
+    session_id = str(data.get("source_session_id") or "").strip()
+    recent_n = max(1, min(int(data.get("recent_n") or 16), 100))
+    start_id, end_id = data.get("start_id"), data.get("end_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="source_session_id_required")
+    if bool(start_id) != bool(end_id):
+        raise HTTPException(status_code=400, detail="start_and_end_id_required_together")
+    messages = await get_experience_source_messages(
+        session_id, start_id=int(start_id) if start_id else None,
+        end_id=int(end_id) if end_id else None,
+        recent_n=None if start_id and end_id else recent_n)
+    return {"messages": messages, "count": len(messages)}
+
+
+@app.post("/api/experience-cards/generate")
+async def api_generate_experience_cards(request: Request):
+    data = await request.json()
+    session_id = str(data.get("source_session_id") or "").strip()
+    job_id = str(data.get("job_id") or "").strip()
+    ids = [int(value) for value in data.get("source_message_ids") or []]
+    if not session_id or not job_id or not ids:
+        raise HTTPException(status_code=400, detail="generation_fields_required")
+    messages = await get_experience_source_messages(session_id, message_ids=ids)
+    if {item["id"] for item in messages} != set(ids):
+        raise HTTPException(status_code=400, detail="source_messages_invalid")
+    return await _run_experience_generation("manual_generate", job_id, session_id, messages)
+
+
+@app.get("/api/experience-card-jobs/{job_id}")
+async def api_get_experience_generation_job(job_id: str):
+    job = await get_experience_generation_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="experience_card_job_not_found")
+    return {"job": job}
+
+
+@app.post("/api/experience-cards/{card_id}/approve-replacement")
+async def api_approve_experience_replacement(card_id: int):
+    try:
+        cards = await approve_experience_replacement(card_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "ok", "cards": cards, "count": len(cards)}
+
+
+@app.post("/api/experience-cards/{card_id}/{operation}")
+async def api_reprocess_experience_card(card_id: int, operation: str, request: Request):
+    if operation not in {"regenerate", "split"}:
+        raise HTTPException(status_code=404, detail="operation_not_found")
+    card = await get_experience_card(card_id)
+    if not card:
+        raise HTTPException(status_code=404, detail="experience_card_not_found")
+    messages = await get_experience_card_source_messages(card_id)
+    if not messages:
+        raise HTTPException(status_code=400, detail="source_messages_missing")
+    job_id = str((await request.json()).get("job_id") or "").strip()
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id_required")
+    return await _run_experience_generation(operation, job_id, card["source_session_id"], messages, card)
 
 
 @app.put("/api/memories/{memory_id}")

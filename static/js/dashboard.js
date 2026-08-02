@@ -43,6 +43,7 @@ let memCurrentPage = 1;
 const MEM_PER_PAGE = 50;
 let experienceCards = [];
 let currentExperienceCardId = null;
+let experiencePreviewMessages = [];
 
 const LAYER_NAMES = {
     1: '碎片',
@@ -291,10 +292,25 @@ function renderExperienceCards() {
         const status = EXPERIENCE_STATUS_LABELS[card.review_status] || card.review_status;
         const visible = card.review_status === 'approved' && card.ai_visible;
         const details = Array.isArray(card.key_details) ? card.key_details : [];
+        const operationLabel = card.generation_operation === 'split' ? '拆分'
+            : card.generation_operation === 'regenerate' ? '重新生成'
+            : card.generation_operation === 'manual_generate' ? '手动生成' : '';
+        const sourceRelation = card.supersedes_card_id
+            ? `<div style="margin-top:8px; color:var(--text-muted); font-size:12px;">来源：${escapeHtml(operationLabel || '替代候选')} · 旧卡 #${card.supersedes_card_id}${card.replacement_group_size > 1 ? ` · 同组 ${card.replacement_group_size} 张` : ''} · 任务 ${escapeHtml(card.generation_job_status || '-')}</div>`
+            : (operationLabel ? `<div style="margin-top:8px; color:var(--text-muted); font-size:12px;">来源：${escapeHtml(operationLabel)} · 任务 ${escapeHtml(card.generation_job_status || '-')}</div>` : '');
+        const comparison = card.replacement_requires_approval
+            ? `<details style="margin-top:10px; padding:10px; border:1px solid var(--border);"><summary style="cursor:pointer; color:var(--text-muted);">对比当前 AI 可见旧卡 #${card.supersedes_card_id}</summary><strong style="display:block; margin-top:8px;">${escapeHtml(card.source_card_title || '未命名经历')}</strong><div style="white-space:pre-wrap; margin-top:6px; color:var(--text-light);">${escapeHtml(card.source_card_summary || '')}</div></details>`
+            : '';
         let actions = `<button class="btn btn-sm btn-secondary" onclick="openExperienceCard(${card.id})">查看与编辑</button>`;
+        if (card.review_status === 'pending' && card.replacement_requires_approval) {
+            const groupText = card.replacement_group_size > 1 ? `整组 ${card.replacement_group_size} 张替代旧卡` : '用新卡替代旧卡';
+            actions += ` <button class="btn btn-sm btn-primary" onclick="approveExperienceReplacement(${card.id}, ${card.replacement_group_size || 1})">${groupText}</button>`;
+        }
         if (card.review_status === 'deleted') {
             actions += ` <button class="btn btn-sm btn-primary" onclick="restoreExperienceCard(${card.id})">恢复到待检查</button>`;
-        } else {
+        } else if (card.review_status !== 'superseded') {
+            actions += ` <button class="btn btn-sm btn-secondary" onclick="reprocessExperienceCard(${card.id}, 'regenerate')">重新生成</button>`;
+            actions += ` <button class="btn btn-sm btn-secondary" onclick="reprocessExperienceCard(${card.id}, 'split')">拆成多张</button>`;
             actions += ` <button class="btn btn-sm btn-warning" onclick="setExperienceCardStatus(${card.id}, 'archived', false)">仅归档</button>`;
             actions += ` <button class="btn btn-sm btn-danger" onclick="deleteExperienceCard(${card.id})">删除</button>`;
         }
@@ -308,12 +324,108 @@ function renderExperienceCards() {
                     </div>
                     <div style="white-space:pre-wrap; line-height:1.65; color:var(--text-light);">${escapeHtml(card.event_summary || '')}</div>
                     ${details.length ? `<div style="margin-top:10px; color:var(--text-muted); font-size:13px;">线索：${details.map(escapeHtml).join(' · ')}</div>` : ''}
+                    ${sourceRelation}
+                    ${comparison}
                     <div style="margin-top:8px; color:var(--text-muted); font-size:12px;">Session：${escapeHtml(card.source_session_id || '-')} · 来源消息 ${Array.isArray(card.source_message_ids) ? card.source_message_ids.length : 0} 条</div>
                 </div>
                 <div style="display:flex; gap:6px; flex-wrap:wrap;">${actions}</div>
             </div>
         </article>`;
     }).join('');
+}
+
+function newExperienceJobId() {
+    return (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+}
+
+function showExperienceJobStatus(text, isError = false) {
+    ['experienceJobStatus', 'experienceReviewJobStatus'].forEach(id => {
+        const box = document.getElementById(id);
+        if (!box) return;
+        box.style.display = text ? 'block' : 'none';
+        box.style.color = isError ? 'var(--danger)' : 'var(--text-muted)';
+        box.textContent = text;
+    });
+}
+
+async function pollExperienceJob(jobId, label, requestPromise) {
+    let finished = false;
+    requestPromise.then(() => { finished = true; }, () => { finished = true; });
+    showExperienceJobStatus(`${label}：正在启动任务…`);
+    while (!finished) {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        try {
+            const resp = await fetch(`/api/experience-card-jobs/${encodeURIComponent(jobId)}`);
+            if (!resp.ok) continue;
+            const data = await resp.json();
+            const status = data.job?.status || 'running';
+            const labels = {running:'模型处理中', succeeded:'已完成', failed:'失败'};
+            showExperienceJobStatus(`${label}：${labels[status] || status}`, status === 'failed');
+            if (status !== 'running') break;
+        } catch (_) {
+            // 主请求仍会给出最终结果；短暂的状态查询失败不改变任务。
+        }
+    }
+}
+
+async function previewExperienceSource() {
+    const body = {
+        source_session_id: document.getElementById('experienceSourceSession').value.trim(),
+        start_id: document.getElementById('experienceStartId').value || null,
+        end_id: document.getElementById('experienceEndId').value || null,
+        recent_n: Number(document.getElementById('experienceRecentN').value || 16)
+    };
+    const resp = await fetch('/api/experience-cards/source-preview', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+    });
+    if (!resp.ok) { alert(`预览失败：HTTP ${resp.status}`); return; }
+    const data = await resp.json(); experiencePreviewMessages = data.messages || [];
+    document.getElementById('experienceGenerateBtn').disabled = !experiencePreviewMessages.length;
+    document.getElementById('experienceSourcePreview').innerHTML = experiencePreviewMessages.length
+        ? experiencePreviewMessages.map(m => `<div style="padding:8px;border-bottom:1px solid var(--border);"><small>#${m.id} · ${escapeHtml(m.role || '')}</small><div style="white-space:pre-wrap;">${escapeHtml(m.content || '')}</div></div>`).join('')
+        : '<span style="color:var(--text-muted);">没有找到消息。</span>';
+}
+
+async function generateExperienceDrafts() {
+    const btn = document.getElementById('experienceGenerateBtn'); btn.disabled = true;
+    const body = {job_id:newExperienceJobId(), source_session_id:document.getElementById('experienceSourceSession').value.trim(),
+        source_message_ids:experiencePreviewMessages.map(m => m.id)};
+    try {
+        const request = fetch('/api/experience-cards/generate', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        const polling = pollExperienceJob(body.job_id, '生成草稿', request);
+        const resp = await request;
+        await polling;
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        showExperienceJobStatus('生成草稿：已完成');
+        await loadExperienceCards();
+    } catch(e) { showExperienceJobStatus('生成草稿：失败，未写入草稿', true); alert('生成失败，未写入草稿：'+e.message); }
+    finally { btn.disabled = !experiencePreviewMessages.length; }
+}
+
+async function reprocessExperienceCard(id, operation) {
+    const label = operation === 'split' ? '拆分' : '重新生成';
+    if (!confirm(`${label}会调用记忆模型并生成新的待检查草稿，继续吗？`)) return;
+    const buttons = document.querySelectorAll(`button[onclick*="reprocessExperienceCard(${id},"]`);
+    buttons.forEach(button => button.disabled = true);
+    try {
+        const jobId = newExperienceJobId();
+        const request = fetch(`/api/experience-cards/${id}/${operation}`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_id:jobId})});
+        const polling = pollExperienceJob(jobId, label, request);
+        const resp = await request;
+        await polling;
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        showExperienceJobStatus(`${label}：已完成`);
+        await loadExperienceCards();
+    } catch(e) { showExperienceJobStatus(`${label}：失败，旧卡保持不变`, true); alert(`${label}失败，旧卡保持不变：${e.message}`); }
+    finally { buttons.forEach(button => button.disabled = false); }
+}
+
+async function approveExperienceReplacement(id, groupSize) {
+    const scope = groupSize > 1 ? `同组 ${groupSize} 张新卡将一起变为 AI 可见` : '新卡将变为 AI 可见';
+    if (!confirm(`确认后${scope}，原批准卡将标记为已被纠正。继续吗？`)) return;
+    const resp = await fetch(`/api/experience-cards/${id}/approve-replacement`, {method:'POST'});
+    if (!resp.ok) { alert(`替换失败：HTTP ${resp.status}`); return; }
+    await loadExperienceCards();
 }
 
 function listToTextarea(value) {

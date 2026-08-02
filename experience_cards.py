@@ -5,6 +5,7 @@ does not generate cards or expose them to chat retrieval.
 """
 
 REVIEW_STATUSES = {"pending", "approved", "archived", "deleted", "superseded"}
+GENERATION_OPERATIONS = {"manual_generate", "regenerate", "split"}
 
 SHARED_EXPERIENCE_CARD_PROMPT = """请根据下面带有 role、上海时间和 source_message_id 的对话，生成一张或多张“共同经历卡片”草稿。
 
@@ -75,3 +76,53 @@ def soft_delete_card_update() -> dict:
 
 def restore_card_update() -> dict:
     return {"review_status": "pending", "ai_visible": False}
+
+
+def should_auto_supersede(card: dict) -> bool:
+    return card.get("review_status") in {"pending", "archived"}
+
+
+def build_generation_prompt(messages: list[dict], operation: str) -> str:
+    if operation not in GENERATION_OPERATIONS:
+        raise ValueError("invalid_generation_operation")
+    extra = ""
+    if operation == "split":
+        extra = """
+
+本次任务是拆分：按互相独立的事件输出多张卡片。临时身体/生活状态，如没吃饭、没洗澡、累了、饿了，只能作为其他事件背景；除非它本身推动了明确决策、冲突、约定或后续行动，不得单独成卡，也不要放进 title、key_details 或 open_threads。"""
+    evidence = "\n\n".join(
+        f"[{item['created_at']}] role={item['role']} source_message_id={item['id']}\n{item['content']}"
+        for item in messages
+    )
+    return SHARED_EXPERIENCE_CARD_PROMPT + extra + "\n\n待整理对话：\n---\n" + evidence + "\n---"
+
+
+def validate_generated_cards(payload: dict, allowed_message_ids: set[int]) -> list[dict]:
+    cards = payload.get("cards") if isinstance(payload, dict) else None
+    if not isinstance(cards, list) or not cards:
+        raise ValueError("generated_cards_missing")
+    validated = []
+    for raw in cards:
+        if not isinstance(raw, dict):
+            raise ValueError("generated_card_must_be_object")
+        ids = raw.get("source_message_ids")
+        if not isinstance(ids, list) or not ids:
+            raise ValueError("source_message_ids_required")
+        try:
+            ids = [int(value) for value in ids]
+        except (TypeError, ValueError):
+            raise ValueError("invalid_source_message_id")
+        if not set(ids).issubset(allowed_message_ids):
+            raise ValueError("source_message_ids_out_of_scope")
+        update = normalize_card_update({
+            key: raw.get(key, [] if key in {
+                "key_details", "explicit_corrections", "explicit_agreements", "open_threads"
+            } else "")
+            for key in (
+                "title", "event_summary", "interaction_trace", "key_details",
+                "explicit_corrections", "explicit_agreements", "open_threads",
+            )
+        })
+        update["source_message_ids"] = ids
+        validated.append(update)
+    return validated

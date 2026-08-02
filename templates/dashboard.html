@@ -62,6 +62,20 @@
                     <p class="section-desc">查看、编辑、删除已存储的记忆</p>
                 </div>
 
+                <div class="card" style="padding:16px; margin-bottom:14px;">
+                    <h3 style="margin-top:0;">手动生成测试草稿</h3>
+                    <div class="toolbar" style="flex-wrap:wrap;">
+                        <input id="experienceSourceSession" class="search-input" placeholder="source_session_id">
+                        <input id="experienceStartId" class="form-input" type="number" placeholder="开始消息 ID（可选）" style="width:170px;">
+                        <input id="experienceEndId" class="form-input" type="number" placeholder="结束消息 ID（可选）" style="width:170px;">
+                        <input id="experienceRecentN" class="form-input" type="number" value="16" min="1" max="100" style="width:90px;">
+                        <button class="btn btn-secondary" onclick="previewExperienceSource()">预览消息</button>
+                        <button id="experienceGenerateBtn" class="btn btn-primary" onclick="generateExperienceDrafts()" disabled>生成待检查草稿</button>
+                    </div>
+                    <div id="experienceJobStatus" style="display:none; margin-top:10px; color:var(--text-muted); font-size:13px;"></div>
+                    <div id="experienceSourcePreview" style="margin-top:12px; max-height:280px; overflow:auto;"></div>
+                </div>
+
                 <div class="card push-status-card" id="pushStatusCard">
                     <div class="push-status-main">
                         <div>
@@ -191,6 +205,7 @@
                 </div>
 
                 <div id="experienceCardMsg" class="msg-container"></div>
+                <div id="experienceReviewJobStatus" style="display:none; margin-bottom:12px; color:var(--text-muted); font-size:13px;"></div>
                 <div id="experienceCardList" style="display:grid; gap:12px;"></div>
             </section>
 

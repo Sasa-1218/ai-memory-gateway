@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 
 import asyncpg
 
-from experience_cards import apply_card_update
+from experience_cards import apply_card_update, should_auto_supersede
 
 # 时区偏移（和 main.py 保持一致）
 TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "8"))
@@ -258,6 +258,26 @@ async def init_tables():
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_shared_experience_cards_session
             ON shared_experience_cards (source_session_id, created_at DESC);
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS experience_card_generation_jobs (
+                job_id TEXT PRIMARY KEY,
+                operation_type TEXT NOT NULL CHECK (operation_type IN ('manual_generate','regenerate','split')),
+                status TEXT NOT NULL CHECK (status IN ('running','succeeded','failed')),
+                source_session_id TEXT NOT NULL,
+                source_message_ids BIGINT[] NOT NULL,
+                source_card_id BIGINT REFERENCES shared_experience_cards(id),
+                model TEXT NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                result_card_ids BIGINT[] NOT NULL DEFAULT '{}',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                finished_at TIMESTAMPTZ
+            );
+        """)
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_experience_card_jobs_active_card
+            ON experience_card_generation_jobs (source_card_id)
+            WHERE source_card_id IS NOT NULL AND status = 'running';
         """)
         
         await conn.execute("""
@@ -1992,15 +2012,47 @@ async def list_experience_cards(review_status: str = None, limit: int = 500):
     async with pool.acquire() as conn:
         if review_status:
             rows = await conn.fetch("""
-                SELECT * FROM shared_experience_cards
-                WHERE review_status = $1
-                ORDER BY created_at DESC, id DESC
+                SELECT c.*, COALESCE(old.review_status='approved' AND old.ai_visible,FALSE)
+                    AS replacement_requires_approval,
+                    old.title AS source_card_title,
+                    old.event_summary AS source_card_summary,
+                    old.review_status AS source_card_status,
+                    job.job_id AS generation_job_id,
+                    job.operation_type AS generation_operation,
+                    job.status AS generation_job_status,
+                    COALESCE(cardinality(job.result_card_ids), 0) AS replacement_group_size
+                FROM shared_experience_cards c
+                LEFT JOIN shared_experience_cards old ON old.id=c.supersedes_card_id
+                LEFT JOIN LATERAL (
+                    SELECT j.* FROM experience_card_generation_jobs j
+                    WHERE c.id = ANY(j.result_card_ids)
+                    ORDER BY j.finished_at DESC NULLS LAST, j.created_at DESC
+                    LIMIT 1
+                ) job ON TRUE
+                WHERE c.review_status = $1
+                ORDER BY c.created_at DESC, c.id DESC
                 LIMIT $2
             """, review_status, limit)
         else:
             rows = await conn.fetch("""
-                SELECT * FROM shared_experience_cards
-                ORDER BY created_at DESC, id DESC
+                SELECT c.*, COALESCE(old.review_status='approved' AND old.ai_visible,FALSE)
+                    AS replacement_requires_approval,
+                    old.title AS source_card_title,
+                    old.event_summary AS source_card_summary,
+                    old.review_status AS source_card_status,
+                    job.job_id AS generation_job_id,
+                    job.operation_type AS generation_operation,
+                    job.status AS generation_job_status,
+                    COALESCE(cardinality(job.result_card_ids), 0) AS replacement_group_size
+                FROM shared_experience_cards c
+                LEFT JOIN shared_experience_cards old ON old.id=c.supersedes_card_id
+                LEFT JOIN LATERAL (
+                    SELECT j.* FROM experience_card_generation_jobs j
+                    WHERE c.id = ANY(j.result_card_ids)
+                    ORDER BY j.finished_at DESC NULLS LAST, j.created_at DESC
+                    LIMIT 1
+                ) job ON TRUE
+                ORDER BY c.created_at DESC, c.id DESC
                 LIMIT $1
             """, limit)
         return [_experience_card_dict(row) for row in rows]
@@ -2010,7 +2062,24 @@ async def get_experience_card(card_id: int):
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM shared_experience_cards WHERE id = $1", card_id
+            """SELECT c.*, COALESCE(old.review_status='approved' AND old.ai_visible,FALSE)
+               AS replacement_requires_approval,
+               old.title AS source_card_title,
+               old.event_summary AS source_card_summary,
+               old.review_status AS source_card_status,
+               job.job_id AS generation_job_id,
+               job.operation_type AS generation_operation,
+               job.status AS generation_job_status,
+               COALESCE(cardinality(job.result_card_ids), 0) AS replacement_group_size
+               FROM shared_experience_cards c
+               LEFT JOIN shared_experience_cards old ON old.id=c.supersedes_card_id
+               LEFT JOIN LATERAL (
+                   SELECT j.* FROM experience_card_generation_jobs j
+                   WHERE c.id = ANY(j.result_card_ids)
+                   ORDER BY j.finished_at DESC NULLS LAST, j.created_at DESC
+                   LIMIT 1
+               ) job ON TRUE
+               WHERE c.id = $1""", card_id
         )
         return _experience_card_dict(row) if row else None
 
@@ -2032,6 +2101,175 @@ async def get_experience_card_source_messages(card_id: int):
             ORDER BY created_at ASC, id ASC
         """, card["source_session_id"], card["source_message_ids"] or [])
         return [dict(row) for row in rows]
+
+
+async def get_experience_source_messages(session_id: str, message_ids: list[int] = None,
+                                         start_id: int = None, end_id: int = None,
+                                         recent_n: int = None):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if message_ids:
+            rows = await conn.fetch("""
+                SELECT id, role, content, created_at FROM conversations
+                WHERE session_id=$1 AND id=ANY($2::bigint[])
+                ORDER BY created_at, id
+            """, session_id, message_ids)
+        elif recent_n:
+            rows = await conn.fetch("""
+                SELECT * FROM (SELECT id, role, content, created_at FROM conversations
+                WHERE session_id=$1 ORDER BY created_at DESC, id DESC LIMIT $2) q
+                ORDER BY created_at, id
+            """, session_id, recent_n)
+        else:
+            rows = await conn.fetch("""
+                SELECT id, role, content, created_at FROM conversations
+                WHERE session_id=$1 AND id BETWEEN $2 AND $3 ORDER BY created_at, id
+            """, session_id, start_id, end_id)
+        return [dict(row) for row in rows]
+
+
+async def begin_experience_generation_job(job_id: str, operation: str, session_id: str,
+                                          message_ids: list[int], source_card_id: int = None):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT * FROM experience_card_generation_jobs WHERE job_id=$1", job_id
+        )
+        if existing:
+            if (existing["operation_type"] != operation
+                    or existing["source_session_id"] != session_id
+                    or list(existing["source_message_ids"] or []) != list(message_ids)
+                    or existing["source_card_id"] != source_card_id):
+                raise ValueError("experience_card_job_id_payload_mismatch")
+            return dict(existing), False
+        try:
+            row = await conn.fetchrow("""
+                INSERT INTO experience_card_generation_jobs
+                (job_id,operation_type,status,source_session_id,source_message_ids,source_card_id)
+                VALUES ($1,$2,'running',$3,$4::bigint[],$5) RETURNING *
+            """, job_id, operation, session_id, message_ids, source_card_id)
+        except asyncpg.UniqueViolationError:
+            existing = await conn.fetchrow(
+                "SELECT * FROM experience_card_generation_jobs WHERE job_id=$1", job_id
+            )
+            if existing:
+                if (existing["operation_type"] != operation
+                        or existing["source_session_id"] != session_id
+                        or list(existing["source_message_ids"] or []) != list(message_ids)
+                        or existing["source_card_id"] != source_card_id):
+                    raise ValueError("experience_card_job_id_payload_mismatch")
+                return dict(existing), False
+            raise ValueError("experience_card_job_already_running")
+        return dict(row), True
+
+
+async def fail_experience_generation_job(job_id: str, error_type: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE experience_card_generation_jobs SET status='failed', error_message=$2,
+            finished_at=NOW() WHERE job_id=$1 AND status='running'
+        """, job_id, error_type[:120])
+
+
+async def get_experience_generation_job(job_id: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT job_id, operation_type, status, source_card_id, model,
+                   error_message, result_card_ids, created_at, finished_at
+            FROM experience_card_generation_jobs WHERE job_id=$1
+        """, job_id)
+        return dict(row) if row else None
+
+
+async def complete_experience_generation_job(job_id: str, cards: list[dict], model: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            job = await conn.fetchrow("""
+                SELECT * FROM experience_card_generation_jobs WHERE job_id=$1 FOR UPDATE
+            """, job_id)
+            if not job or job["status"] != "running":
+                return list(job["result_card_ids"] or []) if job else []
+            source_card = None
+            if job["source_card_id"] is not None:
+                source_card = await conn.fetchrow("""
+                    SELECT * FROM shared_experience_cards WHERE id=$1 FOR UPDATE
+                """, job["source_card_id"])
+                if not source_card:
+                    raise ValueError("experience_card_source_missing")
+            new_ids = []
+            for card in cards:
+                new_id = await conn.fetchval("""
+                    INSERT INTO shared_experience_cards
+                    (source_session_id,title,event_summary,interaction_trace,key_details,
+                     explicit_corrections,explicit_agreements,open_threads,source_message_ids,
+                     review_status,ai_visible,supersedes_card_id,generator_model,prompt_version)
+                    VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,$9::bigint[],
+                            'pending',FALSE,$10,$11,'manual-v1') RETURNING id
+                """, job["source_session_id"], card["title"], card["event_summary"],
+                    card["interaction_trace"], json.dumps(card["key_details"], ensure_ascii=False),
+                    json.dumps(card["explicit_corrections"], ensure_ascii=False),
+                    json.dumps(card["explicit_agreements"], ensure_ascii=False),
+                    json.dumps(card["open_threads"], ensure_ascii=False),
+                    card["source_message_ids"], source_card["id"] if source_card else None, model)
+                new_ids.append(new_id)
+            if source_card and should_auto_supersede(source_card):
+                await conn.execute("""
+                    UPDATE shared_experience_cards SET review_status='superseded',ai_visible=FALSE,
+                    updated_at=NOW() WHERE id=$1
+                      AND review_status IN ('pending','archived') AND ai_visible=FALSE
+                """, source_card["id"])
+            await conn.execute("""
+                UPDATE experience_card_generation_jobs SET status='succeeded',model=$2,
+                result_card_ids=$3::bigint[],finished_at=NOW() WHERE job_id=$1
+            """, job_id, model, new_ids)
+            return new_ids
+
+
+async def approve_experience_replacement(candidate_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            job_id = await conn.fetchval("""
+                SELECT job_id FROM experience_card_generation_jobs
+                WHERE $1 = ANY(result_card_ids) AND status='succeeded'
+                ORDER BY finished_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+            """, candidate_id)
+            if not job_id:
+                raise ValueError("replacement_group_not_found")
+            job = await conn.fetchrow("""
+                SELECT * FROM experience_card_generation_jobs
+                WHERE job_id=$1 FOR UPDATE
+            """, job_id)
+            candidates = await conn.fetch("""
+                SELECT * FROM shared_experience_cards
+                WHERE id=ANY($1::bigint[]) ORDER BY id FOR UPDATE
+            """, list(job["result_card_ids"] or []))
+            candidate = next((row for row in candidates if row["id"] == candidate_id), None)
+            if not candidate or not candidate["supersedes_card_id"]:
+                raise ValueError("invalid_replacement_candidate")
+            if (not candidates
+                    or any(row["review_status"] != "pending" for row in candidates)
+                    or any(row["supersedes_card_id"] != candidate["supersedes_card_id"] for row in candidates)):
+                raise ValueError("replacement_group_not_pending")
+            original = await conn.fetchrow(
+                "SELECT * FROM shared_experience_cards WHERE id=$1 FOR UPDATE",
+                candidate["supersedes_card_id"])
+            if not original or original["review_status"] != "approved" or not original["ai_visible"]:
+                raise ValueError("replacement_original_not_active")
+            await conn.execute("""
+                UPDATE shared_experience_cards SET review_status='superseded',ai_visible=FALSE,
+                approved_at=NULL,updated_at=NOW() WHERE id=$1
+            """, original["id"])
+            rows = await conn.fetch("""
+                UPDATE shared_experience_cards SET review_status='approved',ai_visible=TRUE,
+                approved_at=NOW(),updated_at=NOW()
+                WHERE id=ANY($1::bigint[]) RETURNING *
+            """, list(job["result_card_ids"] or []))
+            return [_experience_card_dict(row) for row in rows]
 
 
 async def update_experience_card(card_id: int, update: dict):
