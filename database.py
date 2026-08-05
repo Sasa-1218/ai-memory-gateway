@@ -1023,7 +1023,14 @@ async def settle_shadow_mind_rules(
     computed_at: datetime | None = None,
 ) -> dict:
     """Atomically apply one deterministic A2 transition and write only changed state."""
-    from shadow_mind_rules import BASE_STATE, EVENT_TYPES, STATE_FIELDS, settle_elapsed, settle_normal_chat
+    from shadow_mind_rules import (
+        BASE_STATE,
+        CHAT_BURST_MINUTES,
+        EVENT_TYPES,
+        STATE_FIELDS,
+        settle_elapsed,
+        settle_normal_chat,
+    )
 
     if event_type not in EVENT_TYPES:
         raise ValueError("shadow_mind_event_type_invalid")
@@ -1069,10 +1076,36 @@ async def settle_shadow_mind_rules(
                 old_state = dict(BASE_STATE)
                 last_computed_at = now
 
+            recent_turns = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM conversations
+                WHERE session_id = $1 AND role = 'user'
+                  AND created_at >= $2 - INTERVAL '60 minutes'
+                """,
+                safe_session, now,
+            )
+            recent_turns = int(recent_turns or 0)
             if event_type == "normal_chat":
-                new_state, deltas, reason_code, confidence = settle_normal_chat(old_state, now)
+                last_normal_chat_at = await conn.fetchval(
+                    """
+                    SELECT created_at FROM conversations
+                    WHERE session_id = $1 AND role = 'user'
+                      AND NOT (id = ANY($2::bigint[]))
+                    ORDER BY created_at DESC, id DESC LIMIT 1
+                    """,
+                    safe_session, safe_ids,
+                )
+                new_burst = (
+                    last_normal_chat_at is None
+                    or (now - last_normal_chat_at).total_seconds() >= CHAT_BURST_MINUTES * 60
+                )
+                new_state, deltas, reason_code, confidence = settle_normal_chat(
+                    old_state, now, recent_turns=max(1, recent_turns), new_burst=new_burst
+                )
             else:
-                new_state, deltas, reason_code, confidence = settle_elapsed(old_state, last_computed_at, now)
+                new_state, deltas, reason_code, confidence = settle_elapsed(
+                    old_state, last_computed_at, now, recent_turns=recent_turns
+                )
             if not deltas:
                 if not row:
                     await conn.execute(
