@@ -17,6 +17,8 @@ class TransparencyDashboardTests(unittest.TestCase):
         self.assertIn('data-section="io-context"', self.html)
         self.assertIn('id="section-memory-extraction"', self.html)
         self.assertIn('id="section-io-context"', self.html)
+        self.assertIn('id="memoryExtractionCard"', self.html)
+        self.assertIn('id="ioContextCard"', self.html)
         self.assertIn('id="memoryExtractionItems"', self.html)
         self.assertIn('id="ioContextItems"', self.html)
         self.assertIn('id="ioContextSummary"', self.html)
