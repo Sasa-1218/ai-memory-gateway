@@ -1064,14 +1064,33 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
             response = await client.post(summary_url, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
                 "max_tokens": 3000,
+                "thinking": {"type": "disabled"},
                 "messages": [{"role": "user", "content": prompt}],
             })
             if response.status_code == 200:
                 data = response.json()
                 if "choices" in data:
-                    summary = data["choices"][0]["message"]["content"].strip()
-                    print(f"📝 摘要生成完成: {len(summary)}字 (压缩{len(messages)}条消息)")
-                    return summary
+                    choice = data["choices"][0] or {}
+                    message = choice.get("message") or {}
+                    content = message.get("content")
+                    summary = content.strip() if isinstance(content, str) else ""
+                    finish_reason = str(choice.get("finish_reason") or "not_reported")[:64]
+                    usage = data.get("usage") or {}
+                    prompt_tokens = usage.get("prompt_tokens", "not_reported")
+                    completion_tokens = usage.get("completion_tokens", "not_reported")
+                    if summary:
+                        print(
+                            f"📝 摘要生成完成: {len(summary)}字 (压缩{len(messages)}条消息) "
+                            f"finish_reason={finish_reason} prompt_tokens={prompt_tokens} "
+                            f"completion_tokens={completion_tokens}"
+                        )
+                        return summary
+                    print(
+                        "⚠️ 摘要生成空结果: "
+                        f"finish_reason={finish_reason} reasoning_present={bool(message.get('reasoning_content'))} "
+                        f"prompt_tokens={prompt_tokens} completion_tokens={completion_tokens}"
+                    )
+                    return ""
 
         print(f"⚠️ 摘要生成失败: HTTP {response.status_code}")
         return ""
@@ -1197,7 +1216,8 @@ async def consolidate_summary_parts(summary_parts: list) -> list:
         async with httpx.AsyncClient(timeout=180.0) as client:
             response = await client.post(summary_url, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
-                "max_tokens": 20000, 
+                "max_tokens": 20000,
+                "thinking": {"type": "disabled"},
                 "messages": [{"role": "user", "content": prompt}],
             })
             if response.status_code == 200:
@@ -1402,13 +1422,16 @@ async def build_partitioned_messages(
     rotation_count = 0
     max_rotations = CACHE_MAX_ROTATIONS if CACHE_PARTITION_TRIGGER == "time" else 999
     while _should_rotate(b_rounds_count, X, a_msgs) and rotation_count < max_rotations:
-        rotation_count += 1
         trigger_info = f"B区{b_rounds_count}轮 >= X={X}" if CACHE_PARTITION_TRIGGER != "time" else f"A区首条消息超出{CACHE_PARTITION_WINDOW}分钟窗口"
-        print(f"🔄 轮转#{rotation_count}: session={session_id}, {trigger_info}")
+        print(f"🔄 轮转尝试#{rotation_count + 1}: session={session_id}, {trigger_info}")
         
         new_summary = await generate_summary(a_msgs, session_id)
-        if new_summary:
-            summary_parts.append(new_summary)
+        if not new_summary:
+            print("⚠️ 摘要为空，停止轮转并保留当前A/B区与游标，等待后续重试")
+            break
+
+        summary_parts.append(new_summary)
+        rotation_count += 1
         
         a_start_round += X
         a_end_round = a_start_round + X

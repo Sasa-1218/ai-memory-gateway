@@ -1080,7 +1080,7 @@ async def settle_shadow_mind_rules(
                 """
                 SELECT COUNT(*) FROM conversations
                 WHERE session_id = $1 AND role = 'user'
-                  AND created_at >= $2 - INTERVAL '60 minutes'
+                  AND created_at >= $2::timestamptz - INTERVAL '60 minutes'
                 """,
                 safe_session, now,
             )
