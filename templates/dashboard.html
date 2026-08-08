@@ -113,6 +113,22 @@
                     </div>
                 </div>
 
+                <div class="card push-status-card" id="summaryHealthCard">
+                    <div class="push-status-main">
+                        <div>
+                            <div class="push-status-title">近期摘要状态</div>
+                            <div class="push-status-desc" id="summaryHealthDesc">正在检查摘要流水线...</div>
+                        </div>
+                        <span class="push-status-badge" id="summaryHealthBadge">检查中</span>
+                    </div>
+                    <div class="push-status-grid">
+                        <div><span>摘要段数</span><b id="summaryHealthParts">-</b></div>
+                        <div><span>待处理轮次</span><b id="summaryHealthPending">-</b></div>
+                        <div><span>连续失败</span><b id="summaryHealthFailures">-</b></div>
+                        <div><span>最近成功</span><b id="summaryHealthSuccess">-</b></div>
+                    </div>
+                </div>
+
                 <!-- 分层 Tab -->
                 <div class="card layer-tabs-card">
                     <div class="layer-tabs">
@@ -908,6 +924,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.16"></script>
+    <script src="/static/js/dashboard.js?v=3.17"></script>
 </body>
 </html>

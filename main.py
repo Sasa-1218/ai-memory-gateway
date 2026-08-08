@@ -40,7 +40,7 @@ except Exception:
     jwt = None
     RSAAlgorithm = None
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, settle_shadow_mind_rules, get_shadow_mind_a2_events, get_shadow_mind_history, get_latest_normal_turn_message_ids, get_shadow_mind_event_source_messages, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch, get_memories_by_ids_readonly
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, settle_shadow_mind_rules, get_shadow_mind_a2_events, get_shadow_mind_history, get_latest_normal_turn_message_ids, get_shadow_mind_event_source_messages, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch, get_memories_by_ids_readonly, record_summary_attempt, record_summary_failure, mark_summary_alert_delivered, record_summary_success, get_summary_health_status
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from experience_cards import (
     REVIEW_STATUSES,
@@ -159,6 +159,9 @@ def get_memory_api_base_url() -> str:
 #     CACHE_SUMMARY_MODEL=deepseek-chat
 SUMMARY_API_BASE_URL = os.getenv("SUMMARY_API_BASE_URL", "")
 SUMMARY_API_KEY = os.getenv("SUMMARY_API_KEY", "")
+SUMMARY_ALERTS_ENABLED = os.getenv("SUMMARY_ALERTS_ENABLED", "true").lower() == "true"
+SUMMARY_ALERT_AFTER_FAILURES = max(1, int(os.getenv("SUMMARY_ALERT_AFTER_FAILURES", "2")))
+SUMMARY_ALERT_COOLDOWN_HOURS = max(1, int(os.getenv("SUMMARY_ALERT_COOLDOWN_HOURS", "6")))
 
 
 def get_summary_api_base_url() -> str:
@@ -166,6 +169,54 @@ def get_summary_api_base_url() -> str:
 
 def get_summary_api_key() -> str:
     return SUMMARY_API_KEY or get_memory_api_key()
+
+
+async def _record_summary_failure_safe(session_id: str, reason_code: str):
+    if not session_id:
+        return
+    try:
+        result = await record_summary_failure(
+            session_id,
+            reason_code,
+            SUMMARY_ALERT_AFTER_FAILURES,
+            SUMMARY_ALERT_COOLDOWN_HOURS,
+        )
+        print(
+            "summary_health_failure "
+            f"session_hash={_short_hash_text(session_id)} "
+            f"reason={reason_code} consecutive={result.get('consecutive_failures', 0)}",
+            flush=True,
+        )
+        if SUMMARY_ALERTS_ENABLED and result.get("should_alert"):
+            delivery = await deliver_summary_health_alert(
+                f"摘要已连续失败 {result.get('consecutive_failures', 0)} 次。"
+                "原始对话仍已保存，摘要进度没有继续推进，请打开 Dashboard 查看。"
+            )
+            if delivery.get("delivered"):
+                await mark_summary_alert_delivered(session_id)
+    except Exception as monitor_error:
+        print(
+            "summary_health_monitor_failed "
+            f"operation=failure error_type={type(monitor_error).__name__}",
+            flush=True,
+        )
+
+
+async def _record_summary_success_safe(session_id: str):
+    if not session_id:
+        return
+    try:
+        result = await record_summary_success(session_id)
+        if SUMMARY_ALERTS_ENABLED and result.get("recovered"):
+            await deliver_summary_health_alert(
+                "摘要生成已经恢复，之前保留的待处理对话可以继续整理。"
+            )
+    except Exception as monitor_error:
+        print(
+            "summary_health_monitor_failed "
+            f"operation=success error_type={type(monitor_error).__name__}",
+            flush=True,
+        )
 
 def _env_int(key: str, default: int) -> int:
     raw = os.getenv(key)
@@ -1007,6 +1058,15 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     """调用轻量模型压缩A区消息为摘要"""
     if not messages:
         return ""
+    if session_id:
+        try:
+            await record_summary_attempt(session_id, len(messages), CACHE_SUMMARY_MODEL)
+        except Exception as monitor_error:
+            print(
+                "summary_health_monitor_failed "
+                f"operation=attempt error_type={type(monitor_error).__name__}",
+                flush=True,
+            )
     
     conversation_text = ""
     for msg in messages:
@@ -1090,12 +1150,24 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
                         f"finish_reason={finish_reason} reasoning_present={bool(message.get('reasoning_content'))} "
                         f"prompt_tokens={prompt_tokens} completion_tokens={completion_tokens}"
                     )
+                    await _record_summary_failure_safe(
+                        session_id,
+                        "output_truncated" if finish_reason == "length" else "empty_content",
+                    )
                     return ""
 
         print(f"⚠️ 摘要生成失败: HTTP {response.status_code}")
+        await _record_summary_failure_safe(
+            session_id,
+            f"upstream_http_{response.status_code}",
+        )
         return ""
     except Exception as e:
-        print(f"⚠️ 摘要生成异常: {e}")
+        print(f"⚠️ 摘要生成异常: {type(e).__name__}")
+        await _record_summary_failure_safe(
+            session_id,
+            f"exception_{type(e).__name__}",
+        )
         return ""
 
 
@@ -1420,6 +1492,7 @@ async def build_partitioned_messages(
     b_rounds_count = len(b_round_groups)
     
     rotation_count = 0
+    rotation_failed = False
     max_rotations = CACHE_MAX_ROTATIONS if CACHE_PARTITION_TRIGGER == "time" else 999
     while _should_rotate(b_rounds_count, X, a_msgs) and rotation_count < max_rotations:
         trigger_info = f"B区{b_rounds_count}轮 >= X={X}" if CACHE_PARTITION_TRIGGER != "time" else f"A区首条消息超出{CACHE_PARTITION_WINDOW}分钟窗口"
@@ -1427,6 +1500,7 @@ async def build_partitioned_messages(
         
         new_summary = await generate_summary(a_msgs, session_id)
         if not new_summary:
+            rotation_failed = True
             print("⚠️ 摘要为空，停止轮转并保留当前A/B区与游标，等待后续重试")
             break
 
@@ -1444,7 +1518,16 @@ async def build_partitioned_messages(
     if rotation_count > 0:
         # 每次轮转完成后检查一下摘要是否需要压缩（段数/字数超阈值才会真正触发）
         summary_parts = await consolidate_summary_parts(summary_parts)
-        await save_session_cache_state(session_id, summary_parts, a_start_round)
+        try:
+            await save_session_cache_state(session_id, summary_parts, a_start_round)
+        except Exception as state_error:
+            await _record_summary_failure_safe(
+                session_id,
+                f"state_write_{type(state_error).__name__}",
+            )
+            raise
+        if not rotation_failed:
+            await _record_summary_success_safe(session_id)
         summary_total = sum(len(p) for p in summary_parts)
         print(f"🔄 轮转完成(共{rotation_count}次): 摘要{len(summary_parts)}段/{summary_total}字, A区{len(a_msgs)}条, B区{len(b_msgs)}条")
         if cache_diag is not None:
@@ -2849,6 +2932,66 @@ async def deliver_bark_push(message: str) -> dict:
             "attempted": True,
             "delivered": False,
             "error_type": type(e).__name__,
+            "http_status": "not_reported",
+        }
+
+
+async def deliver_summary_health_alert(message: str) -> dict:
+    """Send a separate operational alert without exposing content or secrets."""
+    if not BARK_DEVICE_KEY:
+        return {
+            "attempted": False,
+            "delivered": False,
+            "error_type": "not_configured",
+            "http_status": "not_reported",
+        }
+    payload = {
+        "device_key": BARK_DEVICE_KEY,
+        "title": "网关摘要提醒",
+        "body": message,
+        "group": f"{BARK_GROUP or 'Rora'} · 系统",
+    }
+    if BARK_ICON_URL:
+        payload["icon"] = BARK_ICON_URL
+    if BARK_SOUND:
+        payload["sound"] = BARK_SOUND
+    if BARK_OPEN_URL:
+        payload["url"] = BARK_OPEN_URL
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                BARK_API_URL,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+            )
+        if 200 <= response.status_code < 300:
+            print("summary_health_alert delivered=true", flush=True)
+            return {
+                "attempted": True,
+                "delivered": True,
+                "error_type": "none",
+                "http_status": response.status_code,
+            }
+        print(
+            f"summary_health_alert delivered=false http_status={response.status_code}",
+            flush=True,
+        )
+        return {
+            "attempted": True,
+            "delivered": False,
+            "error_type": f"HTTP_{response.status_code}",
+            "http_status": response.status_code,
+        }
+    except Exception as alert_error:
+        print(
+            "summary_health_alert delivered=false "
+            f"error_type={type(alert_error).__name__}",
+            flush=True,
+        )
+        return {
+            "attempted": True,
+            "delivered": False,
+            "error_type": type(alert_error).__name__,
             "http_status": "not_reported",
         }
 
@@ -4264,6 +4407,53 @@ async def api_push_status():
     if not MEMORY_ENABLED:
         return {"enabled": False, "reason": "memory_disabled"}
     return await get_push_delivery_status(get_active_session_id())
+
+
+@app.get("/api/summary/health")
+async def api_summary_health():
+    """脱敏摘要健康状态；不返回摘要或聊天正文。"""
+    session_id = get_active_session_id()
+    if not session_id:
+        return {"enabled": False, "reason": "session_not_configured"}
+    health = await get_summary_health_status(session_id)
+    state = await get_session_cache_state(session_id)
+    history = await get_conversation_messages(session_id, limit=10000)
+    messages = []
+    for row in history:
+        message = db_row_to_message(row)
+        message["created_at"] = row.get("created_at")
+        if message.get("role") == "tool":
+            previous = messages[-1] if messages else None
+            if not previous or not (
+                previous.get("role") == "tool"
+                or (previous.get("role") == "assistant" and previous.get("tool_calls"))
+            ):
+                continue
+        messages.append(message)
+    total_rounds = len(group_by_rounds(messages))
+    a_start_round = int(state.get("a_start_round", 0))
+    unprocessed_rounds = max(0, total_rounds - a_start_round)
+    ready_rounds = max(0, unprocessed_rounds - CACHE_PARTITION_X)
+    failures = int(health.get("consecutive_failures", 0) or 0)
+    return {
+        "enabled": True,
+        "status": "warning" if failures > 0 else "healthy",
+        "consecutive_failures": failures,
+        "last_error_code": health.get("last_error_code") or "",
+        "last_attempt_at": _format_dashboard_time(health.get("last_attempt_at")),
+        "last_success_at": _format_dashboard_time(health.get("last_success_at")),
+        "last_failure_at": _format_dashboard_time(health.get("last_failure_at")),
+        "last_alert_at": _format_dashboard_time(health.get("last_alert_at")),
+        "alert_active": bool(health.get("alert_active", False)),
+        "last_message_count": int(health.get("last_message_count", 0) or 0),
+        "model": health.get("last_model") or CACHE_SUMMARY_MODEL,
+        "summary_parts": len(state.get("summary_parts", [])),
+        "summary_chars": sum(len(part) for part in state.get("summary_parts", [])),
+        "a_start_round": a_start_round,
+        "total_rounds": total_rounds,
+        "unprocessed_rounds": unprocessed_rounds,
+        "ready_rounds": ready_rounds,
+    }
 
 
 @app.get("/api/shadow/mind/status")

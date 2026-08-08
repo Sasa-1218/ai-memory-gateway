@@ -77,6 +77,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // 加载主动推送投递状态
     loadPushStatus();
     setInterval(loadPushStatus, 60000);
+    loadSummaryHealth();
+    setInterval(loadSummaryHealth, 60000);
     // 加载导出统计
     loadExportStats();
 });
@@ -530,6 +532,45 @@ async function loadPushStatus() {
             badge.classList.add('warn');
         }
         if (desc) desc.textContent = '主动推送投递状态读取失败。';
+    }
+}
+
+async function loadSummaryHealth() {
+    const card = document.getElementById('summaryHealthCard');
+    if (!card) return;
+    const badge = document.getElementById('summaryHealthBadge');
+    const desc = document.getElementById('summaryHealthDesc');
+    try {
+        const response = await fetch('/api/summary/health');
+        if (!response.ok) throw new Error('HTTP_' + response.status);
+        const data = await response.json();
+        document.getElementById('summaryHealthParts').textContent = data.summary_parts ?? 0;
+        document.getElementById('summaryHealthPending').textContent = data.unprocessed_rounds ?? 0;
+        document.getElementById('summaryHealthFailures').textContent = data.consecutive_failures ?? 0;
+        document.getElementById('summaryHealthSuccess').textContent = data.last_success_at || '尚无记录';
+        badge.classList.remove('ok', 'warn');
+        if (data.status === 'warning') {
+            badge.textContent = '需查看';
+            badge.classList.add('warn');
+            desc.textContent = '摘要连续失败 ' + (data.consecutive_failures || 0)
+                + ' 次；原因：' + (data.last_error_code || 'unknown')
+                + '。原始对话仍已保存，进度未推进。';
+        } else if (!data.last_attempt_at) {
+            badge.textContent = '等待运行';
+            desc.textContent = '监控已启用；当前摘要 ' + (data.summary_parts || 0)
+                + ' 段，尚未发生部署后的自动轮转。';
+        } else {
+            badge.textContent = '正常';
+            badge.classList.add('ok');
+            desc.textContent = '最近尝试：' + (data.last_attempt_at || '-')
+                + '；最近成功：' + (data.last_success_at || '-')
+                + '；可立即整理 ' + (data.ready_rounds || 0) + ' 轮。';
+        }
+    } catch (error) {
+        badge.textContent = '读取异常';
+        badge.classList.remove('ok');
+        badge.classList.add('warn');
+        desc.textContent = '摘要状态读取失败，请稍后刷新。';
     }
 }
 

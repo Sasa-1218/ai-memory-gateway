@@ -349,6 +349,24 @@ async def init_tables():
             );
         """)
 
+        # 摘要流水线健康状态：只保存脱敏状态，不保存摘要或聊天正文
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS summary_health_status (
+                session_id             TEXT PRIMARY KEY,
+                last_attempt_at         TIMESTAMPTZ,
+                last_success_at         TIMESTAMPTZ,
+                last_failure_at         TIMESTAMPTZ,
+                consecutive_failures    INTEGER NOT NULL DEFAULT 0,
+                last_error_code         TEXT NOT NULL DEFAULT '',
+                last_message_count      INTEGER NOT NULL DEFAULT 0,
+                last_model              TEXT NOT NULL DEFAULT '',
+                last_alert_attempt_at   TIMESTAMPTZ,
+                last_alert_at           TIMESTAMPTZ,
+                alert_active            BOOLEAN NOT NULL DEFAULT FALSE,
+                updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+
         # 重要日期：仅用于主动推送 cooldown bypass，不作为提醒/日历系统
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS important_dates (
@@ -2826,6 +2844,124 @@ async def save_session_cache_state(session_id: str, summary_parts: list, a_start
             ON CONFLICT (session_id) 
             DO UPDATE SET summary = $2, a_start_round = $3, updated_at = NOW()
         """, session_id, summary_json, a_start_round)
+
+
+async def record_summary_attempt(
+    session_id: str,
+    message_count: int,
+    model: str,
+):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO summary_health_status (
+                session_id, last_attempt_at, last_message_count, last_model, updated_at
+            )
+            VALUES ($1, NOW(), $2, $3, NOW())
+            ON CONFLICT (session_id) DO UPDATE SET
+                last_attempt_at = NOW(),
+                last_message_count = EXCLUDED.last_message_count,
+                last_model = EXCLUDED.last_model,
+                updated_at = NOW()
+        """, session_id, max(0, int(message_count)), str(model or "")[:200])
+
+
+async def record_summary_failure(
+    session_id: str,
+    error_code: str,
+    alert_after: int = 2,
+    alert_cooldown_hours: int = 6,
+) -> dict:
+    """Record a safe failure code and atomically claim an alert window."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("""
+                INSERT INTO summary_health_status (session_id, updated_at)
+                VALUES ($1, NOW())
+                ON CONFLICT (session_id) DO NOTHING
+            """, session_id)
+            row = await conn.fetchrow("""
+                SELECT consecutive_failures, last_alert_attempt_at
+                FROM summary_health_status
+                WHERE session_id = $1
+                FOR UPDATE
+            """, session_id)
+            failures = int(row["consecutive_failures"] or 0) + 1
+            last_attempt = row["last_alert_attempt_at"]
+            cooldown_ok = (
+                last_attempt is None
+                or last_attempt <= datetime.now(dt_timezone.utc) - timedelta(hours=alert_cooldown_hours)
+            )
+            should_alert = failures >= max(1, int(alert_after)) and cooldown_ok
+            await conn.execute("""
+                UPDATE summary_health_status
+                SET last_failure_at = NOW(),
+                    consecutive_failures = $2,
+                    last_error_code = $3,
+                    last_alert_attempt_at = CASE WHEN $4 THEN NOW() ELSE last_alert_attempt_at END,
+                    updated_at = NOW()
+                WHERE session_id = $1
+            """, session_id, failures, str(error_code or "unknown")[:100], should_alert)
+            return {
+                "consecutive_failures": failures,
+                "should_alert": should_alert,
+            }
+
+
+async def mark_summary_alert_delivered(session_id: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE summary_health_status
+            SET last_alert_at = NOW(), alert_active = TRUE, updated_at = NOW()
+            WHERE session_id = $1
+        """, session_id)
+
+
+async def record_summary_success(session_id: str) -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("""
+                INSERT INTO summary_health_status (session_id, updated_at)
+                VALUES ($1, NOW())
+                ON CONFLICT (session_id) DO NOTHING
+            """, session_id)
+            row = await conn.fetchrow("""
+                SELECT consecutive_failures, alert_active
+                FROM summary_health_status
+                WHERE session_id = $1
+                FOR UPDATE
+            """, session_id)
+            recovered = bool(row["alert_active"])
+            previous_failures = int(row["consecutive_failures"] or 0)
+            await conn.execute("""
+                UPDATE summary_health_status
+                SET last_success_at = NOW(),
+                    consecutive_failures = 0,
+                    last_error_code = '',
+                    alert_active = FALSE,
+                    updated_at = NOW()
+                WHERE session_id = $1
+            """, session_id)
+            return {
+                "recovered": recovered,
+                "previous_failures": previous_failures,
+            }
+
+
+async def get_summary_health_status(session_id: str) -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT session_id, last_attempt_at, last_success_at, last_failure_at,
+                   consecutive_failures, last_error_code, last_message_count,
+                   last_model, last_alert_at, alert_active, updated_at
+            FROM summary_health_status
+            WHERE session_id = $1
+        """, session_id)
+        return dict(row) if row else {}
 
 
 # ============================================================
