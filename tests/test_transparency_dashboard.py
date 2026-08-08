@@ -21,7 +21,8 @@ class TransparencyDashboardTests(unittest.TestCase):
         self.assertIn('id="ioContextItems"', self.html)
         self.assertIn('id="ioContextSummary"', self.html)
         self.assertIn('聊天接入状态', self.html)
-        self.assertIn('如果接入聊天的自然预览', self.script)
+        self.assertIn('加工后预览', self.script)
+        self.assertIn('原始字段摘要', self.script)
         self.assertIn('loadMemoryExtractionTrail()', self.script)
         self.assertIn('loadIoContextTrail()', self.script)
         self.assertIn('/api/memory/extraction/recent', self.script)
@@ -42,8 +43,21 @@ class TransparencyDashboardTests(unittest.TestCase):
         self.assertNotIn("save_io_context_events(", io_route)
         self.assertNotIn("save_message(", io_route)
         self.assertIn("payload_preview", io_route)
+        self.assertIn("payload_details", io_route)
         self.assertIn("chat_preview", io_route)
         self.assertIn("chat_integration_enabled", io_route)
+
+    def test_io_recent_query_includes_payload_for_dashboard_preview(self):
+        start = self.main_source.index('@app.get("/api/io/context/recent")')
+        end = self.main_source.index('@app.get("/api/shadow/mind/status")', start)
+        io_route = self.main_source[start:end]
+        self.assertIn("_format_io_payload_details", io_route)
+
+        database_source = (ROOT / "database.py").read_text(encoding="utf-8")
+        query_start = database_source.index("async def get_recent_io_context_events")
+        query_end = database_source.index("# ============================================================", query_start)
+        query = database_source[query_start:query_end]
+        self.assertIn("payload", query)
 
     def test_recent_routes_stay_under_dashboard_access(self):
         self.assertIn('"/api/memory/extraction/recent"', self.main_source)

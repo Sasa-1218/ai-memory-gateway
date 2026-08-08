@@ -3285,6 +3285,23 @@ def _format_io_chat_preview(event_type: str, payload: dict, timezone_name: str =
     return "；".join(parts)
 
 
+def _format_io_payload_details(payload: dict) -> list[dict]:
+    payload = payload if isinstance(payload, dict) else {}
+    details = []
+    for key in sorted(payload.keys()):
+        value = payload.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        else:
+            text = str(value)
+        if len(text) > 180:
+            text = text[:177] + "..."
+        details.append({"key": str(key), "value": text})
+    return details[:20]
+
+
 async def get_push_delivery_status(session_id: str) -> dict:
     if not session_id:
         return {
@@ -4732,6 +4749,7 @@ async def api_io_context_recent(limit: int = 12):
             "permission_state": row.get("permission_state") or "",
             "schema_version": int(row.get("schema_version") or 0),
             "payload_preview": payload_preview,
+            "payload_details": _format_io_payload_details(payload),
             "chat_preview": chat_preview,
             "chat_integration_enabled": False,
         })

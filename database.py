@@ -3098,7 +3098,7 @@ async def get_recent_io_context_events(limit: int = 12):
         rows = await conn.fetch(
             """
             SELECT id, device_id, app_instance_id, source_client, event_type,
-                   observed_at, timezone, permission_state, schema_version
+                   observed_at, timezone, permission_state, payload, schema_version
             FROM io_context_events
             ORDER BY observed_at DESC NULLS LAST, id DESC
             LIMIT $1

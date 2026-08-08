@@ -204,6 +204,68 @@ const shadowMindReasonLabels = {
     elapsed_below_change_threshold: '尚未达到变化阈值'
 };
 
+const ioEventTypeLabels = {
+    'time.now': '当前时间',
+    'location.update': '位置更新',
+    'weather.current': '当前天气',
+    'motion.state': '活动状态',
+    'health.steps': '步数',
+    'health.sleep': '睡眠',
+    'health.workout': '运动',
+    'health.vitals': '健康指标',
+    'device.battery': '设备电量'
+};
+
+const ioCategoryLabels = {
+    time: '时间',
+    location: '位置',
+    weather: '天气',
+    motion: '活动',
+    health: '健康',
+    device: '设备'
+};
+
+const ioPayloadKeyLabels = {
+    now: '当前时间',
+    timestamp: '时间戳',
+    observed_at: '观察时间',
+    location: '位置',
+    address: '地址',
+    label: '地点标签',
+    latitude: '纬度',
+    longitude: '经度',
+    weather: '天气',
+    summary: '摘要',
+    condition: '天气状态',
+    temperature: '温度',
+    temp: '温度',
+    motion: '活动',
+    state: '状态',
+    activity: '活动',
+    steps: '步数',
+    count: '数量',
+    value: '数值',
+    sleep: '睡眠',
+    duration: '时长',
+    workout: '运动',
+    heart_rate: '心率',
+    hr: '心率',
+    pulse: '脉搏',
+    blood_oxygen: '血氧',
+    spo2: '血氧',
+    level: '电量',
+    battery_level: '电量',
+    charging: '充电状态'
+};
+
+function ioEventLabel(eventType) {
+    return ioEventTypeLabels[eventType] || eventType || '未知事件';
+}
+
+function ioCategoryLabel(category) {
+    return ioCategoryLabels[category] || category || '未知';
+}
+
 function shadowMindSparkline(field, history) {
     const values = (history || []).map(item => Number(item.state?.[field])).filter(Number.isFinite);
     if (values.length < 2) return '<div class="shadow-sparkline-empty">等待更多变化</div>';
@@ -240,6 +302,15 @@ function formatShadowMindDeltas(deltas) {
     }).join('，') || '数值未变化';
 }
 
+function renderIoPayloadDetails(details) {
+    const rows = Array.isArray(details) ? details : [];
+    if (!rows.length) return '<div class="inspector-muted">这条事件没有可展示的字段。</div>';
+    return `<dl style="display:grid; grid-template-columns:minmax(90px,140px) 1fr; gap:6px 10px; margin:0;">${rows.map(row => `
+        <dt style="color:var(--text-muted); font-size:12px;">${escapeHtml(ioPayloadKeyLabels[row.key] || row.key || '字段')}</dt>
+        <dd style="margin:0; color:var(--text-light); font-size:13px; word-break:break-word; white-space:pre-wrap;">${escapeHtml(row.value ?? '')}</dd>
+    `).join('')}</dl>`;
+}
+
 function renderShadowMindEvents(events) {
     const box = document.getElementById('shadowMindEventLog');
     if (!box) return;
@@ -253,6 +324,11 @@ function renderShadowMindEvents(events) {
         const reason = shadowMindReasonLabels[event.reason_code] || event.reason_code || event.event_type || '';
         return `<article class="shadow-mind-event">
             <div><b>${escapeHtml(reason)}</b><span>${escapeHtml(formatConvTime(event.computed_at || event.created_at))}</span></div>
+            <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:6px; color:var(--text-muted); font-size:12px;">
+                <span>事件：${escapeHtml(event.event_type || '-')}</span>
+                <span>原因代码：${escapeHtml(event.reason_code || '-')}</span>
+                <span>置信度：${Number(event.confidence ?? 0)}</span>
+            </div>
             <p>${escapeHtml(formatShadowMindDeltas(event.deltas))}</p>
             <footer><span>${ids.length ? `来源消息：${ids.map(id => '#' + Number(id)).join('、')}` : '时间惰性结算'}</span>${sourceButton}</footer>
         </article>`;
@@ -637,58 +713,6 @@ async function loadSystemHealth() {
         }
         ioRow.append(ioName, ioValue);
         items.appendChild(ioRow);
-
-        const ioDetailRow = document.createElement('div');
-        ioDetailRow.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:10px 0;border-top:1px solid var(--border-color);font-size:13px;';
-        const ioDetailHead = document.createElement('div');
-        ioDetailHead.style.cssText = 'display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;';
-        const ioDetailName = document.createElement('span');
-        ioDetailName.textContent = 'IO 最近事件';
-        const ioDetailHint = document.createElement('span');
-        ioDetailHint.style.color = 'var(--text-muted)';
-        ioDetailHint.textContent = '只看类型与状态';
-        ioDetailHead.append(ioDetailName, ioDetailHint);
-
-        const ioDetailBody = document.createElement('div');
-        ioDetailBody.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;';
-        try {
-            const ioResp = await fetch('/api/io/context/recent?limit=4');
-            if (ioResp.ok) {
-                const ioData = await ioResp.json();
-                const ioItems = Array.isArray(ioData.items) ? ioData.items : [];
-                if (ioItems.length) {
-                    ioItems.forEach(item => {
-                        const chip = document.createElement('span');
-                        chip.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border:1px solid var(--border-color);border-radius:999px;font-size:12px;color:var(--text-muted);';
-                        const parts = [
-                            item.event_type || 'unknown',
-                            item.permission_state || 'unknown',
-                            item.observed_at || ''
-                        ].filter(Boolean);
-                        chip.textContent = parts.join(' · ');
-                        ioDetailBody.appendChild(chip);
-                    });
-                } else {
-                    const empty = document.createElement('span');
-                    empty.style.color = 'var(--text-muted)';
-                    empty.textContent = '暂无最近 io 事件';
-                    ioDetailBody.appendChild(empty);
-                }
-            } else {
-                const error = document.createElement('span');
-                error.style.color = 'var(--danger-color, #b4234d)';
-                error.textContent = '最近事件读取失败';
-                ioDetailBody.appendChild(error);
-            }
-        } catch (ioError) {
-            const error = document.createElement('span');
-            error.style.color = 'var(--danger-color, #b4234d)';
-            error.textContent = '最近事件读取失败';
-            ioDetailBody.appendChild(error);
-        }
-
-        ioDetailRow.append(ioDetailHead, ioDetailBody);
-        items.appendChild(ioDetailRow);
     } catch (error) {
         badge.textContent = '读取异常';
         badge.classList.remove('ok');
@@ -757,33 +781,37 @@ async function loadIoContextTrail() {
         badge.textContent = list.length ? '最近有事件' : '暂无记录';
         badge.classList.add(list.length ? 'ok' : 'warn');
         desc.textContent = list.length
-            ? `最近 ${list.length} 条 io 事件已入库；左边看原始事件摘要，右边看如果接入聊天时的自然预览。`
+            ? `最近 ${list.length} 条 IO 感知事件已入库。这里同时显示原始字段摘要和加工预览；当前仍未接入聊天。`
             : '当前没有最近 io 事件，或 io 桥接还未收到数据。';
         const chips = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([category, count]) =>
-            `<span style="display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border:1px solid var(--border-color); border-radius:999px; font-size:12px; color:var(--text-muted);">${escapeHtml(category || 'unknown')} · ${Number(count)}</span>`
+            `<span style="display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border:1px solid var(--border-color); border-radius:999px; font-size:12px; color:var(--text-muted);">${escapeHtml(ioCategoryLabel(category))} · ${Number(count)}</span>`
         ).join('');
         summary.innerHTML = chips ? `<div style="display:flex; flex-wrap:wrap; gap:8px;">${chips}</div>` : '<div class="inspector-muted">暂无类别统计。</div>';
         items.innerHTML = list.length ? list.map(item => `
             <article class="card" style="padding:12px; margin-bottom:10px; border:1px solid var(--border-color);">
                 <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
                     <div style="min-width:0;">
-                        <strong>${escapeHtml(item.event_type || 'unknown')}</strong>
+                        <strong>${escapeHtml(ioEventLabel(item.event_type))}</strong>
                         <div style="margin-top:4px; color:var(--text-muted); font-size:12px;">
-                            ${escapeHtml(item.observed_at || '')} · ${escapeHtml(item.source_client || '')} · ${escapeHtml(item.permission_state || 'unknown')}
+                            ${escapeHtml(item.observed_at || '')} · ${escapeHtml(item.source_client || '')} · 权限 ${escapeHtml(item.permission_state || 'unknown')}
                         </div>
                     </div>
-                    <span style="font-size:12px; color:var(--text-muted); white-space:nowrap;">#${Number(item.id)} · ${escapeHtml(item.category || 'unknown')}</span>
+                    <span style="font-size:12px; color:var(--text-muted); white-space:nowrap;">#${Number(item.id)} · ${escapeHtml(ioCategoryLabel(item.category))}</span>
                 </div>
                 <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:10px; margin-top:10px;">
                     <div style="padding:10px; border:1px solid var(--border-color); border-radius:10px; background:var(--bg-card);">
-                        <div style="font-size:12px; color:var(--text-muted); margin-bottom:6px;">原始事件摘要</div>
-                        <div style="white-space:pre-wrap; line-height:1.55; color:var(--text-light); font-size:13px;">${escapeHtml(item.payload_preview || '暂无原始摘要')}</div>
+                        <div style="font-size:12px; color:var(--text-muted); margin-bottom:6px;">原始字段摘要</div>
+                        ${renderIoPayloadDetails(item.payload_details)}
+                        <details style="margin-top:10px;">
+                            <summary style="cursor:pointer; color:var(--text-muted); font-size:12px;">查看紧凑 JSON</summary>
+                            <div style="white-space:pre-wrap; line-height:1.55; color:var(--text-light); font-size:12px; margin-top:6px;">${escapeHtml(item.payload_preview || '{}')}</div>
+                        </details>
                         <div style="margin-top:8px; color:var(--text-muted); font-size:12px;">
                             设备 ${escapeHtml(item.device_hash || '-')}${item.timezone ? ` · 时区 ${escapeHtml(item.timezone)}` : ''}${item.schema_version ? ` · schema v${Number(item.schema_version)}` : ''}
                         </div>
                     </div>
                     <div style="padding:10px; border:1px solid var(--border-color); border-radius:10px; background:var(--bg-card);">
-                        <div style="font-size:12px; color:var(--text-muted); margin-bottom:6px;">如果接入聊天的自然预览</div>
+                        <div style="font-size:12px; color:var(--text-muted); margin-bottom:6px;">加工后预览</div>
                         <div style="white-space:pre-wrap; line-height:1.55; color:var(--text-light); font-size:13px;">${escapeHtml(item.chat_preview || '暂无可预览内容')}</div>
                         <div style="margin-top:8px; color:var(--text-muted); font-size:12px;">当前状态：${item.chat_integration_enabled ? '已接入聊天' : '未接入聊天'}</div>
                     </div>
