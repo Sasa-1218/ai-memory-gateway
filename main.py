@@ -3222,69 +3222,6 @@ def _format_dashboard_time(dt: datetime | None) -> str:
     return dt.astimezone(SHANGHAI_TZ).strftime("%m-%d %H:%M")
 
 
-def _format_io_chat_preview(event_type: str, payload: dict, timezone_name: str = "") -> str:
-    payload = _io_payload_value(payload)
-    event_type = str(event_type or "")
-    parts = []
-    if event_type == "time.now":
-        value = payload.get("now") or payload.get("timestamp") or payload.get("observed_at") or ""
-        if value:
-            parts.append(f"当前时间：{value}")
-    elif event_type == "location.update":
-        location = payload.get("location") or payload.get("address") or payload.get("label") or ""
-        lat = payload.get("latitude")
-        lng = payload.get("longitude")
-        if location:
-            parts.append(f"当前位置：{location}")
-        elif lat is not None and lng is not None:
-            parts.append(f"当前位置：{lat}, {lng}")
-        if timezone_name:
-            parts.append(f"时区：{timezone_name}")
-    elif event_type == "weather.current":
-        weather = payload.get("weather") or payload.get("summary") or payload.get("condition") or ""
-        temp = payload.get("temperature") or payload.get("temp") or ""
-        if weather:
-            parts.append(f"天气：{weather}")
-        if temp != "":
-            parts.append(f"温度：{temp}")
-    elif event_type == "motion.state":
-        motion = payload.get("motion") or payload.get("state") or payload.get("activity") or ""
-        if motion:
-            parts.append(f"活动状态：{motion}")
-    elif event_type == "health.steps":
-        steps = payload.get("steps") or payload.get("count") or payload.get("value") or ""
-        if steps != "":
-            parts.append(f"步数：{steps}")
-    elif event_type == "health.sleep":
-        sleep = payload.get("sleep") or payload.get("duration") or payload.get("value") or ""
-        if sleep:
-            parts.append(f"睡眠：{sleep}")
-    elif event_type == "health.workout":
-        workout = payload.get("workout") or payload.get("activity") or payload.get("summary") or ""
-        if workout:
-            parts.append(f"运动：{workout}")
-    elif event_type == "health.vitals":
-        heart = payload.get("heart_rate") or payload.get("hr") or payload.get("pulse") or ""
-        blood = payload.get("blood_oxygen") or payload.get("spo2") or ""
-        if heart != "":
-            parts.append(f"心率：{heart}")
-        if blood != "":
-            parts.append(f"血氧：{blood}")
-    elif event_type == "device.battery":
-        level = payload.get("level") or payload.get("battery_level") or payload.get("value") or ""
-        charging = payload.get("charging")
-        if level != "":
-            parts.append(f"电量：{level}%")
-        if charging is True:
-            parts.append("充电中")
-        elif charging is False:
-            parts.append("未充电")
-
-    if not parts:
-        return "已接收该类感知事件，当前没有足够字段生成自然聊天预览。"
-    return "；".join(parts)
-
-
 def _io_payload_value(value) -> dict:
     if isinstance(value, dict):
         return value
@@ -3295,6 +3232,134 @@ def _io_payload_value(value) -> dict:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _io_text_value(value, max_len: int = 80) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    else:
+        text = str(value)
+    return text if len(text) <= max_len else text[: max_len - 3] + "..."
+
+
+def _io_nested_text(payload: dict, keys: tuple[str, ...], max_len: int = 80) -> str:
+    current = payload
+    for key in keys:
+        if not isinstance(current, dict):
+            return ""
+        current = current.get(key)
+    return _io_text_value(current, max_len=max_len)
+
+
+def _io_location_text(location) -> str:
+    if isinstance(location, str):
+        return _io_text_value(location, 120)
+    if not isinstance(location, dict):
+        return ""
+    for keys in (
+        ("address",),
+        ("formatted_address",),
+        ("name",),
+        ("label",),
+        ("city",),
+        ("locality",),
+        ("region",),
+        ("administrative_area",),
+    ):
+        text = _io_nested_text(location, keys, 120)
+        if text:
+            return text
+    lat = location.get("latitude") or location.get("lat")
+    lng = location.get("longitude") or location.get("lng") or location.get("lon")
+    if lat is not None and lng is not None:
+        return f"{lat}, {lng}"
+    return ""
+
+
+def _format_io_chat_preview(event_type: str, payload: dict, timezone_name: str = "") -> str:
+    payload = _io_payload_value(payload)
+    event_type = str(event_type or "")
+    parts = []
+    if event_type == "time.now":
+        value = payload.get("local_time") or payload.get("now") or payload.get("timestamp") or payload.get("observed_at") or payload.get("time") or ""
+        if value:
+            parts.append(f"本地时间：{_io_text_value(value, 48)}")
+        if "charging" in payload:
+            parts.append("正在充电" if payload.get("charging") is True else "未充电")
+        user_state = _io_text_value(payload.get("user_state"), 48)
+        if user_state:
+            parts.append(f"设备状态：{user_state}")
+        now_playing = payload.get("now_playing")
+        if isinstance(now_playing, dict):
+            title = _io_text_value(now_playing.get("title"), 48)
+            artist = _io_text_value(now_playing.get("artist"), 48)
+            playback = _io_text_value(now_playing.get("playback_state") or now_playing.get("state"), 24)
+            if title or artist:
+                song = " - ".join([part for part in (title, artist) if part])
+                suffix = f"（{playback}）" if playback else ""
+                parts.append(f"媒体：{song}{suffix}")
+    elif event_type == "location.update":
+        location = (
+            _io_location_text(payload.get("location"))
+            or _io_text_value(payload.get("address"), 120)
+            or _io_text_value(payload.get("label"), 120)
+            or _io_text_value(payload.get("city"), 80)
+        )
+        lat = payload.get("latitude")
+        lng = payload.get("longitude")
+        if location:
+            parts.append(f"当前位置：{location}")
+        elif lat is not None and lng is not None:
+            parts.append(f"当前位置：{lat}, {lng}")
+        if timezone_name:
+            parts.append(f"时区：{timezone_name}")
+    elif event_type == "weather.current":
+        weather = payload.get("weather") or payload.get("summary") or payload.get("condition") or payload.get("description") or ""
+        temp = payload.get("temperature") or payload.get("temp") or _io_nested_text(payload, ("temperature", "value"))
+        if weather:
+            parts.append(f"天气：{_io_text_value(weather, 80)}")
+        if temp != "":
+            parts.append(f"温度：{_io_text_value(temp, 32)}")
+    elif event_type == "motion.state":
+        motion = payload.get("motion") or payload.get("state") or payload.get("activity") or ""
+        if motion:
+            parts.append(f"活动状态：{_io_text_value(motion, 80)}")
+    elif event_type == "health.steps":
+        steps = payload.get("steps") or payload.get("count") or payload.get("value") or ""
+        if steps != "":
+            parts.append(f"步数：{_io_text_value(steps, 32)}")
+    elif event_type == "health.sleep":
+        sleep = payload.get("sleep") or payload.get("duration") or payload.get("value") or ""
+        if sleep:
+            parts.append(f"睡眠：{_io_text_value(sleep, 120)}")
+    elif event_type == "health.workout":
+        workout = payload.get("workout") or payload.get("activity") or payload.get("summary") or ""
+        if workout:
+            parts.append(f"运动：{_io_text_value(workout, 120)}")
+    elif event_type == "health.vitals":
+        heart = payload.get("heart_rate") or payload.get("hr") or payload.get("pulse") or ""
+        blood = payload.get("blood_oxygen") or payload.get("spo2") or ""
+        if heart != "":
+            parts.append(f"心率：{_io_text_value(heart, 32)}")
+        if blood != "":
+            parts.append(f"血氧：{_io_text_value(blood, 32)}")
+    elif event_type == "device.battery":
+        level = payload.get("level") or payload.get("battery_level") or payload.get("value") or ""
+        charging = payload.get("charging")
+        if level != "":
+            parts.append(f"电量：{_io_text_value(level, 32)}%")
+        if charging is True:
+            parts.append("充电中")
+        elif charging is False:
+            parts.append("未充电")
+
+    if not parts:
+        return "已接收该类感知事件，但这些字段暂时没有转换成聊天预览。"
+    return "；".join(parts)
 
 
 def _format_io_payload_details(payload: dict) -> list[dict]:

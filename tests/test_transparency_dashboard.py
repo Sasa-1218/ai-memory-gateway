@@ -67,6 +67,12 @@ class TransparencyDashboardTests(unittest.TestCase):
         self.assertIn("payload = _io_payload_value(row.get(\"payload\"))", self.main_source)
         self.assertIn("payload = _io_payload_value(payload)", self.main_source)
 
+    def test_io_preview_handles_common_perception_fields(self):
+        for field in ("local_time", "now_playing", "charging", "user_state", "city"):
+            self.assertIn(field, self.main_source)
+        self.assertIn("已接收该类感知事件，但这些字段暂时没有转换成聊天预览。", self.main_source)
+        self.assertIn("overflow-wrap:anywhere", self.script)
+
     def test_recent_routes_stay_under_dashboard_access(self):
         self.assertIn('"/api/memory/extraction/recent"', self.main_source)
         self.assertIn('"/api/io/context/recent"', self.main_source)

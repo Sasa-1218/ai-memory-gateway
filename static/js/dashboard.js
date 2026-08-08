@@ -200,8 +200,14 @@ const shadowMindDriveFields = ['longing', 'curiosity', 'share', 'warmth', 'conce
 const shadowMindEmotionFields = ['valence', 'arousal', 'connection', 'tension', 'hurt', 'fatigue'];
 const shadowMindReasonLabels = {
     normal_chat_completed: '完成一轮正常聊天',
+    normal_chat_burst_started: '新一轮聊天开始，想靠近感被回应后回落',
+    normal_chat_density_updated: '连续聊天密度变化，更新互动能量',
     elapsed_time_settlement: '按经过时间结算',
-    elapsed_below_change_threshold: '尚未达到变化阈值'
+    elapsed_below_change_threshold: '尚未达到变化阈值',
+    correction_detected: '出现明确纠正，紧张或刺痛可能上升',
+    boundary_mentioned: '出现边界表达，只按明确范围记录',
+    conflict_possible: '可能存在冲突信号，但不推断关系恶化',
+    repair_possible: '出现修复互动，紧张可能回落'
 };
 
 const ioEventTypeLabels = {
@@ -804,7 +810,7 @@ async function loadIoContextTrail() {
                         ${renderIoPayloadDetails(item.payload_details)}
                         <details style="margin-top:10px;">
                             <summary style="cursor:pointer; color:var(--text-muted); font-size:12px;">查看紧凑 JSON</summary>
-                            <div style="white-space:pre-wrap; line-height:1.55; color:var(--text-light); font-size:12px; margin-top:6px;">${escapeHtml(item.payload_preview || '{}')}</div>
+                            <div style="white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; line-height:1.55; color:var(--text-light); font-size:12px; margin-top:6px; max-width:100%;">${escapeHtml(item.payload_preview || '{}')}</div>
                         </details>
                         <div style="margin-top:8px; color:var(--text-muted); font-size:12px;">
                             设备 ${escapeHtml(item.device_hash || '-')}${item.timezone ? ` · 时区 ${escapeHtml(item.timezone)}` : ''}${item.schema_version ? ` · schema v${Number(item.schema_version)}` : ''}

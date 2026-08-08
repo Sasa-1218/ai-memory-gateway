@@ -48,6 +48,13 @@ class ShadowMindRulesTests(unittest.TestCase):
         self.assertEqual(busy_deltas["fatigue"], 2)
         self.assertNotIn("fatigue", same_band_deltas)
 
+    def test_new_chat_burst_does_not_directly_add_fatigue_at_night(self):
+        night = datetime(2026, 8, 2, 18, tzinfo=timezone.utc)  # 02:00 Asia/Shanghai
+        state = dict(BASE_STATE, fatigue=20)
+        _, deltas, reason, _ = settle_normal_chat(state, night, recent_turns=1, new_burst=True)
+        self.assertEqual(reason, "normal_chat_burst_started")
+        self.assertNotIn("fatigue", deltas)
+
     def test_normal_chat_no_longer_saturates_positive_emotions(self):
         state = dict(BASE_STATE)
         now = datetime(2026, 8, 2, 12, tzinfo=timezone.utc)

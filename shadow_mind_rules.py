@@ -105,7 +105,6 @@ def settle_normal_chat(
 
     if new_burst:
         changes["longing"] = -min(8, max(2, round(current["longing"] * 0.20)))
-        changes["fatigue"] = _toward(current["fatigue"], _fatigue_target(now), 2)
         reason = "normal_chat_burst_started"
     else:
         # Add load only when the rolling hour crosses a density band (5/9/13).
