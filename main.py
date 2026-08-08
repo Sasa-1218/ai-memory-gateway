@@ -3223,7 +3223,7 @@ def _format_dashboard_time(dt: datetime | None) -> str:
 
 
 def _format_io_chat_preview(event_type: str, payload: dict, timezone_name: str = "") -> str:
-    payload = payload if isinstance(payload, dict) else {}
+    payload = _io_payload_value(payload)
     event_type = str(event_type or "")
     parts = []
     if event_type == "time.now":
@@ -3285,8 +3285,20 @@ def _format_io_chat_preview(event_type: str, payload: dict, timezone_name: str =
     return "；".join(parts)
 
 
+def _io_payload_value(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def _format_io_payload_details(payload: dict) -> list[dict]:
-    payload = payload if isinstance(payload, dict) else {}
+    payload = _io_payload_value(payload)
     details = []
     for key in sorted(payload.keys()):
         value = payload.get(key)
@@ -4734,7 +4746,7 @@ async def api_io_context_recent(limit: int = 12):
         event_type = str(row.get("event_type") or "")
         category = event_type.split(".", 1)[0] if "." in event_type else event_type
         category_counts[category] = category_counts.get(category, 0) + 1
-        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        payload = _io_payload_value(row.get("payload"))
         payload_json = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
         payload_preview = payload_json if len(payload_json) <= 240 else payload_json[:237] + "..."
         chat_preview = _format_io_chat_preview(event_type, payload, row.get("timezone") or "")

@@ -61,6 +61,12 @@ class TransparencyDashboardTests(unittest.TestCase):
         query = database_source[query_start:query_end]
         self.assertIn("payload", query)
 
+    def test_io_payload_string_is_parsed_for_dashboard_preview(self):
+        self.assertIn("def _io_payload_value", self.main_source)
+        self.assertIn("json.loads(value)", self.main_source)
+        self.assertIn("payload = _io_payload_value(row.get(\"payload\"))", self.main_source)
+        self.assertIn("payload = _io_payload_value(payload)", self.main_source)
+
     def test_recent_routes_stay_under_dashboard_access(self):
         self.assertIn('"/api/memory/extraction/recent"', self.main_source)
         self.assertIn('"/api/io/context/recent"', self.main_source)
