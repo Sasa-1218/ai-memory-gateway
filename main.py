@@ -40,7 +40,7 @@ except Exception:
     jwt = None
     RSAAlgorithm = None
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, settle_shadow_mind_rules, get_shadow_mind_a2_events, get_shadow_mind_history, get_latest_normal_turn_message_ids, get_shadow_mind_event_source_messages, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch, get_memories_by_ids_readonly, record_summary_attempt, record_summary_failure, mark_summary_alert_delivered, record_summary_success, get_summary_health_status, record_operational_health_failure, record_operational_health_success, mark_operational_health_alert_delivered, list_operational_health_status, get_latest_io_received_at
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_recent_memories_detail, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, settle_shadow_mind_rules, get_shadow_mind_a2_events, get_shadow_mind_history, get_latest_normal_turn_message_ids, get_shadow_mind_event_source_messages, save_io_context_events, get_recent_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch, get_memories_by_ids_readonly, record_summary_attempt, record_summary_failure, mark_summary_alert_delivered, record_summary_success, get_summary_health_status, record_operational_health_failure, record_operational_health_success, mark_operational_health_alert_delivered, list_operational_health_status, get_latest_io_received_at
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from experience_cards import (
     REVIEW_STATUSES,
@@ -3222,6 +3222,69 @@ def _format_dashboard_time(dt: datetime | None) -> str:
     return dt.astimezone(SHANGHAI_TZ).strftime("%m-%d %H:%M")
 
 
+def _format_io_chat_preview(event_type: str, payload: dict, timezone_name: str = "") -> str:
+    payload = payload if isinstance(payload, dict) else {}
+    event_type = str(event_type or "")
+    parts = []
+    if event_type == "time.now":
+        value = payload.get("now") or payload.get("timestamp") or payload.get("observed_at") or ""
+        if value:
+            parts.append(f"当前时间：{value}")
+    elif event_type == "location.update":
+        location = payload.get("location") or payload.get("address") or payload.get("label") or ""
+        lat = payload.get("latitude")
+        lng = payload.get("longitude")
+        if location:
+            parts.append(f"当前位置：{location}")
+        elif lat is not None and lng is not None:
+            parts.append(f"当前位置：{lat}, {lng}")
+        if timezone_name:
+            parts.append(f"时区：{timezone_name}")
+    elif event_type == "weather.current":
+        weather = payload.get("weather") or payload.get("summary") or payload.get("condition") or ""
+        temp = payload.get("temperature") or payload.get("temp") or ""
+        if weather:
+            parts.append(f"天气：{weather}")
+        if temp != "":
+            parts.append(f"温度：{temp}")
+    elif event_type == "motion.state":
+        motion = payload.get("motion") or payload.get("state") or payload.get("activity") or ""
+        if motion:
+            parts.append(f"活动状态：{motion}")
+    elif event_type == "health.steps":
+        steps = payload.get("steps") or payload.get("count") or payload.get("value") or ""
+        if steps != "":
+            parts.append(f"步数：{steps}")
+    elif event_type == "health.sleep":
+        sleep = payload.get("sleep") or payload.get("duration") or payload.get("value") or ""
+        if sleep:
+            parts.append(f"睡眠：{sleep}")
+    elif event_type == "health.workout":
+        workout = payload.get("workout") or payload.get("activity") or payload.get("summary") or ""
+        if workout:
+            parts.append(f"运动：{workout}")
+    elif event_type == "health.vitals":
+        heart = payload.get("heart_rate") or payload.get("hr") or payload.get("pulse") or ""
+        blood = payload.get("blood_oxygen") or payload.get("spo2") or ""
+        if heart != "":
+            parts.append(f"心率：{heart}")
+        if blood != "":
+            parts.append(f"血氧：{blood}")
+    elif event_type == "device.battery":
+        level = payload.get("level") or payload.get("battery_level") or payload.get("value") or ""
+        charging = payload.get("charging")
+        if level != "":
+            parts.append(f"电量：{level}%")
+        if charging is True:
+            parts.append("充电中")
+        elif charging is False:
+            parts.append("未充电")
+
+    if not parts:
+        return "已接收该类感知事件，当前没有足够字段生成自然聊天预览。"
+    return "；".join(parts)
+
+
 async def get_push_delivery_status(session_id: str) -> dict:
     if not session_id:
         return {
@@ -4614,6 +4677,70 @@ async def api_system_health():
         "warning_count": sum(
             1 for item in components if item["status"] == "failing"
         ) + (1 if io_stale else 0),
+    }
+
+
+@app.get("/api/memory/extraction/recent")
+async def api_memory_extraction_recent(limit: int = 12):
+    """最近提取出的记忆预览，只读、不改写记忆。"""
+    limit = max(1, min(int(limit or 12), 30))
+    rows = await get_recent_memories_detail(limit)
+    items = []
+    for row in rows:
+        content = str(row.get("content") or "")
+        items.append({
+            "id": row.get("id"),
+            "title": row.get("title") or f"记忆 #{row.get('id')}",
+            "content": content,
+            "importance": int(row.get("importance", 0) or 0),
+            "source_session": row.get("source_session") or "",
+            "created_at": _format_dashboard_time(row.get("created_at")),
+            "layer": row.get("layer"),
+            "is_active": bool(row.get("is_active", True)),
+            "content_chars": len(content),
+        })
+    return {
+        "items": items,
+        "total": len(items),
+        "note": "这里只展示最近写入的记忆内容预览，不包含聊天正文和提取 prompt。",
+    }
+
+
+@app.get("/api/io/context/recent")
+async def api_io_context_recent(limit: int = 12):
+    """最近收到的 io 感知事件，只返回类型级别明细。"""
+    limit = max(1, min(int(limit or 12), 30))
+    rows = await get_recent_io_context_events(limit)
+    items = []
+    category_counts = {}
+    for row in rows:
+        event_type = str(row.get("event_type") or "")
+        category = event_type.split(".", 1)[0] if "." in event_type else event_type
+        category_counts[category] = category_counts.get(category, 0) + 1
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        payload_json = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
+        payload_preview = payload_json if len(payload_json) <= 240 else payload_json[:237] + "..."
+        chat_preview = _format_io_chat_preview(event_type, payload, row.get("timezone") or "")
+        items.append({
+            "id": row.get("id"),
+            "device_hash": _short_hash_text(str(row.get("device_id") or "")),
+            "source_client": row.get("source_client") or "",
+            "event_type": event_type,
+            "category": category,
+            "observed_at": _format_dashboard_time(row.get("observed_at")),
+            "timezone": row.get("timezone") or "",
+            "permission_state": row.get("permission_state") or "",
+            "schema_version": int(row.get("schema_version") or 0),
+            "payload_preview": payload_preview,
+            "chat_preview": chat_preview,
+            "chat_integration_enabled": False,
+        })
+    return {
+        "items": items,
+        "category_counts": category_counts,
+        "total": len(items),
+        "note": "这里只展示事件类型、原始输入摘要和加工后预览；当前仍未接入聊天。",
+        "chat_integration_enabled": False,
     }
 
 

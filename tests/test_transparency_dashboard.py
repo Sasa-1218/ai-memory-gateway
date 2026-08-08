@@ -1,0 +1,56 @@
+import pathlib
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+class TransparencyDashboardTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+        cls.html = (ROOT / "templates" / "dashboard.html").read_text(encoding="utf-8")
+        cls.script = (ROOT / "static" / "js" / "dashboard.js").read_text(encoding="utf-8")
+
+    def test_dashboard_exposes_transparency_panels(self):
+        self.assertIn('data-section="memory-extraction"', self.html)
+        self.assertIn('data-section="io-context"', self.html)
+        self.assertIn('id="section-memory-extraction"', self.html)
+        self.assertIn('id="section-io-context"', self.html)
+        self.assertIn('id="memoryExtractionItems"', self.html)
+        self.assertIn('id="ioContextItems"', self.html)
+        self.assertIn('id="ioContextSummary"', self.html)
+        self.assertIn('聊天接入状态', self.html)
+        self.assertIn('如果接入聊天的自然预览', self.script)
+        self.assertIn('loadMemoryExtractionTrail()', self.script)
+        self.assertIn('loadIoContextTrail()', self.script)
+        self.assertIn('/api/memory/extraction/recent', self.script)
+        self.assertIn('/api/io/context/recent', self.script)
+
+    def test_recent_memory_and_io_routes_are_read_only(self):
+        memory_start = self.main_source.index('@app.get("/api/memory/extraction/recent")')
+        memory_end = self.main_source.index('@app.get("/api/io/context/recent")', memory_start)
+        memory_route = self.main_source[memory_start:memory_end]
+        self.assertIn("get_recent_memories_detail", memory_route)
+        self.assertNotIn("save_memory(", memory_route)
+        self.assertNotIn("save_message(", memory_route)
+
+        io_start = self.main_source.index('@app.get("/api/io/context/recent")')
+        io_end = self.main_source.index('@app.get("/api/shadow/mind/status")', io_start)
+        io_route = self.main_source[io_start:io_end]
+        self.assertIn("get_recent_io_context_events", io_route)
+        self.assertNotIn("save_io_context_events(", io_route)
+        self.assertNotIn("save_message(", io_route)
+        self.assertIn("payload_preview", io_route)
+        self.assertIn("chat_preview", io_route)
+        self.assertIn("chat_integration_enabled", io_route)
+
+    def test_recent_routes_stay_under_dashboard_access(self):
+        self.assertIn('"/api/memory/extraction/recent"', self.main_source)
+        self.assertIn('"/api/io/context/recent"', self.main_source)
+        self.assertIn('"/api/memory/extraction/recent"', self.main_source)
+        self.assertIn('"/api/io/context/recent"', self.main_source)
+
+
+if __name__ == "__main__":
+    unittest.main()

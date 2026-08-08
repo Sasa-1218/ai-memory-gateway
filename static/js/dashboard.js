@@ -81,6 +81,10 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(loadSummaryHealth, 60000);
     loadSystemHealth();
     setInterval(loadSystemHealth, 60000);
+    loadMemoryExtractionTrail();
+    setInterval(loadMemoryExtractionTrail, 60000);
+    loadIoContextTrail();
+    setInterval(loadIoContextTrail, 60000);
     // 加载导出统计
     loadExportStats();
 });
@@ -167,6 +171,12 @@ function switchSection(name) {
     }
     if (name === 'experience-cards') {
         loadExperienceCards();
+    }
+    if (name === 'memory-extraction') {
+        loadMemoryExtractionTrail();
+    }
+    if (name === 'io-context') {
+        loadIoContextTrail();
     }
     if (name === 'shadow-mind') {
         loadShadowMind();
@@ -627,11 +637,166 @@ async function loadSystemHealth() {
         }
         ioRow.append(ioName, ioValue);
         items.appendChild(ioRow);
+
+        const ioDetailRow = document.createElement('div');
+        ioDetailRow.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:10px 0;border-top:1px solid var(--border-color);font-size:13px;';
+        const ioDetailHead = document.createElement('div');
+        ioDetailHead.style.cssText = 'display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;';
+        const ioDetailName = document.createElement('span');
+        ioDetailName.textContent = 'IO 最近事件';
+        const ioDetailHint = document.createElement('span');
+        ioDetailHint.style.color = 'var(--text-muted)';
+        ioDetailHint.textContent = '只看类型与状态';
+        ioDetailHead.append(ioDetailName, ioDetailHint);
+
+        const ioDetailBody = document.createElement('div');
+        ioDetailBody.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;';
+        try {
+            const ioResp = await fetch('/api/io/context/recent?limit=4');
+            if (ioResp.ok) {
+                const ioData = await ioResp.json();
+                const ioItems = Array.isArray(ioData.items) ? ioData.items : [];
+                if (ioItems.length) {
+                    ioItems.forEach(item => {
+                        const chip = document.createElement('span');
+                        chip.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border:1px solid var(--border-color);border-radius:999px;font-size:12px;color:var(--text-muted);';
+                        const parts = [
+                            item.event_type || 'unknown',
+                            item.permission_state || 'unknown',
+                            item.observed_at || ''
+                        ].filter(Boolean);
+                        chip.textContent = parts.join(' · ');
+                        ioDetailBody.appendChild(chip);
+                    });
+                } else {
+                    const empty = document.createElement('span');
+                    empty.style.color = 'var(--text-muted)';
+                    empty.textContent = '暂无最近 io 事件';
+                    ioDetailBody.appendChild(empty);
+                }
+            } else {
+                const error = document.createElement('span');
+                error.style.color = 'var(--danger-color, #b4234d)';
+                error.textContent = '最近事件读取失败';
+                ioDetailBody.appendChild(error);
+            }
+        } catch (ioError) {
+            const error = document.createElement('span');
+            error.style.color = 'var(--danger-color, #b4234d)';
+            error.textContent = '最近事件读取失败';
+            ioDetailBody.appendChild(error);
+        }
+
+        ioDetailRow.append(ioDetailHead, ioDetailBody);
+        items.appendChild(ioDetailRow);
     } catch (error) {
         badge.textContent = '读取异常';
         badge.classList.remove('ok');
         badge.classList.add('warn');
         desc.textContent = '系统健康状态读取失败，请稍后刷新。';
+    }
+}
+
+async function loadMemoryExtractionTrail() {
+    const card = document.getElementById('memoryExtractionCard');
+    if (!card) return;
+    const badge = document.getElementById('memoryExtractionBadge');
+    const desc = document.getElementById('memoryExtractionDesc');
+    const items = document.getElementById('memoryExtractionItems');
+    try {
+        const response = await fetch('/api/memory/extraction/recent?limit=10');
+        if (!response.ok) throw new Error('HTTP_' + response.status);
+        const data = await response.json();
+        const list = Array.isArray(data.items) ? data.items : [];
+        badge.classList.remove('ok', 'warn');
+        badge.textContent = list.length ? '最近有写入' : '暂无记录';
+        badge.classList.add(list.length ? 'ok' : 'warn');
+        desc.textContent = list.length
+            ? `最近 ${list.length} 条记忆已写入，合计 ${list.reduce((sum, item) => sum + Number(item.content_chars || 0), 0)} 字；点击卡片可看完整内容预览。`
+            : '当前没有最近记忆提取记录，或记忆提取仍未写入。';
+        items.innerHTML = list.length ? list.map(item => `
+            <details class="card" style="padding:12px; margin-bottom:10px; border:1px solid var(--border-color);">
+                <summary style="cursor:pointer; display:flex; justify-content:space-between; gap:12px; align-items:center; list-style:none;">
+                    <span style="min-width:0;">
+                        <strong>${escapeHtml(item.title || `记忆 #${item.id}`)}</strong>
+                        <span style="margin-left:8px; color:var(--text-muted); font-size:12px;">${escapeHtml(item.created_at || '')}</span>
+                    </span>
+                    <span style="color:var(--text-muted); font-size:12px; white-space:nowrap;">#${Number(item.id)} · 权重 ${Number(item.importance || 0)} · ${item.layer ? `层级 ${Number(item.layer)}` : '未分层'}</span>
+                </summary>
+                <div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:8px; font-size:12px; color:var(--text-muted);">
+                    <span>Session：${escapeHtml(item.source_session || '-')}</span>
+                    <span>${item.is_active ? 'AI 可见' : '已归档'}</span>
+                    <span>${Number(item.content_chars || 0)} 字</span>
+                </div>
+                <div style="white-space:pre-wrap; line-height:1.65; margin-top:10px; color:var(--text-light);">${escapeHtml(item.content || '')}</div>
+            </details>
+        `).join('') : '<div class="inspector-muted">暂无最近记忆提取记录。</div>';
+    } catch (error) {
+        badge.textContent = '读取异常';
+        badge.classList.remove('ok');
+        badge.classList.add('warn');
+        desc.textContent = '记忆提取流水读取失败，请稍后刷新。';
+        items.innerHTML = '';
+    }
+}
+
+async function loadIoContextTrail() {
+    const card = document.getElementById('ioContextCard');
+    if (!card) return;
+    const badge = document.getElementById('ioContextBadge');
+    const desc = document.getElementById('ioContextDesc');
+    const summary = document.getElementById('ioContextSummary');
+    const items = document.getElementById('ioContextItems');
+    try {
+        const response = await fetch('/api/io/context/recent?limit=10');
+        if (!response.ok) throw new Error('HTTP_' + response.status);
+        const data = await response.json();
+        const list = Array.isArray(data.items) ? data.items : [];
+        const counts = data.category_counts || {};
+        badge.classList.remove('ok', 'warn');
+        badge.textContent = list.length ? '最近有事件' : '暂无记录';
+        badge.classList.add(list.length ? 'ok' : 'warn');
+        desc.textContent = list.length
+            ? `最近 ${list.length} 条 io 事件已入库；左边看原始事件摘要，右边看如果接入聊天时的自然预览。`
+            : '当前没有最近 io 事件，或 io 桥接还未收到数据。';
+        const chips = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([category, count]) =>
+            `<span style="display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border:1px solid var(--border-color); border-radius:999px; font-size:12px; color:var(--text-muted);">${escapeHtml(category || 'unknown')} · ${Number(count)}</span>`
+        ).join('');
+        summary.innerHTML = chips ? `<div style="display:flex; flex-wrap:wrap; gap:8px;">${chips}</div>` : '<div class="inspector-muted">暂无类别统计。</div>';
+        items.innerHTML = list.length ? list.map(item => `
+            <article class="card" style="padding:12px; margin-bottom:10px; border:1px solid var(--border-color);">
+                <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+                    <div style="min-width:0;">
+                        <strong>${escapeHtml(item.event_type || 'unknown')}</strong>
+                        <div style="margin-top:4px; color:var(--text-muted); font-size:12px;">
+                            ${escapeHtml(item.observed_at || '')} · ${escapeHtml(item.source_client || '')} · ${escapeHtml(item.permission_state || 'unknown')}
+                        </div>
+                    </div>
+                    <span style="font-size:12px; color:var(--text-muted); white-space:nowrap;">#${Number(item.id)} · ${escapeHtml(item.category || 'unknown')}</span>
+                </div>
+                <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:10px; margin-top:10px;">
+                    <div style="padding:10px; border:1px solid var(--border-color); border-radius:10px; background:var(--bg-card);">
+                        <div style="font-size:12px; color:var(--text-muted); margin-bottom:6px;">原始事件摘要</div>
+                        <div style="white-space:pre-wrap; line-height:1.55; color:var(--text-light); font-size:13px;">${escapeHtml(item.payload_preview || '暂无原始摘要')}</div>
+                        <div style="margin-top:8px; color:var(--text-muted); font-size:12px;">
+                            设备 ${escapeHtml(item.device_hash || '-')}${item.timezone ? ` · 时区 ${escapeHtml(item.timezone)}` : ''}${item.schema_version ? ` · schema v${Number(item.schema_version)}` : ''}
+                        </div>
+                    </div>
+                    <div style="padding:10px; border:1px solid var(--border-color); border-radius:10px; background:var(--bg-card);">
+                        <div style="font-size:12px; color:var(--text-muted); margin-bottom:6px;">如果接入聊天的自然预览</div>
+                        <div style="white-space:pre-wrap; line-height:1.55; color:var(--text-light); font-size:13px;">${escapeHtml(item.chat_preview || '暂无可预览内容')}</div>
+                        <div style="margin-top:8px; color:var(--text-muted); font-size:12px;">当前状态：${item.chat_integration_enabled ? '已接入聊天' : '未接入聊天'}</div>
+                    </div>
+                </div>
+            </article>
+        `).join('') : '<div class="inspector-muted">暂无最近 io 事件。</div>';
+    } catch (error) {
+        badge.textContent = '读取异常';
+        badge.classList.remove('ok');
+        badge.classList.add('warn');
+        desc.textContent = 'IO 数据流读取失败，请稍后刷新。';
+        summary.innerHTML = '';
+        items.innerHTML = '';
     }
 }
 

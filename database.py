@@ -2180,6 +2180,22 @@ async def get_recent_memories(limit: int = 20):
         )
 
 
+async def get_recent_memories_detail(limit: int = 12):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, content, importance, source_session, created_at,
+                   layer, title, is_active, merged_from, event_date
+            FROM memories
+            ORDER BY created_at DESC, id DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+        return [dict(row) for row in rows]
+
+
 async def get_all_memories_count():
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -3074,6 +3090,22 @@ async def get_latest_io_received_at():
     pool = await get_pool()
     async with pool.acquire() as conn:
         return await conn.fetchval("SELECT MAX(received_at) FROM io_context_events")
+
+
+async def get_recent_io_context_events(limit: int = 12):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, device_id, app_instance_id, source_client, event_type,
+                   observed_at, timezone, permission_state, schema_version
+            FROM io_context_events
+            ORDER BY observed_at DESC NULLS LAST, id DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+        return [dict(row) for row in rows]
 
 
 # ============================================================

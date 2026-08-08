@@ -8,6 +8,8 @@ class DashboardAccessAuthTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(main._is_dashboard_access_path("/dashboard"))
         self.assertTrue(main._is_dashboard_access_path("/api/push/status"))
         self.assertTrue(main._is_dashboard_access_path("/api/memories"))
+        self.assertTrue(main._is_dashboard_access_path("/api/memory/extraction/recent"))
+        self.assertTrue(main._is_dashboard_access_path("/api/io/context/recent"))
         self.assertTrue(main._is_dashboard_access_path("/import/text"))
         self.assertTrue(main._is_dashboard_access_path("/export/memories"))
 
