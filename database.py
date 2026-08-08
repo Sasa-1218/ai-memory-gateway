@@ -366,6 +366,20 @@ async def init_tables():
                 updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS operational_health_status (
+                component              TEXT PRIMARY KEY,
+                status                 TEXT NOT NULL DEFAULT 'unknown',
+                consecutive_failures   INTEGER NOT NULL DEFAULT 0,
+                last_success_at         TIMESTAMPTZ,
+                last_failure_at         TIMESTAMPTZ,
+                last_error_code         TEXT NOT NULL DEFAULT '',
+                last_alert_attempt_at   TIMESTAMPTZ,
+                last_alert_at           TIMESTAMPTZ,
+                alert_active            BOOLEAN NOT NULL DEFAULT FALSE,
+                updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
 
         # 重要日期：仅用于主动推送 cooldown bypass，不作为提醒/日历系统
         await conn.execute("""
@@ -2962,6 +2976,104 @@ async def get_summary_health_status(session_id: str) -> dict:
             WHERE session_id = $1
         """, session_id)
         return dict(row) if row else {}
+
+
+async def record_operational_health_failure(
+    component: str,
+    error_code: str,
+    alert_after: int = 2,
+    alert_cooldown_hours: int = 6,
+) -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("""
+                INSERT INTO operational_health_status (component, updated_at)
+                VALUES ($1, NOW())
+                ON CONFLICT (component) DO NOTHING
+            """, str(component)[:80])
+            row = await conn.fetchrow("""
+                SELECT consecutive_failures, last_alert_attempt_at
+                FROM operational_health_status
+                WHERE component = $1
+                FOR UPDATE
+            """, str(component)[:80])
+            failures = int(row["consecutive_failures"] or 0) + 1
+            last_attempt = row["last_alert_attempt_at"]
+            cooldown_ok = (
+                last_attempt is None
+                or last_attempt <= datetime.now(dt_timezone.utc) - timedelta(hours=alert_cooldown_hours)
+            )
+            should_alert = failures >= max(1, int(alert_after)) and cooldown_ok
+            await conn.execute("""
+                UPDATE operational_health_status
+                SET status = 'failing',
+                    consecutive_failures = $2,
+                    last_failure_at = NOW(),
+                    last_error_code = $3,
+                    last_alert_attempt_at = CASE WHEN $4 THEN NOW() ELSE last_alert_attempt_at END,
+                    updated_at = NOW()
+                WHERE component = $1
+            """, str(component)[:80], failures, str(error_code or "unknown")[:100], should_alert)
+            return {"consecutive_failures": failures, "should_alert": should_alert}
+
+
+async def record_operational_health_success(component: str) -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("""
+                INSERT INTO operational_health_status (component, updated_at)
+                VALUES ($1, NOW())
+                ON CONFLICT (component) DO NOTHING
+            """, str(component)[:80])
+            row = await conn.fetchrow("""
+                SELECT consecutive_failures, alert_active
+                FROM operational_health_status
+                WHERE component = $1
+                FOR UPDATE
+            """, str(component)[:80])
+            recovered = bool(row["alert_active"])
+            await conn.execute("""
+                UPDATE operational_health_status
+                SET status = 'healthy',
+                    consecutive_failures = 0,
+                    last_success_at = NOW(),
+                    last_error_code = '',
+                    alert_active = FALSE,
+                    updated_at = NOW()
+                WHERE component = $1
+            """, str(component)[:80])
+            return {"recovered": recovered, "previous_failures": int(row["consecutive_failures"] or 0)}
+
+
+async def mark_operational_health_alert_delivered(component: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE operational_health_status
+            SET last_alert_at = NOW(), alert_active = TRUE, updated_at = NOW()
+            WHERE component = $1
+        """, str(component)[:80])
+
+
+async def list_operational_health_status() -> list:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT component, status, consecutive_failures, last_success_at,
+                   last_failure_at, last_error_code, last_alert_at,
+                   alert_active, updated_at
+            FROM operational_health_status
+            ORDER BY component
+        """)
+        return [dict(row) for row in rows]
+
+
+async def get_latest_io_received_at():
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT MAX(received_at) FROM io_context_events")
 
 
 # ============================================================

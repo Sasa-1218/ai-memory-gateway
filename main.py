@@ -40,7 +40,7 @@ except Exception:
     jwt = None
     RSAAlgorithm = None
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, settle_shadow_mind_rules, get_shadow_mind_a2_events, get_shadow_mind_history, get_latest_normal_turn_message_ids, get_shadow_mind_event_source_messages, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch, get_memories_by_ids_readonly, record_summary_attempt, record_summary_failure, mark_summary_alert_delivered, record_summary_success, get_summary_health_status
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, settle_shadow_mind_rules, get_shadow_mind_a2_events, get_shadow_mind_history, get_latest_normal_turn_message_ids, get_shadow_mind_event_source_messages, save_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch, get_memories_by_ids_readonly, record_summary_attempt, record_summary_failure, mark_summary_alert_delivered, record_summary_success, get_summary_health_status, record_operational_health_failure, record_operational_health_success, mark_operational_health_alert_delivered, list_operational_health_status, get_latest_io_received_at
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from experience_cards import (
     REVIEW_STATUSES,
@@ -217,6 +217,66 @@ async def _record_summary_success_safe(session_id: str):
             f"operation=success error_type={type(monitor_error).__name__}",
             flush=True,
         )
+
+
+HEALTH_COMPONENT_LABELS = {
+    "memory_extraction": "记忆提取",
+    "experience_cards": "经历卡生成",
+    "upstream_chat": "聊天上游",
+    "conversation_storage": "对话保存",
+    "io_ingest": "IO 感知写入",
+}
+
+
+async def _record_operational_failure_safe(component: str, reason_code: str):
+    try:
+        result = await record_operational_health_failure(
+            component,
+            reason_code,
+            SUMMARY_ALERT_AFTER_FAILURES,
+            SUMMARY_ALERT_COOLDOWN_HOURS,
+        )
+        print(
+            "operational_health_failure "
+            f"component={component} reason={reason_code} "
+            f"consecutive={result.get('consecutive_failures', 0)}",
+            flush=True,
+        )
+        if SUMMARY_ALERTS_ENABLED and result.get("should_alert"):
+            label = HEALTH_COMPONENT_LABELS.get(component, component)
+            delivered = await deliver_gateway_system_alert(
+                "网关系统提醒",
+                f"{label}已连续失败 {result.get('consecutive_failures', 0)} 次，"
+                "请打开 Dashboard 查看脱敏错误状态。",
+            )
+            if delivered.get("delivered"):
+                await mark_operational_health_alert_delivered(component)
+    except Exception as monitor_error:
+        print(
+            "operational_health_monitor_failed "
+            f"component={component} operation=failure "
+            f"error_type={type(monitor_error).__name__}",
+            flush=True,
+        )
+
+
+async def _record_operational_success_safe(component: str):
+    try:
+        result = await record_operational_health_success(component)
+        if SUMMARY_ALERTS_ENABLED and result.get("recovered"):
+            label = HEALTH_COMPONENT_LABELS.get(component, component)
+            await deliver_gateway_system_alert(
+                "网关系统恢复",
+                f"{label}已经恢复正常。",
+            )
+    except Exception as monitor_error:
+        print(
+            "operational_health_monitor_failed "
+            f"component={component} operation=success "
+            f"error_type={type(monitor_error).__name__}",
+            flush=True,
+        )
+
 
 def _env_int(key: str, default: int) -> int:
     raw = os.getenv(key)
@@ -2936,7 +2996,7 @@ async def deliver_bark_push(message: str) -> dict:
         }
 
 
-async def deliver_summary_health_alert(message: str) -> dict:
+async def deliver_gateway_system_alert(title: str, message: str) -> dict:
     """Send a separate operational alert without exposing content or secrets."""
     if not BARK_DEVICE_KEY:
         return {
@@ -2947,7 +3007,7 @@ async def deliver_summary_health_alert(message: str) -> dict:
         }
     payload = {
         "device_key": BARK_DEVICE_KEY,
-        "title": "网关摘要提醒",
+        "title": str(title or "网关系统提醒")[:40],
         "body": message,
         "group": f"{BARK_GROUP or 'Rora'} · 系统",
     }
@@ -2994,6 +3054,10 @@ async def deliver_summary_health_alert(message: str) -> dict:
             "error_type": type(alert_error).__name__,
             "http_status": "not_reported",
         }
+
+
+async def deliver_summary_health_alert(message: str) -> dict:
+    return await deliver_gateway_system_alert("网关摘要提醒", message)
 
 
 def _apply_bark_delivery_result(metadata: dict, result: dict) -> dict:
@@ -3561,7 +3625,7 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
     assistant_reasoning: response中assistant的reasoning_content（deepseek thinking mode）
     """
     global _round_counter
-    
+    health_stage = "conversation_storage"
     try:
         shadow_mind_normal_turn_saved = False
         # Debug: 打印存储分支判断依据
@@ -3623,6 +3687,8 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                     await save_message(session_id, "user", user_msg, model)
                     await save_message(session_id, "assistant", assistant_msg, model, metadata=assistant_meta)
                     shadow_mind_normal_turn_saved = True
+        if not skip_conversation_log:
+            await _record_operational_success_safe("conversation_storage")
 
         # Shadow Mind is isolated from conversation persistence and all downstream jobs.
         # Failures here are diagnostic only and must never block memory/summary/card work.
@@ -3645,6 +3711,7 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 )
         
         # 2. 检查是否需要提取记忆
+        health_stage = "memory_extraction"
         if not MEMORY_EXTRACT_ENABLED:
             print(f"⏭️  记忆提取已关闭（MEMORY_EXTRACT_ENABLED=false）")
             return
@@ -3712,9 +3779,14 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         if filtered_memories:
             total = await get_all_memories_count()
             print(f"💾 已保存 {len(filtered_memories)} 条新记忆（过滤了 {len(new_memories) - len(filtered_memories)} 条），总计 {total} 条")
+        await _record_operational_success_safe("memory_extraction")
             
     except Exception as e:
-        print(f"⚠️  后台记忆处理失败: {e}")
+        print(f"⚠️  后台记忆处理失败: {type(e).__name__}")
+        await _record_operational_failure_safe(
+            health_stage,
+            f"exception_{type(e).__name__}",
+        )
 
 
 # ============================================================
@@ -3944,14 +4016,22 @@ async def io_context_events(request: Request):
     if len(events) > 100:
         return JSONResponse(status_code=413, content={"error": "too_many_events", "max_events": 100})
 
-    result = await save_io_context_events(
-        device_id=device_id,
-        app_instance_id=_io_request_text(body.get("app_instance_id") or body.get("appInstanceId"), 128),
-        source_client=_io_request_text(body.get("source_client"), 64) or "io",
-        timezone_name=_io_request_text(body.get("timezone"), 64),
-        schema_version=_io_schema_version(body.get("schema_version")),
-        events=events,
-    )
+    try:
+        result = await save_io_context_events(
+            device_id=device_id,
+            app_instance_id=_io_request_text(body.get("app_instance_id") or body.get("appInstanceId"), 128),
+            source_client=_io_request_text(body.get("source_client"), 64) or "io",
+            timezone_name=_io_request_text(body.get("timezone"), 64),
+            schema_version=_io_schema_version(body.get("schema_version")),
+            events=events,
+        )
+        await _record_operational_success_safe("io_ingest")
+    except Exception as io_error:
+        await _record_operational_failure_safe(
+            "io_ingest",
+            f"exception_{type(io_error).__name__}",
+        )
+        raise
     print(
         "📱 io感知事件入库: "
         f"device_hash={_short_hash_text(device_id)} | "
@@ -4196,41 +4276,74 @@ async def chat_completions(request: Request):
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
     else:
-        async with httpx.AsyncClient(timeout=300) as client:
-            response = await client.post(API_BASE_URL, headers=headers, json=body)
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                response = await client.post(API_BASE_URL, headers=headers, json=body)
+        except Exception as upstream_error:
+            await _record_operational_failure_safe(
+                "upstream_chat",
+                f"exception_{type(upstream_error).__name__}",
+            )
+            raise
             
-            if response.status_code == 200:
-                resp_data = response.json()
-                _log_usage_diag("NonStream", resp_data.get("usage") if isinstance(resp_data, dict) else None)
-                assistant_msg = ""
-                assistant_tool_calls = None
-                assistant_reasoning = None
-                try:
-                    msg_obj = resp_data["choices"][0]["message"]
-                    assistant_msg = msg_obj.get("content") or ""
-                    if msg_obj.get("tool_calls"):
-                        assistant_tool_calls = msg_obj["tool_calls"]
-                        print(f"🔧 Response 包含 {len(assistant_tool_calls)} 个工具调用")
-                    if msg_obj.get("reasoning_content"):
-                        assistant_reasoning = msg_obj["reasoning_content"]
-                        print(f"🧠 Response 包含 reasoning_content ({len(assistant_reasoning)}字符)")
-                except (KeyError, IndexError):
-                    pass
-                
-                if MEMORY_ENABLED and (user_message or tool_messages):
-                    asyncio.create_task(
-                        process_memories_background(session_id, user_message, assistant_msg, model, 
-                                                    context_messages=original_messages, skip_conversation_log=skip_conversation_log,
-                                                    tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
-                                                    assistant_reasoning=assistant_reasoning)
-                    )
-                
-                return JSONResponse(status_code=200, content=resp_data)
-            else:
-                return JSONResponse(status_code=response.status_code, content=response.json())
+        if response.status_code == 200:
+            await _record_operational_success_safe("upstream_chat")
+            resp_data = response.json()
+            _log_usage_diag("NonStream", resp_data.get("usage") if isinstance(resp_data, dict) else None)
+            assistant_msg = ""
+            assistant_tool_calls = None
+            assistant_reasoning = None
+            try:
+                msg_obj = resp_data["choices"][0]["message"]
+                assistant_msg = msg_obj.get("content") or ""
+                if msg_obj.get("tool_calls"):
+                    assistant_tool_calls = msg_obj["tool_calls"]
+                    print(f"🔧 Response 包含 {len(assistant_tool_calls)} 个工具调用")
+                if msg_obj.get("reasoning_content"):
+                    assistant_reasoning = msg_obj["reasoning_content"]
+                    print(f"🧠 Response 包含 reasoning_content ({len(assistant_reasoning)}字符)")
+            except (KeyError, IndexError):
+                pass
+
+            if MEMORY_ENABLED and (user_message or tool_messages):
+                asyncio.create_task(
+                    process_memories_background(session_id, user_message, assistant_msg, model,
+                                                context_messages=original_messages, skip_conversation_log=skip_conversation_log,
+                                                tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
+                                                assistant_reasoning=assistant_reasoning)
+                )
+
+            return JSONResponse(status_code=200, content=resp_data)
+        await _record_operational_failure_safe(
+            "upstream_chat",
+            f"upstream_http_{response.status_code}",
+        )
+        return JSONResponse(status_code=response.status_code, content=response.json())
 
 
 async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None):
+    try:
+        async for chunk in _stream_and_capture_impl(
+            headers,
+            body,
+            session_id,
+            user_message,
+            model,
+            original_messages,
+            skip_conversation_log,
+            tool_messages,
+            cache_diag,
+        ):
+            yield chunk
+    except Exception as upstream_error:
+        await _record_operational_failure_safe(
+            "upstream_chat",
+            f"exception_{type(upstream_error).__name__}",
+        )
+        raise
+
+
+async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None):
     """流式响应 + 捕获完整回复（原始字节透传，确保SSE格式和thinking数据完整）"""
     full_response = []
     full_reasoning = []
@@ -4251,6 +4364,11 @@ async def stream_and_capture(headers: dict, body: dict, session_id: str, user_me
             
             error_body_parts = []
             is_error = response.status_code != 200
+            if is_error:
+                await _record_operational_failure_safe(
+                    "upstream_chat",
+                    f"upstream_http_{response.status_code}",
+                )
             
             async for chunk in response.aiter_bytes():
                 # 原始字节直接透传给客户端
@@ -4306,6 +4424,8 @@ async def stream_and_capture(headers: dict, body: dict, session_id: str, user_me
                             pass
     
     assistant_msg = "".join(full_response)
+    if not is_error:
+        await _record_operational_success_safe("upstream_chat")
     assistant_reasoning = "".join(full_reasoning) if full_reasoning else None
     assistant_tool_calls = list(accumulated_tool_calls.values()) if accumulated_tool_calls else None
     
@@ -4453,6 +4573,47 @@ async def api_summary_health():
         "total_rounds": total_rounds,
         "unprocessed_rounds": unprocessed_rounds,
         "ready_rounds": ready_rounds,
+    }
+
+
+@app.get("/api/system/health")
+async def api_system_health():
+    """统一脱敏健康状态，不读取或返回业务正文。"""
+    rows = {row["component"]: row for row in await list_operational_health_status()}
+    components = []
+    for component, label in HEALTH_COMPONENT_LABELS.items():
+        row = rows.get(component, {})
+        components.append({
+            "component": component,
+            "label": label,
+            "status": row.get("status") or "unknown",
+            "consecutive_failures": int(row.get("consecutive_failures", 0) or 0),
+            "last_success_at": _format_dashboard_time(row.get("last_success_at")),
+            "last_failure_at": _format_dashboard_time(row.get("last_failure_at")),
+            "last_error_code": row.get("last_error_code") or "",
+            "last_alert_at": _format_dashboard_time(row.get("last_alert_at")),
+            "alert_active": bool(row.get("alert_active", False)),
+        })
+    latest_io = await get_latest_io_received_at()
+    io_age_minutes = None
+    io_stale = False
+    if latest_io:
+        io_age_minutes = max(
+            0,
+            int((datetime.now(timezone.utc) - latest_io).total_seconds() // 60),
+        )
+        io_stale = io_age_minutes > 90
+    return {
+        "components": components,
+        "io": {
+            "last_received_at": _format_dashboard_time(latest_io),
+            "age_minutes": io_age_minutes,
+            "stale": io_stale,
+            "stale_after_minutes": 90,
+        },
+        "warning_count": sum(
+            1 for item in components if item["status"] == "failing"
+        ) + (1 if io_stale else 0),
     }
 
 
@@ -4908,6 +5069,7 @@ async def _experience_card_auto_tick() -> dict:
     until_id = int(messages[-1]["id"])
     if not is_basic_experience_candidate(messages):
         await finish_experience_auto_batch(session_id, until_id, True)
+        await _record_operational_success_safe("experience_cards")
         print(
             "[experience-auto] skipped_basic "
             f"message_count={len(messages)} until_id={until_id}"
@@ -4924,6 +5086,7 @@ async def _experience_card_auto_tick() -> dict:
         if result.get("status") != "succeeded":
             raise RuntimeError("auto_generation_not_succeeded")
         await finish_experience_auto_batch(session_id, until_id, True)
+        await _record_operational_success_safe("experience_cards")
         print(
             "[experience-auto] succeeded "
             f"message_count={len(messages)} card_count={len(result.get('card_ids') or [])}"
@@ -4931,6 +5094,10 @@ async def _experience_card_auto_tick() -> dict:
         return result
     except Exception as exc:
         await finish_experience_auto_batch(session_id, until_id, False)
+        await _record_operational_failure_safe(
+            "experience_cards",
+            f"exception_{type(exc).__name__}",
+        )
         print(f"[experience-auto] failed error_type={type(exc).__name__}")
         return {"status": "failed", "reason": type(exc).__name__}
 

@@ -79,6 +79,8 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(loadPushStatus, 60000);
     loadSummaryHealth();
     setInterval(loadSummaryHealth, 60000);
+    loadSystemHealth();
+    setInterval(loadSystemHealth, 60000);
     // 加载导出统计
     loadExportStats();
 });
@@ -571,6 +573,65 @@ async function loadSummaryHealth() {
         badge.classList.remove('ok');
         badge.classList.add('warn');
         desc.textContent = '摘要状态读取失败，请稍后刷新。';
+    }
+}
+
+async function loadSystemHealth() {
+    const card = document.getElementById('systemHealthCard');
+    if (!card) return;
+    const badge = document.getElementById('systemHealthBadge');
+    const desc = document.getElementById('systemHealthDesc');
+    const items = document.getElementById('systemHealthItems');
+    try {
+        const response = await fetch('/api/system/health');
+        if (!response.ok) throw new Error('HTTP_' + response.status);
+        const data = await response.json();
+        const warnings = Number(data.warning_count || 0);
+        badge.classList.remove('ok', 'warn');
+        badge.textContent = warnings ? '需查看' : '正常';
+        badge.classList.add(warnings ? 'warn' : 'ok');
+        desc.textContent = warnings
+            ? '发现 ' + warnings + ' 项异常；连续失败达到阈值时会发送限频 Bark 提醒。'
+            : '聊天、保存、记忆、经历卡和 IO 状态均无已知异常。';
+        items.replaceChildren();
+        (data.components || []).forEach(component => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-top:1px solid var(--border-color);font-size:13px;';
+            const name = document.createElement('span');
+            name.textContent = component.label || component.component;
+            const value = document.createElement('span');
+            if (component.status === 'failing') {
+                value.textContent = '连续失败 ' + component.consecutive_failures + ' 次 · '
+                    + (component.last_error_code || 'unknown');
+                value.style.color = 'var(--danger-color, #b4234d)';
+            } else if (component.status === 'healthy') {
+                value.textContent = '正常 · 最近成功 ' + (component.last_success_at || '-');
+            } else {
+                value.textContent = '尚无运行记录';
+            }
+            row.append(name, value);
+            items.appendChild(row);
+        });
+        const ioRow = document.createElement('div');
+        ioRow.style.cssText = 'display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-top:1px solid var(--border-color);font-size:13px;';
+        const ioName = document.createElement('span');
+        ioName.textContent = 'IO 数据新鲜度';
+        const ioValue = document.createElement('span');
+        if (data.io?.last_received_at) {
+            ioValue.textContent = data.io.stale
+                ? '可能中断 · 已 ' + data.io.age_minutes + ' 分钟未收到'
+                : '正常 · ' + data.io.age_minutes + ' 分钟前收到';
+            if (data.io.stale) ioValue.style.color = 'var(--danger-color, #b4234d)';
+        } else {
+            ioValue.textContent = '尚无数据';
+        }
+        ioRow.append(ioName, ioValue);
+        items.appendChild(ioRow);
+    } catch (error) {
+        badge.textContent = '读取异常';
+        badge.classList.remove('ok');
+        badge.classList.add('warn');
+        desc.textContent = '系统健康状态读取失败，请稍后刷新。';
     }
 }
 

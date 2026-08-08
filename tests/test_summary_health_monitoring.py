@@ -23,6 +23,15 @@ class SummaryHealthStructureTests(unittest.TestCase):
         self.assertNotIn("content", schema)
         self.assertNotIn("prompt", schema)
 
+    def test_operational_health_table_is_metadata_only(self):
+        start = self.database_source.index("CREATE TABLE IF NOT EXISTS operational_health_status")
+        end = self.database_source.index('""")', start)
+        schema = self.database_source[start:end]
+        self.assertIn("component", schema)
+        self.assertIn("consecutive_failures", schema)
+        self.assertNotIn("content", schema)
+        self.assertNotIn("payload", schema)
+
     def test_dashboard_route_is_read_only(self):
         start = self.main_source.index('async def api_summary_health')
         end = self.main_source.index('@app.', start)
@@ -66,6 +75,17 @@ class SummaryHealthAlertTests(unittest.TestCase):
         helper = self.main_source[start:end]
         self.assertIn("except Exception as monitor_error:", helper)
         self.assertIn("summary_health_monitor_failed", helper)
+
+    def test_expected_components_are_integrated(self):
+        for component in (
+            "memory_extraction",
+            "experience_cards",
+            "upstream_chat",
+            "conversation_storage",
+            "io_ingest",
+        ):
+            self.assertIn(f'"{component}"', self.main_source)
+        self.assertIn('@app.get("/api/system/health")', self.main_source)
 
 
 if __name__ == "__main__":
