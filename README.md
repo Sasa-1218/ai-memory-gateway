@@ -30,6 +30,14 @@ Give your AI long-term memory. A lightweight proxy gateway that adds a memory la
 - [记忆系统设计](docs/memory-design.md)
 注意：主动推送的调度由外部 cron 服务管理，不会随代码部署而自动更改。
 
+## 🛰️ 运维与监控
+
+- `leaves.sasanrorauniverse.com`：Dashboard 网页入口，走 Cloudflare Access
+- `treehouse.sasanrorauniverse.com`：网关后端入口，给客户端和 API 调用使用
+- 外部监控：使用 `UptimeRobot` 监控 `https://treehouse.sasanrorauniverse.com/`，只负责判断网关是否还活着
+- Dashboard 私有接口（如 `api/system/health`、`api/summary/health`、`api/push/status`）不做外部监控
+- 腾讯云主机安全的异常登录白名单已单独配置，用来减少自己登录服务器时的短信告警
+
 ## 🏗️ 架构
 
 ```
