@@ -3246,6 +3246,22 @@ def _io_text_value(value, max_len: int = 80) -> str:
     return text if len(text) <= max_len else text[: max_len - 3] + "..."
 
 
+def _io_has_value(value) -> bool:
+    if value in (None, ""):
+        return False
+    if isinstance(value, dict):
+        return any(_io_has_value(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_io_has_value(item) for item in value)
+    return True
+
+
+def _io_add_part(parts: list[str], text: str) -> None:
+    text = str(text or "").strip()
+    if text and text not in parts:
+        parts.append(text)
+
+
 def _io_nested_text(payload: dict, keys: tuple[str, ...], max_len: int = 80) -> str:
     current = payload
     for key in keys:
@@ -3287,12 +3303,21 @@ def _format_io_chat_preview(event_type: str, payload: dict, timezone_name: str =
     if event_type == "time.now":
         value = payload.get("local_time") or payload.get("now") or payload.get("timestamp") or payload.get("observed_at") or payload.get("time") or ""
         if value:
-            parts.append(f"本地时间：{_io_text_value(value, 48)}")
+            _io_add_part(parts, f"时间字段：{_io_text_value(value, 48)}")
         if "charging" in payload:
-            parts.append("正在充电" if payload.get("charging") is True else "未充电")
+            if payload.get("charging") is True:
+                _io_add_part(parts, "正在充电")
+            elif payload.get("charging") is False:
+                _io_add_part(parts, "未充电")
+        battery_level = payload.get("battery_level")
+        if battery_level not in (None, ""):
+            _io_add_part(parts, f"电量：{_io_text_value(battery_level, 32)}%")
         user_state = _io_text_value(payload.get("user_state"), 48)
-        if user_state:
-            parts.append(f"设备状态：{user_state}")
+        if user_state and user_state.lower() not in ("default", "unknown", "normal"):
+            _io_add_part(parts, f"设备状态：{user_state}")
+        motion_state = _io_text_value(payload.get("motion_state"), 48)
+        if motion_state:
+            _io_add_part(parts, f"活动状态：{motion_state}")
         now_playing = payload.get("now_playing")
         if isinstance(now_playing, dict):
             title = _io_text_value(now_playing.get("title"), 48)
@@ -3301,63 +3326,92 @@ def _format_io_chat_preview(event_type: str, payload: dict, timezone_name: str =
             if title or artist:
                 song = " - ".join([part for part in (title, artist) if part])
                 suffix = f"（{playback}）" if playback else ""
-                parts.append(f"媒体：{song}{suffix}")
+                _io_add_part(parts, f"媒体：{song}{suffix}")
     elif event_type == "location.update":
         location = (
             _io_location_text(payload.get("location"))
             or _io_text_value(payload.get("address"), 120)
             or _io_text_value(payload.get("label"), 120)
+            or _io_text_value(payload.get("place_label"), 120)
             or _io_text_value(payload.get("city"), 80)
+            or _io_text_value(payload.get("locality"), 80)
         )
         lat = payload.get("latitude")
         lng = payload.get("longitude")
         if location:
-            parts.append(f"当前位置：{location}")
+            _io_add_part(parts, f"位置字段：{location}")
         elif lat is not None and lng is not None:
-            parts.append(f"当前位置：{lat}, {lng}")
-        if timezone_name:
-            parts.append(f"时区：{timezone_name}")
+            _io_add_part(parts, "位置字段：已收到坐标")
+        if timezone_name and not parts:
+            _io_add_part(parts, f"仅收到时区：{timezone_name}")
     elif event_type == "weather.current":
         weather = payload.get("weather") or payload.get("summary") or payload.get("condition") or payload.get("description") or ""
         temp = payload.get("temperature") or payload.get("temp") or _io_nested_text(payload, ("temperature", "value"))
         if weather:
-            parts.append(f"天气：{_io_text_value(weather, 80)}")
+            _io_add_part(parts, f"天气：{_io_text_value(weather, 80)}")
         if temp != "":
-            parts.append(f"温度：{_io_text_value(temp, 32)}")
+            _io_add_part(parts, f"温度：{_io_text_value(temp, 32)}")
+        apparent = payload.get("apparent_temperature")
+        if apparent not in (None, ""):
+            _io_add_part(parts, f"体感：{_io_text_value(apparent, 32)}")
+        humidity = payload.get("humidity")
+        if humidity not in (None, ""):
+            _io_add_part(parts, f"湿度：{_io_text_value(humidity, 32)}")
     elif event_type == "motion.state":
         motion = payload.get("motion") or payload.get("state") or payload.get("activity") or ""
         if motion:
-            parts.append(f"活动状态：{_io_text_value(motion, 80)}")
+            _io_add_part(parts, f"活动状态：{_io_text_value(motion, 80)}")
     elif event_type == "health.steps":
-        steps = payload.get("steps") or payload.get("count") or payload.get("value") or ""
+        steps = payload.get("step_count") or payload.get("steps") or payload.get("count") or payload.get("value") or ""
         if steps != "":
-            parts.append(f"步数：{_io_text_value(steps, 32)}")
+            _io_add_part(parts, f"步数：{_io_text_value(steps, 32)}")
     elif event_type == "health.sleep":
         sleep = payload.get("sleep") or payload.get("duration") or payload.get("value") or ""
         if sleep:
-            parts.append(f"睡眠：{_io_text_value(sleep, 120)}")
+            _io_add_part(parts, f"睡眠：{_io_text_value(sleep, 120)}")
+        asleep_minutes = payload.get("asleep_minutes")
+        if asleep_minutes not in (None, ""):
+            _io_add_part(parts, f"睡眠时长：{_io_text_value(asleep_minutes, 32)}分钟")
+        for key, label in (("deep_minutes", "深睡"), ("rem_minutes", "REM"), ("core_minutes", "核心睡眠")):
+            value = payload.get(key)
+            if value not in (None, ""):
+                _io_add_part(parts, f"{label}：{_io_text_value(value, 32)}分钟")
     elif event_type == "health.workout":
         workout = payload.get("workout") or payload.get("activity") or payload.get("summary") or ""
         if workout:
-            parts.append(f"运动：{_io_text_value(workout, 120)}")
+            _io_add_part(parts, f"运动：{_io_text_value(workout, 120)}")
+        workout_type = payload.get("workout_type")
+        duration = payload.get("duration_min")
+        count_today = payload.get("count_today")
+        if workout_type:
+            _io_add_part(parts, f"运动类型：{_io_text_value(workout_type, 48)}")
+        if duration not in (None, ""):
+            _io_add_part(parts, f"运动时长：{_io_text_value(duration, 32)}分钟")
+        if count_today not in (None, ""):
+            _io_add_part(parts, f"今日运动记录：{_io_text_value(count_today, 32)}次")
     elif event_type == "health.vitals":
-        heart = payload.get("heart_rate") or payload.get("hr") or payload.get("pulse") or ""
-        blood = payload.get("blood_oxygen") or payload.get("spo2") or ""
+        heart = payload.get("current_heart_rate") or payload.get("heart_rate") or payload.get("hr") or payload.get("pulse") or ""
+        resting_heart = payload.get("resting_heart_rate")
+        blood = payload.get("oxygen_saturation_pct") or payload.get("blood_oxygen") or payload.get("spo2") or ""
         if heart != "":
-            parts.append(f"心率：{_io_text_value(heart, 32)}")
+            _io_add_part(parts, f"心率：{_io_text_value(heart, 32)}")
+        if resting_heart not in (None, ""):
+            _io_add_part(parts, f"静息心率：{_io_text_value(resting_heart, 32)}")
         if blood != "":
-            parts.append(f"血氧：{_io_text_value(blood, 32)}")
+            _io_add_part(parts, f"血氧：{_io_text_value(blood, 32)}")
     elif event_type == "device.battery":
         level = payload.get("level") or payload.get("battery_level") or payload.get("value") or ""
         charging = payload.get("charging")
         if level != "":
-            parts.append(f"电量：{_io_text_value(level, 32)}%")
+            _io_add_part(parts, f"电量：{_io_text_value(level, 32)}%")
         if charging is True:
-            parts.append("充电中")
+            _io_add_part(parts, "充电中")
         elif charging is False:
-            parts.append("未充电")
+            _io_add_part(parts, "未充电")
 
     if not parts:
+        if payload and not _io_has_value(payload):
+            return "已接收该类感知事件，但本次字段为空，暂时没有可用于聊天的有效数值。"
         return "已接收该类感知事件，但这些字段暂时没有转换成聊天预览。"
     return "；".join(parts)
 

@@ -70,6 +70,10 @@ class TransparencyDashboardTests(unittest.TestCase):
     def test_io_preview_handles_common_perception_fields(self):
         for field in ("local_time", "now_playing", "charging", "user_state", "city"):
             self.assertIn(field, self.main_source)
+        self.assertIn('user_state.lower() not in ("default", "unknown", "normal")', self.main_source)
+        self.assertIn("已接收该类感知事件，但本次字段为空", self.main_source)
+        self.assertIn("位置字段：", self.main_source)
+        self.assertIn("仅收到时区：", self.main_source)
         self.assertIn("已接收该类感知事件，但这些字段暂时没有转换成聊天预览。", self.main_source)
         self.assertIn("overflow-wrap:anywhere", self.script)
 
