@@ -64,25 +64,40 @@ class ShadowMindRulesTests(unittest.TestCase):
         self.assertEqual(state["valence"], BASE_STATE["valence"])
         self.assertEqual(state["connection"], BASE_STATE["connection"])
 
-    def test_elapsed_does_not_reduce_connection_or_concern(self):
-        state = dict(BASE_STATE, connection=83, concern=31, tension=60, hurt=50)
+    def test_elapsed_only_changes_time_explainable_fields(self):
+        state = dict(
+            BASE_STATE,
+            curiosity=62,
+            share=59,
+            warmth=81,
+            valence=-30,
+            arousal=76,
+            connection=83,
+            concern=31,
+            tension=60,
+            hurt=50,
+        )
         start = datetime(2026, 8, 1, 0, tzinfo=timezone.utc)
         result, deltas, reason, _ = settle_elapsed(state, start, start + timedelta(hours=12))
         self.assertEqual(result["connection"], 83)
         self.assertEqual(result["concern"], 31)
-        self.assertLess(result["tension"], 60)
-        self.assertLess(result["hurt"], 50)
+        self.assertEqual(result["tension"], 60)
+        self.assertEqual(result["hurt"], 50)
+        self.assertEqual(result["curiosity"], 62)
+        self.assertEqual(result["share"], 59)
+        self.assertEqual(result["warmth"], 81)
+        self.assertEqual(result["valence"], -30)
+        self.assertEqual(result["arousal"], 76)
         self.assertGreater(result["longing"], state["longing"])
         self.assertNotIn("connection", deltas)
         self.assertEqual(reason, "elapsed_time_settlement")
 
-    def test_elapsed_brings_mechanical_saturation_back_toward_baseline(self):
-        state = dict(BASE_STATE, curiosity=100, share=100, warmth=100, valence=100, arousal=100)
+    def test_normal_chat_does_not_change_arousal_without_a_real_signal(self):
+        state = dict(BASE_STATE, arousal=80)
         start = datetime(2026, 8, 1, 0, tzinfo=timezone.utc)
-        result, deltas, _, _ = settle_elapsed(state, start, start + timedelta(hours=6))
-        for field in ("curiosity", "share", "warmth", "valence", "arousal"):
-            self.assertLess(result[field], state[field])
-            self.assertLess(deltas[field], 0)
+        result, deltas, _, _ = settle_normal_chat(state, start, recent_turns=1, new_burst=True)
+        self.assertEqual(result["arousal"], 80)
+        self.assertNotIn("arousal", deltas)
 
     def test_short_elapsed_time_does_not_write_a_change(self):
         start = datetime(2026, 8, 1, tzinfo=timezone.utc)
@@ -106,6 +121,14 @@ class ShadowMindRulesTests(unittest.TestCase):
             "correction_detected", "boundary_mentioned", "conflict_possible",
             "repair_possible", "silence_elapsed",
         })
+
+    def test_elapsed_does_not_synthesize_topics_or_conflict_recovery(self):
+        state = dict(BASE_STATE, curiosity=80, share=75, tension=66, hurt=57)
+        start = datetime(2026, 8, 1, 0, tzinfo=timezone.utc)
+        result, deltas, _, _ = settle_elapsed(state, start, start + timedelta(hours=8))
+        for field in ("curiosity", "share", "tension", "hurt"):
+            self.assertEqual(result[field], state[field])
+            self.assertNotIn(field, deltas)
 
 
 class ShadowMindIsolationTests(unittest.TestCase):
@@ -153,6 +176,25 @@ class ShadowMindIsolationTests(unittest.TestCase):
         self.assertIn("SELECT COUNT(*) FROM conversations", block)
         self.assertIn("role = 'user'", block)
         self.assertNotIn("SELECT COUNT(*) FROM shadow_mind_event_log", block)
+
+    def test_dashboard_uses_readable_primary_states_and_hides_legacy_metrics(self):
+        dashboard_source = (ROOT / "static/js/dashboard.js").read_text(encoding="utf-8")
+        self.assertIn("const shadowMindCoreFields = ['longing', 'warmth', 'curiosity', 'share', 'concern']", dashboard_source)
+        self.assertIn("const shadowMindContextFields = ['connection', 'tension', 'hurt', 'fatigue']", dashboard_source)
+        self.assertNotIn("const shadowMindEmotionFields", dashboard_source)
+        self.assertIn("想你", dashboard_source)
+        self.assertIn("精力负荷", dashboard_source)
+        self.assertIn("最近没有可解释的变化", dashboard_source)
+        self.assertNotIn("原因代码：", dashboard_source)
+
+    def test_dashboard_has_twelve_petal_model_without_inventing_unimplemented_states(self):
+        dashboard_source = (ROOT / "static/js/dashboard.js").read_text(encoding="utf-8")
+        html_source = (ROOT / "templates/dashboard.html").read_text(encoding="utf-8")
+        for label in ("想你", "亲密", "好奇", "分享", "惦记", "陪伴", "无聊", "不安", "委屈", "吃醋", "反思", "责任"):
+            self.assertIn(label, dashboard_source)
+        self.assertEqual(dashboard_source.count("{field: null, key:"), 4)
+        self.assertIn("shadowMindFlower", html_source)
+        self.assertIn("浅色花瓣尚未启用", html_source)
 
 
 if __name__ == "__main__":

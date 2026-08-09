@@ -97,11 +97,10 @@ def settle_normal_chat(
     recent_turns: int = 1,
     new_burst: bool = True,
 ) -> tuple[dict, dict, str, float]:
-    """Settle only facts known from timing and interaction density."""
+    """Settle only timing and interaction-density signals we can explain."""
     current = normalize_state(state)
     recent_turns = max(1, int(recent_turns or 1))
-    arousal_target = BASE_STATE["arousal"] + min(24, max(0, recent_turns - 1) * 2)
-    changes = {"arousal": _toward(current["arousal"], arousal_target, 2)}
+    changes = {}
 
     if new_burst:
         changes["longing"] = -min(8, max(2, round(current["longing"] * 0.20)))
@@ -135,24 +134,8 @@ def settle_elapsed(
     elapsed_hours = elapsed_minutes // 60
     changes = {
         "longing": _toward(current["longing"], DRIVE_SOFT_CEIL["longing"], min(8, elapsed_hours)),
-        "curiosity": _toward(
-            current["curiosity"],
-            min(DRIVE_SOFT_CEIL["curiosity"], BASE_STATE["curiosity"] + elapsed_hours // 3),
-            min(6, max(1, elapsed_hours)),
-        ),
-        "share": _toward(
-            current["share"],
-            min(DRIVE_SOFT_CEIL["share"], BASE_STATE["share"] + elapsed_hours // 4),
-            min(6, max(1, elapsed_hours)),
-        ),
-        "warmth": _toward(current["warmth"], BASE_STATE["warmth"], min(4, max(1, elapsed_hours))),
-        "valence": _toward(current["valence"], BASE_STATE["valence"], min(6, max(1, elapsed_hours))),
-        "arousal": _toward(current["arousal"], BASE_STATE["arousal"], min(8, elapsed_minutes // 45)),
-        # Silence can ease elevated tension/hurt, but never creates or resolves them.
-        "tension": _toward(current["tension"], min(current["tension"], BASE_STATE["tension"]), min(6, elapsed_minutes // 90)),
-        "hurt": _toward(current["hurt"], min(current["hurt"], BASE_STATE["hurt"]), min(3, elapsed_minutes // 240)),
     }
-    # Connection and concern intentionally do not change from silence alone.
+    # Time alone never creates a topic, resolves tension/hurt, or changes closeness.
     fatigue_step = min(6, max(1, elapsed_minutes // 120))
     target = _fatigue_target(now) + _fatigue_load(recent_turns)
     changes["fatigue"] = max(-fatigue_step, min(fatigue_step, target - current["fatigue"]))

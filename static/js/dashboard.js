@@ -193,21 +193,46 @@ function switchSection(name) {
 // Shadow Mind Phase A2（规则观察层）
 // ============================================
 const shadowMindLabels = {
-    longing: '想靠近', curiosity: '想继续了解', share: '想主动分享', warmth: '亲昵柔软', concern: '基于事实的关切',
-    valence: '愉快 / 难受', arousal: '激动程度', connection: '亲近感', tension: '紧张感', hurt: '被刺痛感', fatigue: '疲惫感'
+    longing: '想你', curiosity: '好奇', share: '分享', warmth: '亲密', concern: '惦记',
+    connection: '陪伴感', tension: '不安', hurt: '委屈', fatigue: '精力负荷',
+    valence: '心情基线（旧）', arousal: '活动强度（旧）'
 };
-const shadowMindDriveFields = ['longing', 'curiosity', 'share', 'warmth', 'concern'];
-const shadowMindEmotionFields = ['valence', 'arousal', 'connection', 'tension', 'hurt', 'fatigue'];
+const shadowMindDescriptions = {
+    longing: '一段时间没有互动时会缓慢累积；开始新聊天后会回落。',
+    curiosity: '只有出现明确未结束话题时才应变化；当前规则不靠静默猜测。',
+    share: '有具体新鲜内容想说时才应变化；当前规则不靠静默猜测。',
+    warmth: '亲昵、柔软的关系底色；不会因一条普通消息突然跳动。',
+    concern: '只基于明确说过的事实，不推断健康、危险或被冷落。',
+    connection: '陪伴的稳定底色；不会因几小时没聊天就下降。',
+    tension: '仅在未来有明确冲突信号时才改变；时间不会替问题判定为解决。',
+    hurt: '仅在未来有明确被刺痛的互动时才改变；不是对 Sasa 状态的判断。',
+    fatigue: '按上海时间和连续互动密度估算的 Rora 精力负荷，不是 Sasa 的疲惫。'
+};
+const shadowMindCoreFields = ['longing', 'warmth', 'curiosity', 'share', 'concern'];
+const shadowMindContextFields = ['connection', 'tension', 'hurt', 'fatigue'];
+const shadowMindPetals = [
+    {field: 'longing', label: '想你'}, {field: 'warmth', label: '亲密'},
+    {field: 'curiosity', label: '好奇'}, {field: 'share', label: '分享'},
+    {field: 'concern', label: '惦记'}, {field: 'connection', label: '陪伴'},
+    {field: null, key: 'boredom', label: '无聊'}, {field: 'tension', label: '不安'},
+    {field: 'hurt', label: '委屈'}, {field: null, key: 'jealousy', label: '吃醋'},
+    {field: null, key: 'reflection', label: '反思'}, {field: null, key: 'responsibility', label: '责任'}
+];
 const shadowMindReasonLabels = {
     normal_chat_completed: '完成一轮正常聊天',
-    normal_chat_burst_started: '新一轮聊天开始，想靠近感被回应后回落',
-    normal_chat_density_updated: '连续聊天密度变化，更新互动能量',
-    elapsed_time_settlement: '按经过时间结算',
+    normal_chat_burst_started: '开始新一轮聊天：想你被回应，稍微回落',
+    normal_chat_density_updated: '连续聊天达到统计档位：更新精力负荷',
+    elapsed_time_settlement: '经过一段静默：只结算想你与精力负荷',
     elapsed_below_change_threshold: '尚未达到变化阈值',
-    correction_detected: '出现明确纠正，紧张或刺痛可能上升',
-    boundary_mentioned: '出现边界表达，只按明确范围记录',
-    conflict_possible: '可能存在冲突信号，但不推断关系恶化',
-    repair_possible: '出现修复互动，紧张可能回落'
+    correction_detected: '出现明确纠正：当前版本尚未自动调整状态',
+    boundary_mentioned: '出现边界表达：当前版本尚未自动调整状态',
+    conflict_possible: '出现可能的冲突信号：当前版本尚未自动调整状态',
+    repair_possible: '出现修复互动：不自动判定问题已解决'
+};
+const shadowMindEventTypeLabels = {
+    normal_chat: '正常聊天', silence_elapsed: '时间结算', user_replied: '用户回复',
+    warm_exchange: '温暖互动', topic_continued: '话题延续', correction_detected: '明确纠正',
+    boundary_mentioned: '边界表达', conflict_possible: '冲突信号', repair_possible: '修复信号'
 };
 
 const ioEventTypeLabels = {
@@ -285,18 +310,88 @@ function shadowMindSparkline(field, history) {
     return `<svg class="shadow-sparkline" viewBox="0 0 100 30" preserveAspectRatio="none" aria-label="最近变化曲线"><polyline points="${points}"></polyline></svg>`;
 }
 
-function renderShadowMindMetrics(containerId, fields, state, history) {
+function latestShadowMindChange(field, events) {
+    const event = (events || []).find(item => Object.prototype.hasOwnProperty.call(item.deltas || {}, field));
+    if (!event) return '最近没有可解释的变化';
+    const delta = Number(event.deltas[field]);
+    const reason = shadowMindReasonLabels[event.reason_code] || event.reason_code || '规则结算';
+    return `最近 ${delta > 0 ? '+' : ''}${delta}：${reason}`;
+}
+
+function shadowMindPetalDetail(petal, state, events) {
+    const box = document.getElementById('shadowMindPetalDetail');
+    if (!box) return;
+    if (!petal.field) {
+        box.innerHTML = `<b>${petal.label}</b><span>尚未启用。当前不会根据普通聊天、静默或模糊语气猜测这类状态；等有明确、可解释的规则来源后再开放。</span>`;
+        return;
+    }
+    const value = Number(state?.[petal.field] ?? 0);
+    box.innerHTML = `<b>${petal.label} ${value}</b><span>${shadowMindDescriptions[petal.field]} ${latestShadowMindChange(petal.field, events)}</span>`;
+}
+
+function renderShadowMindFlower(state, events) {
+    const box = document.getElementById('shadowMindFlower');
+    const rhythm = document.getElementById('shadowMindRhythm');
+    if (!box) return;
+    const strongest = shadowMindPetals
+        .filter(petal => petal.field)
+        .map(petal => ({...petal, value: Number(state?.[petal.field] ?? 0)}))
+        .sort((left, right) => right.value - left.value)[0];
+    const petals = shadowMindPetals.map((petal, index) => {
+        const labelAngle = index * 30 - 90;
+        const radians = labelAngle * Math.PI / 180;
+        const value = petal.field ? Math.max(0, Math.min(100, Number(state?.[petal.field] ?? 0))) : 0;
+        const length = petal.field ? 46 + value * 0.56 : 46;
+        const tip = 168 - length;
+        const labelRadius = 145;
+        const labelX = 180 + Math.cos(radians) * labelRadius;
+        const labelY = 180 + Math.sin(radians) * labelRadius + 4;
+        const key = petal.field || petal.key;
+        const active = petal.field ? 'is-active' : 'is-reserved';
+        const selected = strongest && strongest.field === petal.field ? 'is-selected' : '';
+        return `<g class="shadow-mind-petal ${active} ${selected}" data-petal-key="${key}" role="button" tabindex="0" aria-label="${petal.label}${petal.field ? `，强度 ${value}` : '，尚未启用'}">
+            <path class="shadow-mind-petal-shape" d="M180 168 C164 145 163 ${tip + 16} 180 ${tip} C197 ${tip + 16} 196 145 180 168Z" transform="rotate(${index * 30} 180 180)"></path>
+            <text class="shadow-mind-petal-label" x="${labelX.toFixed(1)}" y="${labelY.toFixed(1)}">${petal.label}</text>
+        </g>`;
+    }).join('');
+    box.innerHTML = `<svg class="shadow-mind-flower-svg" viewBox="0 0 360 360" role="img" aria-label="十二瓣 Shadow Mind 状态图">
+        <circle class="shadow-mind-flower-ring" cx="180" cy="180" r="104"></circle>
+        ${petals}
+        <circle class="shadow-mind-flower-core" cx="180" cy="180" r="25"></circle>
+        <text class="shadow-mind-flower-core-label" x="180" y="176">此刻</text>
+        <text class="shadow-mind-flower-core-value" x="180" y="195">${strongest ? strongest.label : '等待'}</text>
+    </svg>`;
+    if (rhythm) rhythm.textContent = `精力负荷 ${Number(state?.fatigue ?? 0)} · 上海时间与互动密度`;
+    const choose = key => {
+        const petal = shadowMindPetals.find(item => (item.field || item.key) === key);
+        if (!petal) return;
+        box.querySelectorAll('.shadow-mind-petal').forEach(node => node.classList.toggle('is-selected', node.dataset.petalKey === key));
+        shadowMindPetalDetail(petal, state, events);
+    };
+    box.querySelectorAll('.shadow-mind-petal').forEach(node => {
+        node.addEventListener('click', () => choose(node.dataset.petalKey));
+        node.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                choose(node.dataset.petalKey);
+            }
+        });
+    });
+    shadowMindPetalDetail(strongest || shadowMindPetals[0], state, events);
+}
+
+function renderShadowMindMetrics(containerId, fields, state, history, events) {
     const box = document.getElementById(containerId);
     if (!box) return;
     box.innerHTML = fields.map(field => {
         const value = Number(state?.[field] ?? 0);
-        const minimum = field === 'valence' ? -100 : 0;
-        const width = Math.max(0, Math.min(100, field === 'valence' ? (value + 100) / 2 : value));
+        const width = Math.max(0, Math.min(100, value));
         return `<article class="card shadow-mind-metric">
             <div class="shadow-mind-metric-head"><span>${shadowMindLabels[field]}</span><b>${value}</b></div>
             <div class="shadow-mind-meter"><i style="width:${width}%"></i></div>
             ${shadowMindSparkline(field, history)}
-            <small>${minimum} ～ 100</small>
+            <small class="shadow-mind-description">${shadowMindDescriptions[field] || ''}</small>
+            <small class="shadow-mind-last-change">${latestShadowMindChange(field, events)}</small>
         </article>`;
     }).join('');
 }
@@ -331,8 +426,8 @@ function renderShadowMindEvents(events) {
         return `<article class="shadow-mind-event">
             <div><b>${escapeHtml(reason)}</b><span>${escapeHtml(formatConvTime(event.computed_at || event.created_at))}</span></div>
             <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:6px; color:var(--text-muted); font-size:12px;">
-                <span>事件：${escapeHtml(event.event_type || '-')}</span>
-                <span>原因代码：${escapeHtml(event.reason_code || '-')}</span>
+                <span>事件：${escapeHtml(shadowMindEventTypeLabels[event.event_type] || event.event_type || '-')}</span>
+                <span>原因：${escapeHtml(reason)}</span>
                 <span>置信度：${Number(event.confidence ?? 0)}</span>
             </div>
             <p>${escapeHtml(formatShadowMindDeltas(event.deltas))}</p>
@@ -348,8 +443,9 @@ async function loadShadowMind() {
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || '读取失败');
         const state = data.shadow_mind_state?.state || {};
-        renderShadowMindMetrics('shadowMindDrives', shadowMindDriveFields, state, data.history || []);
-        renderShadowMindMetrics('shadowMindEmotions', shadowMindEmotionFields, state, data.history || []);
+        renderShadowMindFlower(state, data.event_log || []);
+        renderShadowMindMetrics('shadowMindDrives', shadowMindCoreFields, state, data.history || [], data.event_log || []);
+        renderShadowMindMetrics('shadowMindEmotions', shadowMindContextFields, state, data.history || [], data.event_log || []);
         renderShadowMindEvents(data.event_log || []);
         if (notice) {
             notice.className = 'card shadow-mind-notice' + (data.enabled ? ' enabled' : ' disabled');

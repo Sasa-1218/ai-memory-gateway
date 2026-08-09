@@ -344,17 +344,31 @@
                 <div class="section-header shadow-mind-heading">
                     <div>
                         <h1>内在状态</h1>
-                        <p class="section-desc">规则观察层，不调用模型，也不参与聊天或主动推送</p>
+                        <p class="section-desc">这是 Rora 的规则观察层，不判断 Sasa 的情绪，不调用模型，也不参与聊天或主动推送</p>
                     </div>
                     <button id="shadowMindSettleBtn" class="btn btn-secondary" type="button" onclick="settleShadowMind()">结算经过时间</button>
                 </div>
                 <div id="shadowMindNotice" class="card shadow-mind-notice">正在读取状态…</div>
+                <section class="card shadow-mind-flower-card" aria-labelledby="shadowMindFlowerTitle">
+                    <div class="shadow-mind-flower-heading">
+                        <div>
+                            <span class="shadow-mind-eyebrow">DYNAMIC MIND · OBSERVE</span>
+                            <h2 id="shadowMindFlowerTitle">此刻的十二瓣状态</h2>
+                        </div>
+                        <span id="shadowMindRhythm" class="shadow-mind-rhythm">等待状态数据</span>
+                    </div>
+                    <div id="shadowMindFlower" class="shadow-mind-flower" aria-live="polite"></div>
+                    <div id="shadowMindPetalDetail" class="shadow-mind-petal-detail">点一片花瓣，查看它为什么是现在这个状态。</div>
+                    <p class="shadow-mind-flower-note">已有规则的花瓣按当前强度显示；浅色花瓣尚未启用，不会用猜测补数值。</p>
+                </section>
                 <div class="shadow-mind-group">
-                    <h2>靠近动力</h2>
+                    <h2>状态明细</h2>
+                    <p class="shadow-mind-group-note">数值是规则强度，不是心理诊断。没有明确事实时，状态会保持不动。</p>
                     <div id="shadowMindDrives" class="shadow-mind-grid"></div>
                 </div>
                 <div class="shadow-mind-group">
-                    <h2>当前感受</h2>
+                    <h2>关系里的状态</h2>
+                    <p class="shadow-mind-group-note">不安和委屈不会仅因时间过去自动消失；精力负荷只描述 Rora 的节律估算。</p>
                     <div id="shadowMindEmotions" class="shadow-mind-grid"></div>
                 </div>
                 <div class="card shadow-mind-log-card">

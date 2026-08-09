@@ -1633,9 +1633,35 @@ body {
 .shadow-mind-notice { padding: 14px 16px; margin-bottom: 20px; color: var(--text-muted); }
 .shadow-mind-notice.enabled { border-left: 3px solid var(--success, #66a985); }
 .shadow-mind-notice.disabled { border-left: 3px solid var(--warning, #d69b54); }
+.shadow-mind-flower-card { padding: 20px; margin: 0 0 24px; overflow: hidden; }
+.shadow-mind-flower-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.shadow-mind-eyebrow { display: block; margin-bottom: 5px; color: var(--text-muted); font-size: 10px; letter-spacing: 1.3px; }
+.shadow-mind-flower-heading h2 { margin: 0; font-size: 20px; }
+.shadow-mind-rhythm { flex: 0 0 auto; max-width: 260px; padding: 6px 10px; border: 1px solid var(--border-light); border-radius: 999px; color: var(--text-light); background: var(--bg-card); font-size: 12px; line-height: 1.35; text-align: center; }
+.shadow-mind-flower { max-width: 540px; margin: 4px auto 0; }
+.shadow-mind-flower-svg { display: block; width: min(100%, 460px); height: auto; margin: 0 auto; overflow: visible; }
+.shadow-mind-flower-ring { fill: none; stroke: var(--border-light); stroke-width: 1; stroke-dasharray: 2 7; }
+.shadow-mind-petal { cursor: pointer; outline: none; }
+.shadow-mind-petal-shape { fill: var(--border-light); stroke: transparent; stroke-width: 1.5; transform-origin: center; transition: fill 180ms ease, stroke 180ms ease, filter 180ms ease; }
+.shadow-mind-petal.is-active .shadow-mind-petal-shape { fill: color-mix(in srgb, var(--primary) 55%, var(--card)); }
+.shadow-mind-petal.is-reserved .shadow-mind-petal-shape { fill: color-mix(in srgb, var(--border) 52%, var(--card)); opacity: .85; }
+.shadow-mind-petal:hover .shadow-mind-petal-shape,
+.shadow-mind-petal:focus .shadow-mind-petal-shape,
+.shadow-mind-petal.is-selected .shadow-mind-petal-shape { fill: var(--primary); stroke: var(--primary-dark); filter: drop-shadow(0 4px 6px color-mix(in srgb, var(--primary) 30%, transparent)); }
+.shadow-mind-petal-label { fill: var(--text-light); font-size: 11px; font-weight: 600; text-anchor: middle; pointer-events: none; }
+.shadow-mind-petal.is-selected .shadow-mind-petal-label { fill: var(--primary-dark); }
+.shadow-mind-flower-core { fill: var(--card); stroke: var(--border-light); stroke-width: 2; }
+.shadow-mind-flower-core-label,
+.shadow-mind-flower-core-value { fill: var(--text-light); text-anchor: middle; pointer-events: none; }
+.shadow-mind-flower-core-label { font-size: 10px; letter-spacing: 1.2px; }
+.shadow-mind-flower-core-value { fill: var(--primary-dark); font-size: 13px; font-weight: 700; }
+.shadow-mind-petal-detail { display: grid; gap: 4px; max-width: 640px; margin: -10px auto 0; padding: 12px 14px; border-top: 1px solid var(--border-light); color: var(--text-light); font-size: 13px; line-height: 1.55; }
+.shadow-mind-petal-detail b { color: var(--primary-dark); font-size: 14px; }
+.shadow-mind-flower-note { max-width: 640px; margin: 11px auto 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
 .shadow-mind-group { margin: 22px 0; }
 .shadow-mind-group h2,
 .shadow-mind-log-head h2 { margin: 0 0 12px; font-size: 17px; }
+.shadow-mind-group-note { margin: -5px 0 12px; color: var(--text-muted); font-size: 13px; line-height: 1.55; }
 .shadow-mind-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
 .shadow-mind-metric { padding: 15px; min-width: 0; }
 .shadow-mind-metric-head b { font-size: 22px; color: var(--primary); }
@@ -1645,6 +1671,8 @@ body {
 .shadow-sparkline polyline { fill: none; stroke: var(--primary); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .shadow-sparkline-empty { height: 34px; display: flex; align-items: center; color: var(--text-muted); font-size: 12px; }
 .shadow-mind-metric small { color: var(--text-muted); }
+.shadow-mind-description { display: block; min-height: 38px; margin-top: 7px; line-height: 1.5; }
+.shadow-mind-last-change { display: block; margin-top: 6px; padding-top: 7px; border-top: 1px solid var(--border-light); color: var(--text-light) !important; line-height: 1.45; }
 .shadow-mind-log-card { padding: 16px; margin-top: 24px; }
 .shadow-mind-log-head span { color: var(--text-muted); font-size: 13px; }
 .shadow-mind-event { padding: 13px 0; border-top: 1px solid var(--border); }
@@ -1655,6 +1683,8 @@ body {
 .shadow-mind-event footer { flex-wrap: wrap; }
 @media (max-width: 680px) {
     .shadow-mind-heading { align-items: flex-start; flex-direction: column; }
+    .shadow-mind-flower-heading { align-items: flex-start; flex-direction: column; }
+    .shadow-mind-rhythm { max-width: none; }
     .shadow-mind-grid { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 430px) {
