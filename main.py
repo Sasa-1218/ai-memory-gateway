@@ -3262,6 +3262,60 @@ def _io_add_part(parts: list[str], text: str) -> None:
         parts.append(text)
 
 
+def _io_number_text(value, max_decimals: int = 1) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return _io_text_value(value, 32)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.{max_decimals}f}".rstrip("0").rstrip(".")
+
+
+def _io_percent_text(value) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return _io_text_value(value, 32)
+    if 0 <= number <= 1:
+        number *= 100
+    return f"{round(number)}%"
+
+
+def _io_motion_text(value) -> str:
+    state_labels = {
+        "still": "静止",
+        "stationary": "静止",
+        "walking": "步行",
+        "running": "跑步",
+        "cycling": "骑行",
+        "automotive": "乘车",
+        "driving": "乘车",
+        "unknown": "",
+    }
+    confidence_labels = {
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+    }
+    if isinstance(value, dict):
+        state = str(value.get("state") or value.get("motion") or value.get("activity") or "").strip()
+        confidence = str(value.get("confidence") or "").strip()
+        parts = []
+        label = state_labels.get(state.lower(), state)
+        if label:
+            parts.append(label)
+        confidence_label = confidence_labels.get(confidence.lower(), confidence)
+        if confidence_label:
+            parts.append(f"置信度{confidence_label}")
+        return "，".join(parts)
+    return _io_text_value(value, 80)
+
+
 def _io_nested_text(payload: dict, keys: tuple[str, ...], max_len: int = 80) -> str:
     current = payload
     for key in keys:
@@ -3311,11 +3365,11 @@ def _format_io_chat_preview(event_type: str, payload: dict, timezone_name: str =
                 _io_add_part(parts, "未充电")
         battery_level = payload.get("battery_level")
         if battery_level not in (None, ""):
-            _io_add_part(parts, f"电量：{_io_text_value(battery_level, 32)}%")
+            _io_add_part(parts, f"电量：{_io_percent_text(battery_level)}")
         user_state = _io_text_value(payload.get("user_state"), 48)
         if user_state and user_state.lower() not in ("default", "unknown", "normal"):
             _io_add_part(parts, f"设备状态：{user_state}")
-        motion_state = _io_text_value(payload.get("motion_state"), 48)
+        motion_state = _io_motion_text(payload.get("motion_state"))
         if motion_state:
             _io_add_part(parts, f"活动状态：{motion_state}")
         now_playing = payload.get("now_playing")
@@ -3350,17 +3404,17 @@ def _format_io_chat_preview(event_type: str, payload: dict, timezone_name: str =
         if weather:
             _io_add_part(parts, f"天气：{_io_text_value(weather, 80)}")
         if temp != "":
-            _io_add_part(parts, f"温度：{_io_text_value(temp, 32)}")
+            _io_add_part(parts, f"温度：{_io_number_text(temp)}°C")
         apparent = payload.get("apparent_temperature")
         if apparent not in (None, ""):
-            _io_add_part(parts, f"体感：{_io_text_value(apparent, 32)}")
+            _io_add_part(parts, f"体感：{_io_number_text(apparent)}°C")
         humidity = payload.get("humidity")
         if humidity not in (None, ""):
-            _io_add_part(parts, f"湿度：{_io_text_value(humidity, 32)}")
+            _io_add_part(parts, f"湿度：{_io_percent_text(humidity)}")
     elif event_type == "motion.state":
-        motion = payload.get("motion") or payload.get("state") or payload.get("activity") or ""
+        motion = payload.get("motion_state") or payload.get("motion") or payload.get("state") or payload.get("activity") or ""
         if motion:
-            _io_add_part(parts, f"活动状态：{_io_text_value(motion, 80)}")
+            _io_add_part(parts, f"活动状态：{_io_motion_text(motion)}")
     elif event_type == "health.steps":
         steps = payload.get("step_count") or payload.get("steps") or payload.get("count") or payload.get("value") or ""
         if steps != "":
@@ -3403,7 +3457,7 @@ def _format_io_chat_preview(event_type: str, payload: dict, timezone_name: str =
         level = payload.get("level") or payload.get("battery_level") or payload.get("value") or ""
         charging = payload.get("charging")
         if level != "":
-            _io_add_part(parts, f"电量：{_io_text_value(level, 32)}%")
+            _io_add_part(parts, f"电量：{_io_percent_text(level)}")
         if charging is True:
             _io_add_part(parts, "充电中")
         elif charging is False:

@@ -74,6 +74,10 @@ class TransparencyDashboardTests(unittest.TestCase):
         self.assertIn("已接收该类感知事件，但本次字段为空", self.main_source)
         self.assertIn("位置字段：", self.main_source)
         self.assertIn("仅收到时区：", self.main_source)
+        self.assertIn("def _io_percent_text", self.main_source)
+        self.assertIn("def _io_motion_text", self.main_source)
+        self.assertIn('"still": "静止"', self.main_source)
+        self.assertIn("电量：{_io_percent_text", self.main_source)
         self.assertIn("已接收该类感知事件，但这些字段暂时没有转换成聊天预览。", self.main_source)
         self.assertIn("overflow-wrap:anywhere", self.script)
 
