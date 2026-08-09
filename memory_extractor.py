@@ -11,6 +11,7 @@ import os
 import json
 import httpx
 from typing import List, Dict
+from urllib.parse import urlparse
 
 API_KEY = os.getenv("API_KEY", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
@@ -45,13 +46,20 @@ def get_memory_config():
 
 def _apply_memory_thinking_option(payload: Dict) -> None:
     raw = _runtime_config_value("MEMORY_API_THINKING")
+    base_url = _runtime_config_value("MEMORY_API_BASE_URL")
+    model = _runtime_config_value("MEMORY_MODEL").lower()
+    host = (urlparse(base_url).hostname or "").lower()
+    is_official_deepseek_v4 = host == "api.deepseek.com" and model.startswith("deepseek-v4-")
+    if not raw and is_official_deepseek_v4:
+        raw = "false"
     if not raw:
         return
     lowered = raw.lower()
+
     if lowered in ("false", "0", "no", "off"):
-        payload["thinking"] = False
+        payload["thinking"] = {"type": "disabled"} if is_official_deepseek_v4 else False
     elif lowered in ("true", "1", "yes", "on"):
-        payload["thinking"] = True
+        payload["thinking"] = {"type": "enabled"} if is_official_deepseek_v4 else True
     else:
         payload["thinking"] = raw
 

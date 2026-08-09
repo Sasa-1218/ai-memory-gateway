@@ -83,6 +83,31 @@ class MemoryExtractorConfigTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(captured["json"]["thinking"], False)
         self.assertEqual(captured["headers"]["Authorization"], "Bearer memory-key")
 
+    def test_official_deepseek_v4_uses_object_thinking_format(self):
+        memory_extractor.MEMORY_API_BASE_URL = "https://api.deepseek.com/chat/completions"
+        memory_extractor.MEMORY_MODEL = "deepseek-v4-flash"
+
+        for configured, expected in (
+            ("", {"type": "disabled"}),
+            ("false", {"type": "disabled"}),
+            ("true", {"type": "enabled"}),
+        ):
+            with self.subTest(configured=configured):
+                memory_extractor.MEMORY_API_THINKING = configured
+                payload = {}
+                memory_extractor._apply_memory_thinking_option(payload)
+                self.assertEqual(payload["thinking"], expected)
+
+    def test_non_deepseek_provider_keeps_boolean_thinking_format(self):
+        memory_extractor.MEMORY_API_BASE_URL = "https://memory.example/v1/chat/completions"
+        memory_extractor.MEMORY_MODEL = "deepseek-v4-flash"
+        memory_extractor.MEMORY_API_THINKING = "false"
+        payload = {}
+
+        memory_extractor._apply_memory_thinking_option(payload)
+
+        self.assertIs(payload["thinking"], False)
+
 
 if __name__ == "__main__":
     unittest.main()

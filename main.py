@@ -51,7 +51,7 @@ from experience_cards import (
     is_basic_experience_candidate,
     validate_generated_cards,
 )
-from memory_extractor import extract_memories, score_memories, _apply_memory_thinking_option
+from memory_extractor import extract_memories, score_memories, get_memory_config, _apply_memory_thinking_option
 from memory_inspector import (
     build_injection_preview,
     lexical_score,
@@ -3500,6 +3500,25 @@ def _extract_usage_tokens(data: dict) -> tuple[int, int, int]:
     return max(0, prompt_tokens), max(0, completion_tokens), max(0, total_tokens)
 
 
+def _extract_chat_completion_text(data: dict) -> str:
+    choice = (data.get("choices") or [{}])[0] if isinstance(data, dict) else {}
+    message = choice.get("message") if isinstance(choice, dict) else {}
+    content = message.get("content") if isinstance(message, dict) else ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content") or ""
+                if text:
+                    parts.append(str(text))
+            elif item:
+                parts.append(str(item))
+        return "\n".join(parts)
+    return str(content or "")
+
+
 def _estimate_shadow_decision_cost_usd(prompt_tokens: int, completion_tokens: int) -> float:
     cost = (
         prompt_tokens * PUSH_DECISION_COST_INPUT_PER_MILLION
@@ -5535,29 +5554,32 @@ async def consolidate_memories_for_date_range(start_date, end_date):
     prompt = CONSOLIDATION_PROMPT.format(fragments=fragments_text)
     
     # 使用独立记忆模型配置，避免混用聊天主接口。
-    consolidation_model = MEMORY_MODEL
-    memory_url = get_memory_api_base_url()
-    memory_key = get_memory_api_key()
-    if not memory_url or not memory_key or not consolidation_model:
-        print("⚠️ 整理记忆配置缺失: memory_config_missing")
+    memory_config, missing = get_memory_config()
+    if missing:
+        print(f"⚠️ 整理记忆配置缺失: memory_config_missing missing={','.join(missing)}")
         return {"status": "error", "error": "memory_config_missing"}
+    consolidation_model = memory_config["model"]
+    memory_url = memory_config["base_url"]
+    memory_key = memory_config["api_key"]
     
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             # 最多重试2次（应对429限流）
             last_error = None
             for attempt in range(3):
+                payload = {
+                    "model": consolidation_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 3000
+                }
+                _apply_memory_thinking_option(payload)
                 response = await client.post(
                     memory_url,
                     headers={
                         "Authorization": f"Bearer {memory_key}",
                         "Content-Type": "application/json"
                     },
-                    json={
-                        "model": consolidation_model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 2000
-                    }
+                    json=payload
                 )
 
                 if response.status_code == 429:
@@ -5579,7 +5601,18 @@ async def consolidate_memories_for_date_range(start_date, end_date):
                 return {"status": "error", "error": f"API调用失败: {last_error}"}
 
             data = response.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            content = _extract_chat_completion_text(data).strip()
+            choice = (data.get("choices") or [{}])[0] if isinstance(data, dict) else {}
+            finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+            prompt_tokens, completion_tokens, total_tokens = _extract_usage_tokens(data)
+            if not content:
+                print(
+                    "⚠️ 整理记忆模型返回空内容: "
+                    f"finish_reason={finish_reason or 'not_reported'} "
+                    f"prompt_tokens={prompt_tokens} completion_tokens={completion_tokens} total_tokens={total_tokens}",
+                    flush=True,
+                )
+                return {"status": "error", "error": "memory_consolidation_empty_response"}
             
             # 解析 JSON（三层容错）
             json_match = re.search(r'\[[\s\S]*\]', content)
@@ -5599,17 +5632,19 @@ async def consolidate_memories_for_date_range(start_date, end_date):
                         except json.JSONDecodeError as e:
                             # 方案3：让 AI 重新格式化
                             print(f"⚠️ JSON解析失败，尝试让AI修复: {e}")
+                            fix_payload = {
+                                "model": consolidation_model,
+                                "messages": [{"role": "user", "content": f"请修复以下JSON的语法错误，只输出修复后的JSON数组，不要其他内容：\n{json_str[:2000]}"}],
+                                "max_tokens": 2000
+                            }
+                            _apply_memory_thinking_option(fix_payload)
                             fix_resp = await client.post(
                                 memory_url,
                                 headers={
                                     "Authorization": f"Bearer {memory_key}",
                                     "Content-Type": "application/json"
                                 },
-                                json={
-                                    "model": consolidation_model,
-                                    "messages": [{"role": "user", "content": f"请修复以下JSON的语法错误，只输出修复后的JSON数组，不要其他内容：\n{json_str[:2000]}"}],
-                                    "max_tokens": 2000
-                                }
+                                json=fix_payload
                             )
                             if fix_resp.status_code == 200:
                                 fix_content = fix_resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
