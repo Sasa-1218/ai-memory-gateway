@@ -3325,7 +3325,12 @@ def db_row_to_message(row: dict) -> dict:
     meta_str = row.get("metadata")
     if meta_str:
         try:
-            meta = _json.loads(meta_str)
+            meta = _json.loads(meta_str) if isinstance(meta_str, str) else meta_str
+            if not isinstance(meta, dict):
+                meta = {}
+            # user原始多模态content优先于纯文字content列
+            if row["role"] == "user" and isinstance(meta.get("multimodal_content"), list):
+                msg["content"] = meta["multimodal_content"]
             # assistant 带 tool_calls
             if "tool_calls" in meta:
                 msg["tool_calls"] = meta["tool_calls"]
