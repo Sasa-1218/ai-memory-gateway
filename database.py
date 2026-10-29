@@ -3356,7 +3356,7 @@ async def export_all_conversations():
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT session_id, role, content, model, created_at
+            SELECT session_id, role, content, model, metadata, created_at
             FROM conversations
             ORDER BY session_id, created_at
         """)
@@ -3366,6 +3366,7 @@ async def export_all_conversations():
                 'role': r['role'],
                 'content': r['content'],
                 'model': r['model'] or '',
+                'metadata': r['metadata'],
                 'created_at': r['created_at'].isoformat() if r['created_at'] else None,
             }
             for r in rows
@@ -3376,7 +3377,7 @@ async def import_conversations(records: list):
     """
     导入对话记录（自动去重）
     
-    records: [{ session_id, role, content, model?, created_at? }, ...]
+    records: [{ session_id, role, content, model?, metadata?, created_at? }, ...]
     按 session_id + role + created_at 三元组去重，已存在的跳过。
     返回 (导入数量, 跳过数量)
     """
@@ -3392,7 +3393,18 @@ async def import_conversations(records: list):
             role = r.get('role')
             content = r.get('content')
             
-            if not all([session_id, role, content]):
+            if not session_id or not role:
+                continue
+            metadata = r.get('metadata')
+            # 允许图片-only消息：content可以为空，只要metadata中带有多模态content。
+            has_multimodal = False
+            if metadata:
+                try:
+                    parsed_metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+                    has_multimodal = isinstance(parsed_metadata, dict) and isinstance(parsed_metadata.get('multimodal_content'), list)
+                except Exception:
+                    has_multimodal = False
+            if not content and not has_multimodal:
                 continue
             
             model = r.get('model', '')
@@ -3419,14 +3431,14 @@ async def import_conversations(records: list):
                     continue
                 
                 await conn.execute("""
-                    INSERT INTO conversations (session_id, role, content, model, created_at)
-                    VALUES ($1, $2, $3, $4, $5)
-                """, session_id, role, content, model, created_at)
+                    INSERT INTO conversations (session_id, role, content, model, metadata, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                """, session_id, role, content, model, metadata, created_at)
             else:
                 await conn.execute("""
-                    INSERT INTO conversations (session_id, role, content, model)
-                    VALUES ($1, $2, $3, $4)
-                """, session_id, role, content, model)
+                    INSERT INTO conversations (session_id, role, content, model, metadata)
+                    VALUES ($1, $2, $3, $4, $5)
+                """, session_id, role, content, model, metadata)
             
             imported += 1
         
