@@ -4451,7 +4451,11 @@ async def chat_completions(request: Request):
     
     # ---------- 检测是否应跳过对话存储 ----------
     # 客户端通过header显式声明（如标题生成等辅助请求）
-    skip_conversation_log = request.headers.get("X-Skip-Conversation-Log", "").lower() == "true"
+    debug_fresh_session = request.headers.get("X-Debug-Fresh-Session", "").lower() == "true"
+    skip_conversation_log = (
+        request.headers.get("X-Skip-Conversation-Log", "").lower() == "true"
+        or debug_fresh_session
+    )
     
     # ---------- 提取用户最新消息 ----------
     user_message = ""
@@ -4482,8 +4486,22 @@ async def chat_completions(request: Request):
         "session_hash": _short_hash_text(session_id),
     }
     
+    # ---------- 临时干净测试模式 ----------
+    # 仅使用客户端本次请求，不读取正式 DB 历史、不注入网关记忆、不写回对话。
+    if debug_fresh_session:
+        body["messages"] = copy.deepcopy(messages)
+        cache_diag.update({
+            "mode": "debug_fresh",
+            "session_hash": _short_hash_text(session_id),
+        })
+        print(
+            f"🧪 临时干净会话: client_messages={len(messages)} | "
+            "db_history=off | memory_injection=off | conversation_log=off",
+            flush=True,
+        )
+
     # ---------- 分区缓存模式 ----------
-    if CACHE_PARTITION_ENABLED:
+    elif CACHE_PARTITION_ENABLED:
         active_sid = get_active_session_id()
         if active_sid:
             session_id = active_sid
