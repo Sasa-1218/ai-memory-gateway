@@ -1142,6 +1142,33 @@ def _multimodal_user_metadata(content) -> str | None:
     return json.dumps({"multimodal_content": content}, ensure_ascii=False)
 
 
+def _multimodal_diag(content) -> dict:
+    """Return a payload-safe summary of multimodal content for diagnostics."""
+    if isinstance(content, str):
+        return {"kind": "str", "chars": len(content), "blocks": []}
+    if not isinstance(content, list):
+        return {"kind": type(content).__name__, "blocks": []}
+    blocks = []
+    for block in content:
+        if not isinstance(block, dict):
+            blocks.append({"type": type(block).__name__})
+            continue
+        item = {"type": str(block.get("type", ""))}
+        if block.get("type") in ("image_url", "input_image"):
+            raw = block.get("image_url")
+            url = raw.get("url") if isinstance(raw, dict) else raw
+            if isinstance(url, str):
+                if url.startswith("data:"):
+                    scheme = "data"
+                elif url.startswith(("http://", "https://")):
+                    scheme = "http"
+                else:
+                    scheme = "other"
+                item.update({"image_scheme": scheme, "image_chars": len(url)})
+        blocks.append(item)
+    return {"kind": "list", "blocks": blocks}
+
+
 def _format_summary_message_time(msg: dict) -> str:
     raw = msg.get("created_at")
     if not raw:
@@ -4434,6 +4461,7 @@ async def chat_completions(request: Request):
             content = msg.get("content", "")
             user_content = copy.deepcopy(content)
             user_message = _extract_text_content(content)
+            print(f"🖼️ inbound_user_multimodal={_multimodal_diag(content)}", flush=True)
             break
     
     # ---------- 构建 system prompt ----------
@@ -4586,6 +4614,10 @@ async def chat_completions(request: Request):
         _strip_cache_control(body.get("messages", []))
     cache_diag["sent_breakpoints"] = _count_cache_breakpoints(body.get("messages", []))
     _log_cache_build_diag(cache_diag)
+    for _diag_msg in reversed(body.get("messages", [])):
+        if _diag_msg.get("role") == "user":
+            print(f"🖼️ outbound_user_multimodal={_multimodal_diag(_diag_msg.get('content'))}", flush=True)
+            break
     
     # ---------- 转发请求 ----------
     headers = {
