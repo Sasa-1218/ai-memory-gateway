@@ -116,5 +116,55 @@ class MultimodalMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(save.await_count, 2)
 
 
+class ConversationBackupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_import_allows_image_only_message_with_metadata(self):
+        image_only = IMAGE_CONTENT[1:]
+        metadata = json.dumps({"multimodal_content": image_only})
+
+        class FakeConn:
+            def __init__(self):
+                self.executed = []
+
+            async def fetchrow(self, *args):
+                return None
+
+            async def execute(self, query, *args):
+                self.executed.append((query, args))
+
+        class AcquireContext:
+            def __init__(self, conn):
+                self.conn = conn
+
+            async def __aenter__(self):
+                return self.conn
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class FakePool:
+            def __init__(self, conn):
+                self.conn = conn
+
+            def acquire(self):
+                return AcquireContext(self.conn)
+
+        conn = FakeConn()
+        with patch.object(database, "get_pool", new=AsyncMock(return_value=FakePool(conn))):
+            imported, skipped = await database.import_conversations([
+                {
+                    "session_id": "session",
+                    "role": "user",
+                    "content": "",
+                    "model": "model",
+                    "metadata": metadata,
+                }
+            ])
+
+        self.assertEqual((imported, skipped), (1, 0))
+        self.assertEqual(len(conn.executed), 1)
+        self.assertIn("metadata", conn.executed[0][0])
+        self.assertIn(metadata, conn.executed[0][1])
+
+
 if __name__ == "__main__":
     unittest.main()
