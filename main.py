@@ -14,6 +14,7 @@ AI Memory Gateway — 带记忆系统的 LLM 转发网关
 
 import os
 import json
+import copy
 import uuid
 import asyncio
 import secrets
@@ -1097,6 +1098,50 @@ def build_time_injection() -> str:
     return f"【当前时间】{time_str} {weekday}"
 
 
+def _extract_text_content(content) -> str:
+    """Extract text for search, summaries, embeddings, and conversation.content."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return " ".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text", ""), str)
+    )
+
+
+def _has_non_text_content(content) -> bool:
+    """Return True when a content array contains an image or another non-text block."""
+    return isinstance(content, list) and any(
+        not isinstance(block, dict) or block.get("type") != "text"
+        for block in content
+    )
+
+
+def _build_injected_user_content(content, injection_parts: list[str]):
+    """Add time/memory text while preserving the original multimodal blocks."""
+    injection_text = "\n\n".join(part for part in injection_parts if part)
+    if isinstance(content, list):
+        blocks = copy.deepcopy(content)
+        if injection_text:
+            blocks.insert(0, {"type": "text", "text": injection_text})
+        return blocks
+
+    original_text = content if isinstance(content, str) else ""
+    parts = [part for part in (injection_text, original_text) if part]
+    return "\n\n".join(parts)
+
+
+def _multimodal_user_metadata(content) -> str | None:
+    """Serialize an original content array into existing metadata storage."""
+    if not isinstance(content, list):
+        return None
+    return json.dumps({"multimodal_content": content}, ensure_ascii=False)
+
+
 def _format_summary_message_time(msg: dict) -> str:
     raw = msg.get("created_at")
     if not raw:
@@ -1131,7 +1176,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     conversation_text = ""
     for msg in messages:
         role_label = "用户" if msg['role'] == 'user' else "AI"
-        content = msg['content'] if isinstance(msg['content'], str) else str(msg['content'])
+        content = _extract_text_content(msg.get('content'))
         msg_time = _format_summary_message_time(msg)
         conversation_text += f"[{msg_time}] {role_label}: {content}\n\n"
     
@@ -1680,15 +1725,10 @@ async def build_partitioned_messages(
             if mem_text:
                 parts.append(mem_text)
         
-        current_text = current_user_msg['content']
-        if isinstance(current_text, list):
-            current_text = " ".join(
-                item.get("text", "") for item in current_text
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
-        
-        parts.append(current_text)
-        result.append({"role": "user", "content": "\n\n".join(parts)})
+        result.append({
+            "role": "user",
+            "content": _build_injected_user_content(current_user_msg.get('content'), parts),
+        })
     
     bp_count = 1 + (1 if summary_parts else 0) + (1 if cleaned_a else 0) + (1 if b_msgs else 0)
     summary_total = sum(len(p) for p in summary_parts)
@@ -1742,15 +1782,10 @@ async def _build_basic_cached(
             if mem_text:
                 parts.append(mem_text)
         
-        current_text = current_user_msg['content']
-        if isinstance(current_text, list):
-            current_text = " ".join(
-                item.get("text", "") for item in current_text
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
-        
-        parts.append(current_text)
-        result.append({"role": "user", "content": "\n\n".join(parts)})
+        result.append({
+            "role": "user",
+            "content": _build_injected_user_content(current_user_msg.get('content'), parts),
+        })
     
     bp_count = 1 + (1 if history else 0)
     print(f"🔒 基础缓存(降级): BP×{bp_count} | 历史{len(history)}条 | 总{len(result)}条messages")
@@ -3916,7 +3951,7 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
 # 后台记忆处理
 # ============================================================
 
-async def process_memories_background(session_id: str, user_msg: str, assistant_msg: str, model: str, context_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, assistant_tool_calls: list = None, assistant_reasoning: str = None):
+async def process_memories_background(session_id: str, user_msg: str, assistant_msg: str, model: str, context_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, assistant_tool_calls: list = None, assistant_reasoning: str = None, user_content=None):
     """
     后台异步：存储对话 + 提取记忆（不阻塞主流程）
     
@@ -3932,6 +3967,7 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
     tool_messages: 客户端发来的工具结果消息列表
     assistant_tool_calls: response中assistant的工具调用列表（如果有）
     assistant_reasoning: response中assistant的reasoning_content（deepseek thinking mode）
+    user_content: 当前用户消息的原始content；数组会原样存入metadata
     """
     global _round_counter
     health_stage = "conversation_storage"
@@ -3968,6 +4004,8 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 print(f"🔧 存储: {len(tool_messages)}条tool + 1条assistant" + (" (含tool_calls)" if assistant_tool_calls else "") + (" (含reasoning)" if assistant_reasoning else ""))
         else:
             # 普通对话或首次工具调用
+            user_metadata = _multimodal_user_metadata(user_content)
+            user_has_non_text = _has_non_text_content(user_content)
             ast_meta_dict = {}
             if assistant_tool_calls:
                 ast_meta_dict["tool_calls"] = assistant_tool_calls
@@ -3977,23 +4015,23 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
             
             if assistant_tool_calls:
                 # 首次工具调用：assistant回复包含tool_calls，存user + assistant(tool_calls)
-                await save_message(session_id, "user", user_msg, model)
+                await save_message(session_id, "user", user_msg, model, metadata=user_metadata)
                 await save_message(session_id, "assistant", assistant_msg or "", model, metadata=assistant_meta)
                 print(f"🔧 存储: user + assistant (含{len(assistant_tool_calls)}个tool_calls)" + (" (含reasoning)" if assistant_reasoning else ""))
             else:
-                # 纯文字对话：re-roll检测 + 存user + assistant
+                # 图片等非文字block不能仅按caption判成re-roll。
                 last_user = await get_last_user_content(session_id)
-                if last_user and last_user.strip() == user_msg.strip():
+                if not user_has_non_text and last_user and last_user.strip() == user_msg.strip():
                     updated = await update_last_assistant_message(session_id, assistant_msg, model)
                     if updated:
                         print(f"🔄 检测到re-roll，已覆盖最后一条assistant回复")
                         shadow_mind_normal_turn_saved = True
                     else:
-                        await save_message(session_id, "user", user_msg, model)
+                        await save_message(session_id, "user", user_msg, model, metadata=user_metadata)
                         await save_message(session_id, "assistant", assistant_msg, model, metadata=assistant_meta)
                         shadow_mind_normal_turn_saved = True
                 else:
-                    await save_message(session_id, "user", user_msg, model)
+                    await save_message(session_id, "user", user_msg, model, metadata=user_metadata)
                     await save_message(session_id, "assistant", assistant_msg, model, metadata=assistant_meta)
                     shadow_mind_normal_turn_saved = True
         if not skip_conversation_log:
@@ -4028,6 +4066,11 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         if MEMORY_EXTRACT_INTERVAL == 0:
             print(f"⏭️  记忆自动提取已禁用，跳过")
             return
+
+        # 图片原文保存在metadata；没有用户文字时不让纯文本记忆流程猜测图片内容。
+        if not user_msg.strip() and not tool_messages:
+            print("⏭️  用户消息无文字，已保存图片历史并跳过文字记忆提取")
+            return
         
         _round_counter += 1
         
@@ -4048,7 +4091,11 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         if context_messages:
             # 截取最近N轮（interval×2条），加上最新的assistant回复
             tail_count = MEMORY_EXTRACT_INTERVAL * 2
-            recent_msgs = list(context_messages)[-tail_count:] if len(context_messages) > tail_count else list(context_messages)
+            raw_recent_msgs = list(context_messages)[-tail_count:] if len(context_messages) > tail_count else list(context_messages)
+            recent_msgs = [
+                {**msg, "content": _extract_text_content(msg.get("content"))}
+                for msg in raw_recent_msgs
+            ]
             messages_for_extraction = recent_msgs + [
                 {"role": "assistant", "content": assistant_msg}
             ]
@@ -4381,16 +4428,12 @@ async def chat_completions(request: Request):
     
     # ---------- 提取用户最新消息 ----------
     user_message = ""
+    user_content = None
     for msg in reversed(messages):
         if msg.get("role") == "user":
             content = msg.get("content", "")
-            if isinstance(content, str):
-                user_message = content
-            elif isinstance(content, list):
-                user_message = " ".join(
-                    item.get("text", "") for item in content
-                    if isinstance(item, dict) and item.get("type") == "text"
-                )
+            user_content = copy.deepcopy(content)
+            user_message = _extract_text_content(content)
             break
     
     # ---------- 构建 system prompt ----------
@@ -4580,7 +4623,7 @@ async def chat_completions(request: Request):
     
     if is_stream:
         return StreamingResponse(
-            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages, cache_diag=cache_diag),
+            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages, cache_diag=cache_diag, user_content=user_content),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
@@ -4614,12 +4657,12 @@ async def chat_completions(request: Request):
             except (KeyError, IndexError):
                 pass
 
-            if MEMORY_ENABLED and (user_message or tool_messages):
+            if MEMORY_ENABLED and (user_message or tool_messages or user_content is not None):
                 asyncio.create_task(
                     process_memories_background(session_id, user_message, assistant_msg, model,
                                                 context_messages=original_messages, skip_conversation_log=skip_conversation_log,
                                                 tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
-                                                assistant_reasoning=assistant_reasoning)
+                                                assistant_reasoning=assistant_reasoning, user_content=user_content)
                 )
 
             return JSONResponse(status_code=200, content=resp_data)
@@ -4630,7 +4673,7 @@ async def chat_completions(request: Request):
         return JSONResponse(status_code=response.status_code, content=response.json())
 
 
-async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None):
+async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None, user_content=None):
     try:
         async for chunk in _stream_and_capture_impl(
             headers,
@@ -4642,6 +4685,7 @@ async def stream_and_capture(headers: dict, body: dict, session_id: str, user_me
             skip_conversation_log,
             tool_messages,
             cache_diag,
+            user_content,
         ):
             yield chunk
     except Exception as upstream_error:
@@ -4652,7 +4696,7 @@ async def stream_and_capture(headers: dict, body: dict, session_id: str, user_me
         raise
 
 
-async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None):
+async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None, user_content=None):
     """流式响应 + 捕获完整回复（原始字节透传，确保SSE格式和thinking数据完整）"""
     full_response = []
     full_reasoning = []
@@ -4760,12 +4804,12 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
     else:
         _log_usage_diag("Stream", None)
     
-    if MEMORY_ENABLED and (user_message or tool_messages):
+    if MEMORY_ENABLED and (user_message or tool_messages or user_content is not None):
         asyncio.create_task(
             process_memories_background(session_id, user_message, assistant_msg, model, 
                                         context_messages=original_messages, skip_conversation_log=skip_conversation_log,
                                         tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
-                                        assistant_reasoning=assistant_reasoning)
+                                        assistant_reasoning=assistant_reasoning, user_content=user_content)
         )
 
 
