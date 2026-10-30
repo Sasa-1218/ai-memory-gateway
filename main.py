@@ -4675,7 +4675,11 @@ async def chat_completions(request: Request):
         return StreamingResponse(
             stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages, cache_diag=cache_diag, user_content=user_content),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
     else:
         try:
@@ -4773,58 +4777,136 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
                     f"upstream_http_{response.status_code}",
                 )
             
-            async for chunk in response.aiter_bytes():
-                # 原始字节直接透传给客户端
-                yield chunk
-                
-                if is_error:
-                    error_body_parts.append(chunk)
-                    continue
-                
-                # 旁路解析：从字节流中提取assistant回复内容，用于后续记忆提取
-                text = chunk.decode("utf-8", errors="ignore")
-                line_buffer += text
-                while "\n" in line_buffer:
-                    line, line_buffer = line_buffer.split("\n", 1)
-                    line = line.strip()
-                    if line.startswith("data: ") and line != "data: [DONE]":
-                        try:
-                            data = json.loads(line[6:])
-                            
-                            if "usage" in data:
-                                stream_usage = data["usage"]
-                            
-                            delta = data.get("choices", [{}])[0].get("delta", {})
-                            content = delta.get("content", "")
-                            if content:
-                                full_response.append(content)
-                            
-                            # 收集reasoning_content（deepseek thinking mode）
-                            reasoning = delta.get("reasoning_content", "")
-                            if reasoning:
-                                full_reasoning.append(reasoning)
-                            
-                            # 累积tool_calls
-                            if "tool_calls" in delta:
-                                for tc in delta["tool_calls"]:
-                                    idx = tc.get("index", 0)
-                                    if idx not in accumulated_tool_calls:
-                                        accumulated_tool_calls[idx] = {
-                                            "index": idx,
-                                            "id": tc.get("id", ""),
-                                            "type": tc.get("type", "function"),
-                                            "function": {"name": "", "arguments": ""}
-                                        }
-                                    if tc.get("id"):
-                                        accumulated_tool_calls[idx]["id"] = tc["id"]
-                                    if "function" in tc:
-                                        fn = tc["function"]
-                                        if fn.get("name"):
-                                            accumulated_tool_calls[idx]["function"]["name"] = fn["name"]
-                                        if "arguments" in fn:
-                                            accumulated_tool_calls[idx]["function"]["arguments"] += fn["arguments"]
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            pass
+            # 独立读取上游，并通过队列转发。这样上游短暂无 token 时，
+            # 仍可定期给客户端发送 SSE comment，避免 Cloudflare / 反代误判长连接已闲置。
+            stream_queue = asyncio.Queue()
+            stream_started = time.monotonic()
+            first_chunk_seen = False
+            done_seen = False
+
+            async def pump_upstream():
+                try:
+                    async for upstream_chunk in response.aiter_bytes():
+                        await stream_queue.put(("chunk", upstream_chunk))
+                except Exception as exc:
+                    await stream_queue.put(("error", exc))
+                finally:
+                    await stream_queue.put(("done", None))
+
+            pump_task = asyncio.create_task(pump_upstream())
+            try:
+                while True:
+                    try:
+                        event_type, payload = await asyncio.wait_for(
+                            stream_queue.get(),
+                            timeout=15.0,
+                        )
+                    except asyncio.TimeoutError:
+                        # SSE 注释行：客户端不会把它显示成正文，但能维持整条链路活跃。
+                        yield b": keepalive\n\n"
+                        print(
+                            f"💓 SSE heartbeat: model={model} "
+                            f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                            flush=True,
+                        )
+                        continue
+
+                    if event_type == "error":
+                        print(
+                            f"❌ 上游流读取异常: model={model} "
+                            f"error_type={type(payload).__name__} "
+                            f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                            flush=True,
+                        )
+                        raise payload
+
+                    if event_type == "done":
+                        break
+
+                    chunk = payload
+                    if not first_chunk_seen:
+                        first_chunk_seen = True
+                        print(
+                            f"📦 SSE首包: model={model} "
+                            f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                            flush=True,
+                        )
+
+                    # 原始字节直接透传给客户端
+                    yield chunk
+
+                    if is_error:
+                        error_body_parts.append(chunk)
+                        continue
+
+                    # 旁路解析：从字节流中提取assistant回复内容，用于后续记忆提取
+                    text = chunk.decode("utf-8", errors="ignore")
+                    line_buffer += text
+                    while "\n" in line_buffer:
+                        line, line_buffer = line_buffer.split("\n", 1)
+                        line = line.strip()
+                        if line == "data: [DONE]":
+                            done_seen = True
+                        elif line.startswith("data: "):
+                            try:
+                                data = json.loads(line[6:])
+
+                                if "usage" in data:
+                                    stream_usage = data["usage"]
+
+                                delta = data.get("choices", [{}])[0].get("delta", {})
+                                content = delta.get("content", "")
+                                if content:
+                                    full_response.append(content)
+
+                                # 收集reasoning_content（deepseek thinking mode）
+                                reasoning = delta.get("reasoning_content", "")
+                                if reasoning:
+                                    full_reasoning.append(reasoning)
+
+                                # 累积tool_calls
+                                if "tool_calls" in delta:
+                                    for tc in delta["tool_calls"]:
+                                        idx = tc.get("index", 0)
+                                        if idx not in accumulated_tool_calls:
+                                            accumulated_tool_calls[idx] = {
+                                                "index": idx,
+                                                "id": tc.get("id", ""),
+                                                "type": tc.get("type", "function"),
+                                                "function": {"name": "", "arguments": ""}
+                                            }
+                                        if tc.get("id"):
+                                            accumulated_tool_calls[idx]["id"] = tc["id"]
+                                        if "function" in tc:
+                                            fn = tc["function"]
+                                            if fn.get("name"):
+                                                accumulated_tool_calls[idx]["function"]["name"] = fn["name"]
+                                            if "arguments" in fn:
+                                                accumulated_tool_calls[idx]["function"]["arguments"] += fn["arguments"]
+                            except (json.JSONDecodeError, KeyError, IndexError):
+                                pass
+            except asyncio.CancelledError:
+                print(
+                    f"⚠️ 下游流被取消: model={model} "
+                    f"first_chunk={first_chunk_seen} done_seen={done_seen} "
+                    f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                    flush=True,
+                )
+                raise
+            finally:
+                if not pump_task.done():
+                    pump_task.cancel()
+                    try:
+                        await pump_task
+                    except asyncio.CancelledError:
+                        pass
+
+            print(
+                f"✅ SSE结束: model={model} first_chunk={first_chunk_seen} "
+                f"done_seen={done_seen} assistant_chars={sum(len(x) for x in full_response)} "
+                f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                flush=True,
+            )
     
     assistant_msg = "".join(full_response)
     if not is_error:
