@@ -4729,27 +4729,77 @@ async def chat_completions(request: Request):
 
 
 async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None, user_content=None):
-    try:
-        async for chunk in _stream_and_capture_impl(
-            headers,
-            body,
-            session_id,
-            user_message,
-            model,
-            original_messages,
-            skip_conversation_log,
-            tool_messages,
-            cache_diag,
-            user_content,
-        ):
-            yield chunk
-    except Exception as upstream_error:
-        await _record_operational_failure_safe(
-            "upstream_chat",
-            f"exception_{type(upstream_error).__name__}",
-        )
-        raise
+    """流式转发入口：代理/网络在首包前失败时自动重试，避免 200 后异常断流变成 Cloudflare 520。"""
+    retryable_errors = (
+        httpx.ProxyError,
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.ReadError,
+        httpx.RemoteProtocolError,
+    )
+    max_attempts = 3
 
+    for attempt in range(1, max_attempts + 1):
+        yielded_any = False
+        try:
+            async for chunk in _stream_and_capture_impl(
+                headers,
+                body,
+                session_id,
+                user_message,
+                model,
+                original_messages,
+                skip_conversation_log,
+                tool_messages,
+                cache_diag,
+                user_content,
+            ):
+                yielded_any = True
+                yield chunk
+            return
+        except retryable_errors as upstream_error:
+            await _record_operational_failure_safe(
+                "upstream_chat",
+                f"exception_{type(upstream_error).__name__}",
+            )
+            print(
+                f"⚠️ 上游网络异常: model={model} "
+                f"attempt={attempt}/{max_attempts} "
+                f"error_type={type(upstream_error).__name__} "
+                f"yielded_any={yielded_any}",
+                flush=True,
+            )
+
+            # 还没向客户端发任何模型数据时，可以安全地重新建立上游连接。
+            if not yielded_any and attempt < max_attempts:
+                await asyncio.sleep(0.8 * attempt)
+                continue
+
+            # 已经开始向 Kelivo 输出，或重试耗尽：用合法 SSE 结束，
+            # 避免 ASGI 异常把连接硬掐断，导致 Cloudflare 520 / 客户端永久转圈。
+            error_payload = {
+                "error": {
+                    "message": "upstream connection interrupted",
+                    "type": "upstream_connection_error",
+                    "retryable": True,
+                }
+            }
+            yield ("data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+            yield b"data: [DONE]\n\n"
+            return
+        except Exception as upstream_error:
+            await _record_operational_failure_safe(
+                "upstream_chat",
+                f"exception_{type(upstream_error).__name__}",
+            )
+            print(
+                f"❌ 流式转发异常: model={model} "
+                f"error_type={type(upstream_error).__name__} "
+                f"yielded_any={yielded_any}",
+                flush=True,
+            )
+            raise
 
 async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None, user_content=None):
     """流式响应 + 捕获完整回复（原始字节透传，确保SSE格式和thinking数据完整）"""
