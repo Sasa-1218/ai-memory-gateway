@@ -1523,7 +1523,7 @@ async def compute_embedding(text: str) -> list:
         if EMBEDDING_DIM > 0:
             body["dimensions"] = EMBEDDING_DIM
         
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:
             resp = await client.post(
                 f"{EMBEDDING_BASE_URL}/embeddings",
                 headers={
