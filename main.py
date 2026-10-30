@@ -14,6 +14,7 @@ AI Memory Gateway — 带记忆系统的 LLM 转发网关
 
 import os
 import json
+import copy
 import uuid
 import asyncio
 import secrets
@@ -71,6 +72,25 @@ API_KEY = os.getenv("API_KEY", "")
 # OpenAI:     https://api.openai.com/v1/chat/completions
 # 本地 Ollama: http://localhost:11434/v1/chat/completions
 API_BASE_URL = os.getenv("API_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
+
+# 模型上游代理：仅 OpenRouter 使用。兼容旧的全局代理变量，便于平滑迁移。
+# 其他 HTTP 请求显式 trust_env=False，避免 Dashboard/Bark/摘要等被全局代理连带影响。
+def _configured_upstream_proxy() -> str:
+    return (
+        os.getenv("UPSTREAM_PROXY_URL", "").strip()
+        or os.getenv("HTTPS_PROXY", "").strip()
+        or os.getenv("ALL_PROXY", "").strip()
+        or os.getenv("HTTP_PROXY", "").strip()
+    )
+
+
+def _httpx_client_for_url(url: str, timeout):
+    kwargs = {"timeout": timeout, "trust_env": False}
+    if "openrouter.ai" in str(url or "").lower():
+        proxy_url = _configured_upstream_proxy()
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+    return httpx.AsyncClient(**kwargs)
 
 # 默认模型（如果客户端没指定就用这个）
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "anthropic/claude-sonnet-4")
@@ -889,7 +909,10 @@ async def _get_cf_access_jwks() -> list:
     if not certs_url:
         return []
 
-    async with httpx.AsyncClient(timeout=5) as client:
+    # Cloudflare Access 公钥校验属于入口鉴权基础设施，
+    # 不应依赖用于上游模型访问的 HTTP(S)_PROXY / ALL_PROXY。
+    # 否则美国代理抖动时会同时造成聊天失败和 Dashboard 403。
+    async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
         response = await client.get(certs_url)
         response.raise_for_status()
         payload = response.json()
@@ -1097,6 +1120,77 @@ def build_time_injection() -> str:
     return f"【当前时间】{time_str} {weekday}"
 
 
+def _extract_text_content(content) -> str:
+    """Extract text for search, summaries, embeddings, and conversation.content."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return " ".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text", ""), str)
+    )
+
+
+def _has_non_text_content(content) -> bool:
+    """Return True when a content array contains an image or another non-text block."""
+    return isinstance(content, list) and any(
+        not isinstance(block, dict) or block.get("type") != "text"
+        for block in content
+    )
+
+
+def _build_injected_user_content(content, injection_parts: list[str]):
+    """Add time/memory text while preserving the original multimodal blocks."""
+    injection_text = "\n\n".join(part for part in injection_parts if part)
+    if isinstance(content, list):
+        blocks = copy.deepcopy(content)
+        if injection_text:
+            blocks.insert(0, {"type": "text", "text": injection_text})
+        return blocks
+
+    original_text = content if isinstance(content, str) else ""
+    parts = [part for part in (injection_text, original_text) if part]
+    return "\n\n".join(parts)
+
+
+def _multimodal_user_metadata(content) -> str | None:
+    """Serialize an original content array into existing metadata storage."""
+    if not isinstance(content, list):
+        return None
+    return json.dumps({"multimodal_content": content}, ensure_ascii=False)
+
+
+def _multimodal_diag(content) -> dict:
+    """Return a payload-safe summary of multimodal content for diagnostics."""
+    if isinstance(content, str):
+        return {"kind": "str", "chars": len(content), "blocks": []}
+    if not isinstance(content, list):
+        return {"kind": type(content).__name__, "blocks": []}
+    blocks = []
+    for block in content:
+        if not isinstance(block, dict):
+            blocks.append({"type": type(block).__name__})
+            continue
+        item = {"type": str(block.get("type", ""))}
+        if block.get("type") in ("image_url", "input_image"):
+            raw = block.get("image_url")
+            url = raw.get("url") if isinstance(raw, dict) else raw
+            if isinstance(url, str):
+                if url.startswith("data:"):
+                    scheme = "data"
+                elif url.startswith(("http://", "https://")):
+                    scheme = "http"
+                else:
+                    scheme = "other"
+                item.update({"image_scheme": scheme, "image_chars": len(url)})
+        blocks.append(item)
+    return {"kind": "list", "blocks": blocks}
+
+
 def _format_summary_message_time(msg: dict) -> str:
     raw = msg.get("created_at")
     if not raw:
@@ -1131,7 +1225,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     conversation_text = ""
     for msg in messages:
         role_label = "用户" if msg['role'] == 'user' else "AI"
-        content = msg['content'] if isinstance(msg['content'], str) else str(msg['content'])
+        content = _extract_text_content(msg.get('content'))
         msg_time = _format_summary_message_time(msg)
         conversation_text += f"[{msg_time}] {role_label}: {content}\n\n"
     
@@ -1205,7 +1299,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
             headers["HTTP-Referer"] = EXTRA_REFERER
             headers["X-Title"] = EXTRA_TITLE
 
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with _httpx_client_for_url(summary_url, 60) as client:
             response = await client.post(summary_url, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
                 "max_tokens": 3000,
@@ -1370,7 +1464,7 @@ async def consolidate_summary_parts(summary_parts: list) -> list:
             headers["X-Title"] = EXTRA_TITLE
             
         # ★ 这里把超时时间改长，给足 Token，防止长文被截断 ★
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with _httpx_client_for_url(summary_url, 180.0) as client:
             response = await client.post(summary_url, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
                 "max_tokens": 20000,
@@ -1680,15 +1774,10 @@ async def build_partitioned_messages(
             if mem_text:
                 parts.append(mem_text)
         
-        current_text = current_user_msg['content']
-        if isinstance(current_text, list):
-            current_text = " ".join(
-                item.get("text", "") for item in current_text
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
-        
-        parts.append(current_text)
-        result.append({"role": "user", "content": "\n\n".join(parts)})
+        result.append({
+            "role": "user",
+            "content": _build_injected_user_content(current_user_msg.get('content'), parts),
+        })
     
     bp_count = 1 + (1 if summary_parts else 0) + (1 if cleaned_a else 0) + (1 if b_msgs else 0)
     summary_total = sum(len(p) for p in summary_parts)
@@ -1742,15 +1831,10 @@ async def _build_basic_cached(
             if mem_text:
                 parts.append(mem_text)
         
-        current_text = current_user_msg['content']
-        if isinstance(current_text, list):
-            current_text = " ".join(
-                item.get("text", "") for item in current_text
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
-        
-        parts.append(current_text)
-        result.append({"role": "user", "content": "\n\n".join(parts)})
+        result.append({
+            "role": "user",
+            "content": _build_injected_user_content(current_user_msg.get('content'), parts),
+        })
     
     bp_count = 1 + (1 if history else 0)
     print(f"🔒 基础缓存(降级): BP×{bp_count} | 历史{len(history)}条 | 总{len(result)}条messages")
@@ -2991,7 +3075,7 @@ async def deliver_bark_push(message: str) -> dict:
         payload["badge"] = badge
 
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with _httpx_client_for_url(BARK_API_URL, 20) as client:
             response = await client.post(
                 BARK_API_URL,
                 headers={"Content-Type": "application/json"},
@@ -3043,7 +3127,7 @@ async def deliver_gateway_system_alert(title: str, message: str) -> dict:
     if BARK_OPEN_URL:
         payload["url"] = BARK_OPEN_URL
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with _httpx_client_for_url(BARK_API_URL, 20) as client:
             response = await client.post(
                 BARK_API_URL,
                 headers={"Content-Type": "application/json"},
@@ -3737,7 +3821,7 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
     }
 
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with _httpx_client_for_url(API_BASE_URL, 120) as client:
             response = await client.post(API_BASE_URL, headers=headers, json=body)
     except Exception as e:
         print(f"⚠️ 主动推送决策异常: {type(e).__name__}")
@@ -3916,7 +4000,7 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
 # 后台记忆处理
 # ============================================================
 
-async def process_memories_background(session_id: str, user_msg: str, assistant_msg: str, model: str, context_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, assistant_tool_calls: list = None, assistant_reasoning: str = None):
+async def process_memories_background(session_id: str, user_msg: str, assistant_msg: str, model: str, context_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, assistant_tool_calls: list = None, assistant_reasoning: str = None, user_content=None):
     """
     后台异步：存储对话 + 提取记忆（不阻塞主流程）
     
@@ -3932,6 +4016,7 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
     tool_messages: 客户端发来的工具结果消息列表
     assistant_tool_calls: response中assistant的工具调用列表（如果有）
     assistant_reasoning: response中assistant的reasoning_content（deepseek thinking mode）
+    user_content: 当前用户消息的原始content；数组会原样存入metadata
     """
     global _round_counter
     health_stage = "conversation_storage"
@@ -3968,6 +4053,8 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 print(f"🔧 存储: {len(tool_messages)}条tool + 1条assistant" + (" (含tool_calls)" if assistant_tool_calls else "") + (" (含reasoning)" if assistant_reasoning else ""))
         else:
             # 普通对话或首次工具调用
+            user_metadata = _multimodal_user_metadata(user_content)
+            user_has_non_text = _has_non_text_content(user_content)
             ast_meta_dict = {}
             if assistant_tool_calls:
                 ast_meta_dict["tool_calls"] = assistant_tool_calls
@@ -3977,23 +4064,23 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
             
             if assistant_tool_calls:
                 # 首次工具调用：assistant回复包含tool_calls，存user + assistant(tool_calls)
-                await save_message(session_id, "user", user_msg, model)
+                await save_message(session_id, "user", user_msg, model, metadata=user_metadata)
                 await save_message(session_id, "assistant", assistant_msg or "", model, metadata=assistant_meta)
                 print(f"🔧 存储: user + assistant (含{len(assistant_tool_calls)}个tool_calls)" + (" (含reasoning)" if assistant_reasoning else ""))
             else:
-                # 纯文字对话：re-roll检测 + 存user + assistant
+                # 图片等非文字block不能仅按caption判成re-roll。
                 last_user = await get_last_user_content(session_id)
-                if last_user and last_user.strip() == user_msg.strip():
+                if not user_has_non_text and last_user and last_user.strip() == user_msg.strip():
                     updated = await update_last_assistant_message(session_id, assistant_msg, model)
                     if updated:
                         print(f"🔄 检测到re-roll，已覆盖最后一条assistant回复")
                         shadow_mind_normal_turn_saved = True
                     else:
-                        await save_message(session_id, "user", user_msg, model)
+                        await save_message(session_id, "user", user_msg, model, metadata=user_metadata)
                         await save_message(session_id, "assistant", assistant_msg, model, metadata=assistant_meta)
                         shadow_mind_normal_turn_saved = True
                 else:
-                    await save_message(session_id, "user", user_msg, model)
+                    await save_message(session_id, "user", user_msg, model, metadata=user_metadata)
                     await save_message(session_id, "assistant", assistant_msg, model, metadata=assistant_meta)
                     shadow_mind_normal_turn_saved = True
         if not skip_conversation_log:
@@ -4028,6 +4115,11 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         if MEMORY_EXTRACT_INTERVAL == 0:
             print(f"⏭️  记忆自动提取已禁用，跳过")
             return
+
+        # 图片原文保存在metadata；没有用户文字时不让纯文本记忆流程猜测图片内容。
+        if not user_msg.strip() and not tool_messages:
+            print("⏭️  用户消息无文字，已保存图片历史并跳过文字记忆提取")
+            return
         
         _round_counter += 1
         
@@ -4048,7 +4140,11 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         if context_messages:
             # 截取最近N轮（interval×2条），加上最新的assistant回复
             tail_count = MEMORY_EXTRACT_INTERVAL * 2
-            recent_msgs = list(context_messages)[-tail_count:] if len(context_messages) > tail_count else list(context_messages)
+            raw_recent_msgs = list(context_messages)[-tail_count:] if len(context_messages) > tail_count else list(context_messages)
+            recent_msgs = [
+                {**msg, "content": _extract_text_content(msg.get("content"))}
+                for msg in raw_recent_msgs
+            ]
             messages_for_extraction = recent_msgs + [
                 {"role": "assistant", "content": assistant_msg}
             ]
@@ -4231,6 +4327,7 @@ async def api_push_trigger(request: Request):
         _push_lock.release()
 
 
+@app.head("/")
 @app.get("/")
 async def health_check():
     """健康检查"""
@@ -4259,7 +4356,7 @@ async def list_models():
     models_url = API_BASE_URL.replace("/chat/completions", "/models")
     try:
         headers = {"Authorization": f"Bearer {API_KEY}"}
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with _httpx_client_for_url(models_url, 30) as client:
             response = await client.get(models_url, headers=headers)
         if response.status_code == 200:
             return response.json()
@@ -4377,20 +4474,21 @@ async def chat_completions(request: Request):
     
     # ---------- 检测是否应跳过对话存储 ----------
     # 客户端通过header显式声明（如标题生成等辅助请求）
-    skip_conversation_log = request.headers.get("X-Skip-Conversation-Log", "").lower() == "true"
+    debug_fresh_session = request.headers.get("X-Debug-Fresh-Session", "").lower() == "true"
+    skip_conversation_log = (
+        request.headers.get("X-Skip-Conversation-Log", "").lower() == "true"
+        or debug_fresh_session
+    )
     
     # ---------- 提取用户最新消息 ----------
     user_message = ""
+    user_content = None
     for msg in reversed(messages):
         if msg.get("role") == "user":
             content = msg.get("content", "")
-            if isinstance(content, str):
-                user_message = content
-            elif isinstance(content, list):
-                user_message = " ".join(
-                    item.get("text", "") for item in content
-                    if isinstance(item, dict) and item.get("type") == "text"
-                )
+            user_content = copy.deepcopy(content)
+            user_message = _extract_text_content(content)
+            print(f"🖼️ inbound_user_multimodal={_multimodal_diag(content)}", flush=True)
             break
     
     # ---------- 构建 system prompt ----------
@@ -4411,8 +4509,22 @@ async def chat_completions(request: Request):
         "session_hash": _short_hash_text(session_id),
     }
     
+    # ---------- 临时干净测试模式 ----------
+    # 仅使用客户端本次请求，不读取正式 DB 历史、不注入网关记忆、不写回对话。
+    if debug_fresh_session:
+        body["messages"] = copy.deepcopy(messages)
+        cache_diag.update({
+            "mode": "debug_fresh",
+            "session_hash": _short_hash_text(session_id),
+        })
+        print(
+            f"🧪 临时干净会话: client_messages={len(messages)} | "
+            "db_history=off | memory_injection=off | conversation_log=off",
+            flush=True,
+        )
+
     # ---------- 分区缓存模式 ----------
-    if CACHE_PARTITION_ENABLED:
+    elif CACHE_PARTITION_ENABLED:
         active_sid = get_active_session_id()
         if active_sid:
             session_id = active_sid
@@ -4543,6 +4655,10 @@ async def chat_completions(request: Request):
         _strip_cache_control(body.get("messages", []))
     cache_diag["sent_breakpoints"] = _count_cache_breakpoints(body.get("messages", []))
     _log_cache_build_diag(cache_diag)
+    for _diag_msg in reversed(body.get("messages", [])):
+        if _diag_msg.get("role") == "user":
+            print(f"🖼️ outbound_user_multimodal={_multimodal_diag(_diag_msg.get('content'))}", flush=True)
+            break
     
     # ---------- 转发请求 ----------
     headers = {
@@ -4580,13 +4696,17 @@ async def chat_completions(request: Request):
     
     if is_stream:
         return StreamingResponse(
-            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages, cache_diag=cache_diag),
+            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages, cache_diag=cache_diag, user_content=user_content),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
     else:
         try:
-            async with httpx.AsyncClient(timeout=300) as client:
+            async with _httpx_client_for_url(API_BASE_URL, 300) as client:
                 response = await client.post(API_BASE_URL, headers=headers, json=body)
         except Exception as upstream_error:
             await _record_operational_failure_safe(
@@ -4614,12 +4734,12 @@ async def chat_completions(request: Request):
             except (KeyError, IndexError):
                 pass
 
-            if MEMORY_ENABLED and (user_message or tool_messages):
+            if MEMORY_ENABLED and (user_message or tool_messages or user_content is not None):
                 asyncio.create_task(
                     process_memories_background(session_id, user_message, assistant_msg, model,
                                                 context_messages=original_messages, skip_conversation_log=skip_conversation_log,
                                                 tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
-                                                assistant_reasoning=assistant_reasoning)
+                                                assistant_reasoning=assistant_reasoning, user_content=user_content)
                 )
 
             return JSONResponse(status_code=200, content=resp_data)
@@ -4630,29 +4750,80 @@ async def chat_completions(request: Request):
         return JSONResponse(status_code=response.status_code, content=response.json())
 
 
-async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None):
-    try:
-        async for chunk in _stream_and_capture_impl(
-            headers,
-            body,
-            session_id,
-            user_message,
-            model,
-            original_messages,
-            skip_conversation_log,
-            tool_messages,
-            cache_diag,
-        ):
-            yield chunk
-    except Exception as upstream_error:
-        await _record_operational_failure_safe(
-            "upstream_chat",
-            f"exception_{type(upstream_error).__name__}",
-        )
-        raise
+async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None, user_content=None):
+    """流式转发入口：代理/网络在首包前失败时自动重试，避免 200 后异常断流变成 Cloudflare 520。"""
+    retryable_errors = (
+        httpx.ProxyError,
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.ReadError,
+        httpx.RemoteProtocolError,
+    )
+    max_attempts = 3
 
+    for attempt in range(1, max_attempts + 1):
+        yielded_any = False
+        try:
+            async for chunk in _stream_and_capture_impl(
+                headers,
+                body,
+                session_id,
+                user_message,
+                model,
+                original_messages,
+                skip_conversation_log,
+                tool_messages,
+                cache_diag,
+                user_content,
+            ):
+                yielded_any = True
+                yield chunk
+            return
+        except retryable_errors as upstream_error:
+            await _record_operational_failure_safe(
+                "upstream_chat",
+                f"exception_{type(upstream_error).__name__}",
+            )
+            print(
+                f"⚠️ 上游网络异常: model={model} "
+                f"attempt={attempt}/{max_attempts} "
+                f"error_type={type(upstream_error).__name__} "
+                f"yielded_any={yielded_any}",
+                flush=True,
+            )
 
-async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None):
+            # 还没向客户端发任何模型数据时，可以安全地重新建立上游连接。
+            if not yielded_any and attempt < max_attempts:
+                await asyncio.sleep(0.8 * attempt)
+                continue
+
+            # 已经开始向 Kelivo 输出，或重试耗尽：用合法 SSE 结束，
+            # 避免 ASGI 异常把连接硬掐断，导致 Cloudflare 520 / 客户端永久转圈。
+            error_payload = {
+                "error": {
+                    "message": "upstream connection interrupted",
+                    "type": "upstream_connection_error",
+                    "retryable": True,
+                }
+            }
+            yield ("data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+            yield b"data: [DONE]\n\n"
+            return
+        except Exception as upstream_error:
+            await _record_operational_failure_safe(
+                "upstream_chat",
+                f"exception_{type(upstream_error).__name__}",
+            )
+            print(
+                f"❌ 流式转发异常: model={model} "
+                f"error_type={type(upstream_error).__name__} "
+                f"yielded_any={yielded_any}",
+                flush=True,
+            )
+            raise
+
+async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None, user_content=None):
     """流式响应 + 捕获完整回复（原始字节透传，确保SSE格式和thinking数据完整）"""
     full_response = []
     full_reasoning = []
@@ -4660,7 +4831,7 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
     line_buffer = ""
     accumulated_tool_calls = {}  # index -> {id, type, function: {name, arguments}}
     
-    async with httpx.AsyncClient(timeout=300) as client:
+    async with _httpx_client_for_url(API_BASE_URL, 300) as client:
         async with client.stream("POST", API_BASE_URL, headers=headers, json=body) as response:
             # 打印上游响应头（排查thinking问题用）
             upstream_ct = response.headers.get("content-type", "")
@@ -4679,58 +4850,144 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
                     f"upstream_http_{response.status_code}",
                 )
             
-            async for chunk in response.aiter_bytes():
-                # 原始字节直接透传给客户端
-                yield chunk
-                
-                if is_error:
-                    error_body_parts.append(chunk)
-                    continue
-                
-                # 旁路解析：从字节流中提取assistant回复内容，用于后续记忆提取
-                text = chunk.decode("utf-8", errors="ignore")
-                line_buffer += text
-                while "\n" in line_buffer:
-                    line, line_buffer = line_buffer.split("\n", 1)
-                    line = line.strip()
-                    if line.startswith("data: ") and line != "data: [DONE]":
-                        try:
-                            data = json.loads(line[6:])
-                            
-                            if "usage" in data:
-                                stream_usage = data["usage"]
-                            
-                            delta = data.get("choices", [{}])[0].get("delta", {})
-                            content = delta.get("content", "")
-                            if content:
-                                full_response.append(content)
-                            
-                            # 收集reasoning_content（deepseek thinking mode）
-                            reasoning = delta.get("reasoning_content", "")
-                            if reasoning:
-                                full_reasoning.append(reasoning)
-                            
-                            # 累积tool_calls
-                            if "tool_calls" in delta:
-                                for tc in delta["tool_calls"]:
-                                    idx = tc.get("index", 0)
-                                    if idx not in accumulated_tool_calls:
-                                        accumulated_tool_calls[idx] = {
-                                            "index": idx,
-                                            "id": tc.get("id", ""),
-                                            "type": tc.get("type", "function"),
-                                            "function": {"name": "", "arguments": ""}
-                                        }
-                                    if tc.get("id"):
-                                        accumulated_tool_calls[idx]["id"] = tc["id"]
-                                    if "function" in tc:
-                                        fn = tc["function"]
-                                        if fn.get("name"):
-                                            accumulated_tool_calls[idx]["function"]["name"] = fn["name"]
-                                        if "arguments" in fn:
-                                            accumulated_tool_calls[idx]["function"]["arguments"] += fn["arguments"]
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            pass
+            # 独立读取上游，并通过队列转发。这样上游短暂无 token 时，
+            # 仍可定期给客户端发送 SSE comment，避免 Cloudflare / 反代误判长连接已闲置。
+            stream_queue = asyncio.Queue()
+            stream_started = time.monotonic()
+            first_chunk_seen = False
+            done_seen = False
+
+            async def pump_upstream():
+                try:
+                    async for upstream_chunk in response.aiter_bytes():
+                        await stream_queue.put(("chunk", upstream_chunk))
+                except Exception as exc:
+                    await stream_queue.put(("error", exc))
+                finally:
+                    await stream_queue.put(("done", None))
+
+            pump_task = asyncio.create_task(pump_upstream())
+            try:
+                while True:
+                    try:
+                        event_type, payload = await asyncio.wait_for(
+                            stream_queue.get(),
+                            timeout=15.0,
+                        )
+                    except asyncio.TimeoutError:
+                        # 发送一个合法的 OpenAI-compatible 空 chunk。
+                        # 相比 SSE comment，这也能重置会在解析后计时的客户端 idle timeout。
+                        heartbeat = {
+                            "choices": [{
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": None,
+                            }]
+                        }
+                        yield ("data: " + json.dumps(heartbeat, ensure_ascii=False) + "\n\n").encode("utf-8")
+                        print(
+                            f"💓 SSE heartbeat: model={model} "
+                            f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                            flush=True,
+                        )
+                        continue
+
+                    if event_type == "error":
+                        print(
+                            f"❌ 上游流读取异常: model={model} "
+                            f"error_type={type(payload).__name__} "
+                            f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                            flush=True,
+                        )
+                        raise payload
+
+                    if event_type == "done":
+                        break
+
+                    chunk = payload
+                    if not first_chunk_seen:
+                        first_chunk_seen = True
+                        print(
+                            f"📦 SSE首包: model={model} "
+                            f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                            flush=True,
+                        )
+
+                    # 原始字节直接透传给客户端
+                    yield chunk
+
+                    if is_error:
+                        error_body_parts.append(chunk)
+                        continue
+
+                    # 旁路解析：从字节流中提取assistant回复内容，用于后续记忆提取
+                    text = chunk.decode("utf-8", errors="ignore")
+                    line_buffer += text
+                    while "\n" in line_buffer:
+                        line, line_buffer = line_buffer.split("\n", 1)
+                        line = line.strip()
+                        if line == "data: [DONE]":
+                            done_seen = True
+                        elif line.startswith("data: "):
+                            try:
+                                data = json.loads(line[6:])
+
+                                if "usage" in data:
+                                    stream_usage = data["usage"]
+
+                                delta = data.get("choices", [{}])[0].get("delta", {})
+                                content = delta.get("content", "")
+                                if content:
+                                    full_response.append(content)
+
+                                # 收集reasoning_content（deepseek thinking mode）
+                                reasoning = delta.get("reasoning_content", "")
+                                if reasoning:
+                                    full_reasoning.append(reasoning)
+
+                                # 累积tool_calls
+                                if "tool_calls" in delta:
+                                    for tc in delta["tool_calls"]:
+                                        idx = tc.get("index", 0)
+                                        if idx not in accumulated_tool_calls:
+                                            accumulated_tool_calls[idx] = {
+                                                "index": idx,
+                                                "id": tc.get("id", ""),
+                                                "type": tc.get("type", "function"),
+                                                "function": {"name": "", "arguments": ""}
+                                            }
+                                        if tc.get("id"):
+                                            accumulated_tool_calls[idx]["id"] = tc["id"]
+                                        if "function" in tc:
+                                            fn = tc["function"]
+                                            if fn.get("name"):
+                                                accumulated_tool_calls[idx]["function"]["name"] = fn["name"]
+                                            if "arguments" in fn:
+                                                accumulated_tool_calls[idx]["function"]["arguments"] += fn["arguments"]
+                            except (json.JSONDecodeError, KeyError, IndexError):
+                                pass
+            except asyncio.CancelledError:
+                print(
+                    f"⚠️ 下游流被取消: model={model} "
+                    f"first_chunk={first_chunk_seen} done_seen={done_seen} "
+                    f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                    flush=True,
+                )
+                raise
+            finally:
+                if not pump_task.done():
+                    pump_task.cancel()
+                    try:
+                        await pump_task
+                    except asyncio.CancelledError:
+                        pass
+
+            print(
+                f"✅ SSE结束: model={model} first_chunk={first_chunk_seen} "
+                f"done_seen={done_seen} assistant_chars={sum(len(x) for x in full_response)} "
+                f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                flush=True,
+            )
     
     assistant_msg = "".join(full_response)
     if not is_error:
@@ -4760,12 +5017,12 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
     else:
         _log_usage_diag("Stream", None)
     
-    if MEMORY_ENABLED and (user_message or tool_messages):
+    if MEMORY_ENABLED and (user_message or tool_messages or user_content is not None):
         asyncio.create_task(
             process_memories_background(session_id, user_message, assistant_msg, model, 
                                         context_messages=original_messages, skip_conversation_log=skip_conversation_log,
                                         tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
-                                        assistant_reasoning=assistant_reasoning)
+                                        assistant_reasoning=assistant_reasoning, user_content=user_content)
         )
 
 
@@ -5376,7 +5633,7 @@ async def _run_experience_generation(operation: str, job_id: str, session_id: st
                 "messages": [{"role": "user", "content": build_generation_prompt(messages, operation)}],
                 "temperature": 0.3, "top_p": 0.9, "stream": False}
         _apply_memory_thinking_option(body)
-        async with httpx.AsyncClient(timeout=240.0) as client:
+        async with _httpx_client_for_url(MEMORY_API_BASE_URL, 240.0) as client:
             response = await client.post(MEMORY_API_BASE_URL,
                 headers={"Authorization": f"Bearer {MEMORY_API_KEY}", "Content-Type": "application/json"},
                 json=body)
@@ -5696,7 +5953,7 @@ async def consolidate_memories_for_date_range(start_date, end_date):
     memory_key = memory_config["api_key"]
     
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with _httpx_client_for_url(memory_url, 120.0) as client:
             # 最多重试2次（应对429限流）
             last_error = None
             for attempt in range(3):
@@ -6476,7 +6733,7 @@ async def get_models():
 
     try:
         if is_openrouter:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with _httpx_client_for_url("https://openrouter.ai/api/v1/models", 30) as client:
                 response = await client.get(
                     "https://openrouter.ai/api/v1/models",
                     headers={"Authorization": f"Bearer {API_KEY}"}
@@ -6489,7 +6746,7 @@ async def get_models():
                     return {"models": simplified, "total": len(simplified), "provider": "openrouter"}
 
         elif is_google:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with _httpx_client_for_url("https://generativelanguage.googleapis.com", 30) as client:
                 response = await client.get(
                     f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
                 )
@@ -6517,7 +6774,7 @@ async def get_models():
                     return {"error": f"Google API 返回 {response.status_code}", "models": [], "provider": "google"}
 
         elif is_openai:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with _httpx_client_for_url("https://api.openai.com/v1/models", 30) as client:
                 response = await client.get(
                     "https://api.openai.com/v1/models",
                     headers={"Authorization": f"Bearer {API_KEY}"}
