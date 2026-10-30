@@ -7,11 +7,11 @@ WORKDIR /app
 # 先复制依赖文件，利用 Docker 缓存加速
 COPY requirements.txt .
 COPY wheels/ /wheels/
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --no-build-isolation /wheels/jieba-0.42.1.tar.gz && \
+    pip install --no-cache-dir \
     --timeout 120 \
     --retries 5 \
     -i "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple/}" \
-    /wheels/jieba-0.42.1.tar.gz \
     -r requirements.txt
 
 # 复制项目文件
