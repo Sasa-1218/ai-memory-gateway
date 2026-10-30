@@ -4305,6 +4305,7 @@ async def api_push_trigger(request: Request):
         _push_lock.release()
 
 
+@app.head("/")
 @app.get("/")
 async def health_check():
     """健康检查"""
