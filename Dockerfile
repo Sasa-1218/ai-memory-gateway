@@ -7,12 +7,18 @@ WORKDIR /app
 # 先复制依赖文件，利用 Docker 缓存加速
 COPY requirements.txt .
 COPY wheels/ /wheels/
-RUN pip install --no-cache-dir --no-build-isolation /wheels/jieba-0.42.1.tar.gz && \
+RUN set -eux; \
+    mkdir -p /tmp/jieba-src; \
+    tar -xzf /wheels/jieba-0.42.1.tar.gz -C /tmp/jieba-src --strip-components=1; \
+    SITE_PACKAGES="$(python -c 'import site; print(site.getsitepackages()[0])')"; \
+    cp -a /tmp/jieba-src/jieba "$SITE_PACKAGES/jieba"; \
+    grep -v '^jieba==' requirements.txt > /tmp/requirements-no-jieba.txt; \
     pip install --no-cache-dir \
     --timeout 120 \
     --retries 5 \
     -i "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple/}" \
-    -r requirements.txt
+    -r /tmp/requirements-no-jieba.txt; \
+    python -c "import jieba; print('jieba import ok')"
 
 # 复制项目文件
 COPY . .
