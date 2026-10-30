@@ -4803,8 +4803,16 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
                             timeout=15.0,
                         )
                     except asyncio.TimeoutError:
-                        # SSE 注释行：客户端不会把它显示成正文，但能维持整条链路活跃。
-                        yield b": keepalive\n\n"
+                        # 发送一个合法的 OpenAI-compatible 空 chunk。
+                        # 相比 SSE comment，这也能重置会在解析后计时的客户端 idle timeout。
+                        heartbeat = {
+                            "choices": [{
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": None,
+                            }]
+                        }
+                        yield ("data: " + json.dumps(heartbeat, ensure_ascii=False) + "\n\n").encode("utf-8")
                         print(
                             f"💓 SSE heartbeat: model={model} "
                             f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
