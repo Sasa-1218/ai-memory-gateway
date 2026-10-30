@@ -73,6 +73,25 @@ API_KEY = os.getenv("API_KEY", "")
 # 本地 Ollama: http://localhost:11434/v1/chat/completions
 API_BASE_URL = os.getenv("API_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
 
+# 模型上游代理：仅 OpenRouter 使用。兼容旧的全局代理变量，便于平滑迁移。
+# 其他 HTTP 请求显式 trust_env=False，避免 Dashboard/Bark/摘要等被全局代理连带影响。
+def _configured_upstream_proxy() -> str:
+    return (
+        os.getenv("UPSTREAM_PROXY_URL", "").strip()
+        or os.getenv("HTTPS_PROXY", "").strip()
+        or os.getenv("ALL_PROXY", "").strip()
+        or os.getenv("HTTP_PROXY", "").strip()
+    )
+
+
+def _httpx_client_for_url(url: str, timeout):
+    kwargs = {"timeout": timeout, "trust_env": False}
+    if "openrouter.ai" in str(url or "").lower():
+        proxy_url = _configured_upstream_proxy()
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+    return httpx.AsyncClient(**kwargs)
+
 # 默认模型（如果客户端没指定就用这个）
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "anthropic/claude-sonnet-4")
 
@@ -1280,7 +1299,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
             headers["HTTP-Referer"] = EXTRA_REFERER
             headers["X-Title"] = EXTRA_TITLE
 
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with _httpx_client_for_url(summary_url, 60) as client:
             response = await client.post(summary_url, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
                 "max_tokens": 3000,
@@ -1445,7 +1464,7 @@ async def consolidate_summary_parts(summary_parts: list) -> list:
             headers["X-Title"] = EXTRA_TITLE
             
         # ★ 这里把超时时间改长，给足 Token，防止长文被截断 ★
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with _httpx_client_for_url(summary_url, 180.0) as client:
             response = await client.post(summary_url, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
                 "max_tokens": 20000,
@@ -3056,7 +3075,7 @@ async def deliver_bark_push(message: str) -> dict:
         payload["badge"] = badge
 
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with _httpx_client_for_url(BARK_API_URL, 20) as client:
             response = await client.post(
                 BARK_API_URL,
                 headers={"Content-Type": "application/json"},
@@ -3108,7 +3127,7 @@ async def deliver_gateway_system_alert(title: str, message: str) -> dict:
     if BARK_OPEN_URL:
         payload["url"] = BARK_OPEN_URL
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with _httpx_client_for_url(BARK_API_URL, 20) as client:
             response = await client.post(
                 BARK_API_URL,
                 headers={"Content-Type": "application/json"},
@@ -3802,7 +3821,7 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
     }
 
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with _httpx_client_for_url(API_BASE_URL, 120) as client:
             response = await client.post(API_BASE_URL, headers=headers, json=body)
     except Exception as e:
         print(f"⚠️ 主动推送决策异常: {type(e).__name__}")
@@ -4337,7 +4356,7 @@ async def list_models():
     models_url = API_BASE_URL.replace("/chat/completions", "/models")
     try:
         headers = {"Authorization": f"Bearer {API_KEY}"}
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with _httpx_client_for_url(models_url, 30) as client:
             response = await client.get(models_url, headers=headers)
         if response.status_code == 200:
             return response.json()
@@ -4687,7 +4706,7 @@ async def chat_completions(request: Request):
         )
     else:
         try:
-            async with httpx.AsyncClient(timeout=300) as client:
+            async with _httpx_client_for_url(API_BASE_URL, 300) as client:
                 response = await client.post(API_BASE_URL, headers=headers, json=body)
         except Exception as upstream_error:
             await _record_operational_failure_safe(
@@ -4812,7 +4831,7 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
     line_buffer = ""
     accumulated_tool_calls = {}  # index -> {id, type, function: {name, arguments}}
     
-    async with httpx.AsyncClient(timeout=300) as client:
+    async with _httpx_client_for_url(API_BASE_URL, 300) as client:
         async with client.stream("POST", API_BASE_URL, headers=headers, json=body) as response:
             # 打印上游响应头（排查thinking问题用）
             upstream_ct = response.headers.get("content-type", "")
@@ -5614,7 +5633,7 @@ async def _run_experience_generation(operation: str, job_id: str, session_id: st
                 "messages": [{"role": "user", "content": build_generation_prompt(messages, operation)}],
                 "temperature": 0.3, "top_p": 0.9, "stream": False}
         _apply_memory_thinking_option(body)
-        async with httpx.AsyncClient(timeout=240.0) as client:
+        async with _httpx_client_for_url(MEMORY_API_BASE_URL, 240.0) as client:
             response = await client.post(MEMORY_API_BASE_URL,
                 headers={"Authorization": f"Bearer {MEMORY_API_KEY}", "Content-Type": "application/json"},
                 json=body)
@@ -5934,7 +5953,7 @@ async def consolidate_memories_for_date_range(start_date, end_date):
     memory_key = memory_config["api_key"]
     
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with _httpx_client_for_url(memory_url, 120.0) as client:
             # 最多重试2次（应对429限流）
             last_error = None
             for attempt in range(3):
@@ -6714,7 +6733,7 @@ async def get_models():
 
     try:
         if is_openrouter:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with _httpx_client_for_url("https://openrouter.ai/api/v1/models", 30) as client:
                 response = await client.get(
                     "https://openrouter.ai/api/v1/models",
                     headers={"Authorization": f"Bearer {API_KEY}"}
@@ -6727,7 +6746,7 @@ async def get_models():
                     return {"models": simplified, "total": len(simplified), "provider": "openrouter"}
 
         elif is_google:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with _httpx_client_for_url("https://generativelanguage.googleapis.com", 30) as client:
                 response = await client.get(
                     f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
                 )
@@ -6755,7 +6774,7 @@ async def get_models():
                     return {"error": f"Google API 返回 {response.status_code}", "models": [], "provider": "google"}
 
         elif is_openai:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with _httpx_client_for_url("https://api.openai.com/v1/models", 30) as client:
                 response = await client.get(
                     "https://api.openai.com/v1/models",
                     headers={"Authorization": f"Bearer {API_KEY}"}
