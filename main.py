@@ -890,7 +890,10 @@ async def _get_cf_access_jwks() -> list:
     if not certs_url:
         return []
 
-    async with httpx.AsyncClient(timeout=5) as client:
+    # Cloudflare Access 公钥校验属于入口鉴权基础设施，
+    # 不应依赖用于上游模型访问的 HTTP(S)_PROXY / ALL_PROXY。
+    # 否则美国代理抖动时会同时造成聊天失败和 Dashboard 403。
+    async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
         response = await client.get(certs_url)
         response.raise_for_status()
         payload = response.json()
