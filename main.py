@@ -5011,16 +5011,20 @@ async def export_memories():
 
     try:
         memories = await get_all_memories()
-        for mem in memories:
-            if mem.get("created_at"):
-                mem["created_at"] = str(mem["created_at"])
 
         payload = {
             "total": len(memories),
             "exported_at": str(__import__("datetime").datetime.now()),
+            "schema_version": 2,
+            "fields": [
+                "id", "content", "importance", "source_session", "created_at",
+                "last_accessed", "layer", "title", "is_active", "merged_from",
+                "event_date",
+            ],
             "memories": memories,
         }
-        body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        # datetime/date 等数据库类型统一序列化成字符串，避免完整字段导出时报错。
+        body = json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode("utf-8")
         export_filename = f"memories_export_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
         return Response(
