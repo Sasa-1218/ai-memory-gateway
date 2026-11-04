@@ -672,10 +672,19 @@ async def gateway_auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     header_key = request.headers.get("X-Gateway-Key", "")
+    authorization = request.headers.get("Authorization", "")
+    bearer_key = ""
+    if authorization.lower().startswith("bearer "):
+        bearer_key = authorization[7:].strip()
+
+    # 兼容两种客户端鉴权方式：
+    # 1) Kelivo 等支持自定义请求头的客户端：X-Gateway-Key
+    # 2) 仅支持标准 API Key 的 OpenAI 兼容客户端：Authorization: Bearer <key>
+    provided_key = header_key or bearer_key
 
     # compare_digest 防时序侧信道攻击
-    auth_success = bool(header_key) and secrets.compare_digest(header_key, GATEWAY_SECRET)
-    _log_auth_diag(request, header_key, auth_success)
+    auth_success = bool(provided_key) and secrets.compare_digest(provided_key, GATEWAY_SECRET)
+    _log_auth_diag(request, provided_key, auth_success)
     if not auth_success:
         return JSONResponse(
             status_code=401,
