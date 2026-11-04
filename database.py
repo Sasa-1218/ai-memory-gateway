@@ -349,6 +349,22 @@ async def init_tables():
             );
         """)
 
+        # 历史摘要归档：保存用户手动备份/自动归档的旧摘要，不默认注入聊天
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS historical_summaries (
+                id              BIGSERIAL PRIMARY KEY,
+                session_id      TEXT NOT NULL DEFAULT '',
+                period_label    TEXT NOT NULL DEFAULT '',
+                content         TEXT NOT NULL,
+                source          TEXT NOT NULL DEFAULT 'manual_backup',
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_historical_summaries_session_created
+            ON historical_summaries (session_id, created_at DESC);
+        """)
+
         # 摘要流水线健康状态：只保存脱敏状态，不保存摘要或聊天正文
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS summary_health_status (
@@ -2874,6 +2890,59 @@ async def save_session_cache_state(session_id: str, summary_parts: list, a_start
             ON CONFLICT (session_id) 
             DO UPDATE SET summary = $2, a_start_round = $3, updated_at = NOW()
         """, session_id, summary_json, a_start_round)
+
+
+async def save_historical_summary(
+    content: str,
+    period_label: str = "",
+    session_id: str = "",
+    source: str = "manual_backup",
+) -> int:
+    """保存历史摘要归档。历史摘要默认不参与聊天注入。"""
+    clean_content = str(content or "").strip()
+    if not clean_content:
+        raise ValueError("historical_summary_content_required")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO historical_summaries (session_id, period_label, content, source)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id
+        """, str(session_id or ""), str(period_label or "")[:200], clean_content, str(source or "manual_backup")[:50])
+        return int(row["id"])
+
+
+async def list_historical_summaries(session_id: str = "", limit: int = 100) -> list:
+    """列出历史摘要归档；仅管理用途，不自动注入聊天。"""
+    pool = await get_pool()
+    limit = max(1, min(int(limit or 100), 500))
+    async with pool.acquire() as conn:
+        if session_id:
+            rows = await conn.fetch("""
+                SELECT id, session_id, period_label, content, source, created_at
+                FROM historical_summaries
+                WHERE session_id = $1
+                ORDER BY created_at DESC, id DESC
+                LIMIT $2
+            """, session_id, limit)
+        else:
+            rows = await conn.fetch("""
+                SELECT id, session_id, period_label, content, source, created_at
+                FROM historical_summaries
+                ORDER BY created_at DESC, id DESC
+                LIMIT $1
+            """, limit)
+        return [dict(row) for row in rows]
+
+
+async def delete_historical_summary(summary_id: int) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM historical_summaries WHERE id = $1",
+            int(summary_id),
+        )
+        return result.endswith("1")
 
 
 async def record_summary_attempt(
