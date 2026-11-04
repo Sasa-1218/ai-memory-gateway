@@ -585,6 +585,25 @@
                     </div>
                 </div>
 
+                <div class="card" style="margin-top:16px;">
+                    <h3 style="margin-bottom:8px;">历史摘要归档</h3>
+                    <p class="section-desc" style="margin-bottom:14px;">保存以前手动备份的旧摘要。归档内容不会默认注入聊天，只作为以后检索和回溯的数据源。</p>
+                    <div class="form-group">
+                        <label class="form-label">时间标签（可选）</label>
+                        <input type="text" id="historicalSummaryPeriod" class="input" placeholder="例如：2026-01 至 2026-03">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">旧摘要正文</label>
+                        <textarea id="historicalSummaryContent" class="textarea" rows="10" placeholder="把以前备份的摘要原样粘贴到这里。可以一整份保存，不需要拆成很多条。"></textarea>
+                    </div>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn btn-primary" onclick="saveHistoricalSummary()">保存到历史摘要</button>
+                        <button class="btn btn-secondary" onclick="loadHistoricalSummaries()">刷新列表</button>
+                    </div>
+                    <div id="historicalSummaryStatus" style="margin-top:10px; color:var(--text-muted); font-size:13px;"></div>
+                    <div id="historicalSummaryList" style="margin-top:12px;"></div>
+                </div>
+
                 <div id="import-result" class="msg-container"></div>
             </section>
 
@@ -831,6 +850,16 @@
                     <div class="settings-field settings-toggle-row">
                         <label>启用缓存分区</label>
                         <label class="toggle"><input type="checkbox" id="set-CACHE_PARTITION_ENABLED"><span class="toggle-slider"></span></label>
+                    </div>
+                    <div class="settings-field">
+                        <label>近期摘要总预算（字符）</label>
+                        <input type="number" id="set-CACHE_SUMMARY_BUDGET_CHARS" class="input" min="0" step="500">
+                        <small class="form-hint">默认 6000。超过后只折叠最旧摘要，最近内容保持原样；0 = 不自动折叠。</small>
+                    </div>
+                    <div class="settings-field">
+                        <label>折叠时保留最近摘要段数</label>
+                        <input type="number" id="set-SUMMARY_KEEP_RECENT" class="input" min="1" max="10">
+                        <small class="form-hint">默认保留最近 2 段旧摘要；本轮刚生成的摘要会另外保护。</small>
                     </div>
                     <div class="settings-field">
                         <label>轮转周期 (CACHE_PARTITION_X)</label>
