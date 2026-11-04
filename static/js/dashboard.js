@@ -1971,6 +1971,89 @@ async function doTextImport() {
     }
 }
 
+async function saveHistoricalSummary() {
+    const content = document.getElementById('historicalSummaryContent')?.value.trim() || '';
+    const periodLabel = document.getElementById('historicalSummaryPeriod')?.value.trim() || '';
+    const status = document.getElementById('historicalSummaryStatus');
+    if (!content) {
+        if (status) status.textContent = '请先粘贴旧摘要正文。';
+        return;
+    }
+    if (status) status.textContent = '正在保存...';
+    try {
+        const resp = await fetch('/api/historical-summaries', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                period_label: periodLabel,
+                content,
+                source: 'manual_backup'
+            })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || data.error || ('HTTP ' + resp.status));
+        if (status) status.textContent = '已保存到历史摘要。它不会默认注入聊天。';
+        document.getElementById('historicalSummaryContent').value = '';
+        document.getElementById('historicalSummaryPeriod').value = '';
+        await loadHistoricalSummaries();
+    } catch (e) {
+        if (status) status.textContent = '保存失败：' + e.message;
+    }
+}
+
+async function loadHistoricalSummaries() {
+    const list = document.getElementById('historicalSummaryList');
+    const status = document.getElementById('historicalSummaryStatus');
+    if (!list) return;
+    list.innerHTML = '<div style="color:var(--text-muted);">正在读取历史摘要...</div>';
+    try {
+        const resp = await fetch('/api/historical-summaries?limit=100');
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || data.error || ('HTTP ' + resp.status));
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (status) status.textContent = items.length
+            ? '共 ' + items.length + ' 份历史摘要；当前均不参与默认聊天注入。'
+            : '目前还没有历史摘要。';
+        if (!items.length) {
+            list.innerHTML = '<div style="color:var(--text-muted);">暂无历史摘要。</div>';
+            return;
+        }
+        list.innerHTML = items.map(item => {
+            const label = escapeHtml(item.period_label || '未填写时间标签');
+            const preview = escapeHtml((item.content || '').slice(0, 600));
+            const more = (item.content || '').length > 600 ? '…' : '';
+            return `
+                <details class="card" style="padding:12px; margin-bottom:10px; border:1px solid var(--border-color);">
+                    <summary style="cursor:pointer; display:flex; justify-content:space-between; gap:12px;">
+                        <strong>${label}</strong>
+                        <span style="color:var(--text-muted); font-size:12px;">#${Number(item.id)} · ${Number((item.content || '').length)} 字</span>
+                    </summary>
+                    <div style="white-space:pre-wrap; line-height:1.6; margin-top:10px;">${preview}${more}</div>
+                    <div style="margin-top:10px;">
+                        <button class="btn btn-sm btn-danger" onclick="deleteHistoricalSummary(${Number(item.id)})">删除这份归档</button>
+                    </div>
+                </details>`;
+        }).join('');
+    } catch (e) {
+        list.innerHTML = '';
+        if (status) status.textContent = '读取失败：' + e.message;
+    }
+}
+
+async function deleteHistoricalSummary(id) {
+    if (!confirm('确定删除这份历史摘要归档吗？')) return;
+    const status = document.getElementById('historicalSummaryStatus');
+    try {
+        const resp = await fetch('/api/historical-summaries/' + Number(id), {method: 'DELETE'});
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || data.error || ('HTTP ' + resp.status));
+        if (status) status.textContent = '已删除历史摘要 #' + Number(id);
+        await loadHistoricalSummaries();
+    } catch (e) {
+        if (status) status.textContent = '删除失败：' + e.message;
+    }
+}
+
 async function previewJson() {
     const file = document.getElementById('jsonFile').files[0];
     const text = document.getElementById('jsonInput').value.trim();
@@ -3042,7 +3125,7 @@ const _SETTINGS_FIELDS = {
     str: ['API_BASE_URL', 'API_KEY', 'DEFAULT_MODEL', 'MEMORY_API_BASE_URL', 'MEMORY_API_KEY', 'MEMORY_MODEL', 'MEMORY_API_THINKING',
           'CACHE_SUMMARY_MODEL', 'SUMMARY_API_BASE_URL', 'SUMMARY_API_KEY', 'CACHE_PARTITION_TRIGGER', 'EMBEDDING_API_KEY', 'EMBEDDING_BASE_URL', 'EMBEDDING_MODEL', 'REASONING_EFFORT',
          'role_display_user', 'role_display_assistant'],
-    int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'EMBEDDING_DIM'],
+    int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'CACHE_SUMMARY_BUDGET_CHARS', 'SUMMARY_KEEP_RECENT', 'EMBEDDING_DIM'],
     float: ['MIN_SCORE_THRESHOLD'],
     bool: ['MEMORY_ENABLED', 'CACHE_PARTITION_ENABLED', 'MEMORY_VECTOR_ENABLED', 'FORCE_STREAM'],
     range: ['MEMORY_HW_KEYWORD', 'MEMORY_HW_SEMANTIC', 'MEMORY_HW_IMPORTANCE',
