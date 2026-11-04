@@ -2220,12 +2220,15 @@ async def get_all_memories_count():
 
 
 async def get_all_memories():
-    """导出所有记忆（用于备份）"""
+    """导出所有记忆（完整字段，用于备份、迁移和离线检查）"""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT content, importance, source_session, created_at FROM memories ORDER BY id"
-        )
+        rows = await conn.fetch("""
+            SELECT id, content, importance, source_session, created_at, last_accessed,
+                   layer, title, is_active, merged_from, event_date
+            FROM memories
+            ORDER BY id
+        """)
         return [dict(r) for r in rows]
 
 
