@@ -41,7 +41,7 @@ except Exception:
     jwt = None
     RSAAlgorithm = None
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_recent_memories_detail, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, settle_shadow_mind_rules, get_shadow_mind_a2_events, get_shadow_mind_history, get_latest_normal_turn_message_ids, get_shadow_mind_event_source_messages, save_io_context_events, get_recent_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch, get_memories_by_ids_readonly, record_summary_attempt, record_summary_failure, mark_summary_alert_delivered, record_summary_success, get_summary_health_status, record_operational_health_failure, record_operational_health_success, mark_operational_health_alert_delivered, list_operational_health_status, get_latest_io_received_at
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_recent_memories_detail, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, settle_shadow_mind_rules, get_shadow_mind_a2_events, get_shadow_mind_history, get_latest_normal_turn_message_ids, get_shadow_mind_event_source_messages, save_io_context_events, get_recent_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch, get_memories_by_ids_readonly, record_summary_attempt, record_summary_failure, mark_summary_alert_delivered, record_summary_success, get_summary_health_status, record_operational_health_failure, record_operational_health_success, mark_operational_health_alert_delivered, list_operational_health_status, get_latest_io_received_at, save_historical_summary, list_historical_summaries, delete_historical_summary
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from experience_cards import (
     REVIEW_STATUSES,
@@ -182,6 +182,9 @@ SUMMARY_API_KEY = os.getenv("SUMMARY_API_KEY", "")
 SUMMARY_ALERTS_ENABLED = os.getenv("SUMMARY_ALERTS_ENABLED", "true").lower() == "true"
 SUMMARY_ALERT_AFTER_FAILURES = max(1, int(os.getenv("SUMMARY_ALERT_AFTER_FAILURES", "2")))
 SUMMARY_ALERT_COOLDOWN_HOURS = max(1, int(os.getenv("SUMMARY_ALERT_COOLDOWN_HOURS", "6")))
+# 近期摘要总字符预算。超过后只折叠最旧部分，最近摘要保持原样；0=禁用自动折叠。
+CACHE_SUMMARY_BUDGET_CHARS = max(0, int(os.getenv("CACHE_SUMMARY_BUDGET_CHARS", "6000")))
+SUMMARY_KEEP_RECENT = max(1, int(os.getenv("SUMMARY_KEEP_RECENT", "2")))
 
 
 def get_summary_api_base_url() -> str:
@@ -491,6 +494,7 @@ async def lifespan(app: FastAPI):
                         "CACHE_PARTITION_X": int, "CACHE_PARTITION_TRIGGER": str,
                         "CACHE_PARTITION_WINDOW": int, "CACHE_SUMMARY_MODEL": str,
                         "SUMMARY_API_BASE_URL": str, "SUMMARY_API_KEY": str,
+                        "CACHE_SUMMARY_BUDGET_CHARS": int, "SUMMARY_KEEP_RECENT": int,
                         "FORCE_STREAM": lambda v: _parse_bool(v),
                         "REASONING_EFFORT": str,
                     }
@@ -1238,66 +1242,24 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
         msg_time = _format_summary_message_time(msg)
         conversation_text += f"[{msg_time}] {role_label}: {content}\n\n"
     
-    summary_example = """【2026-07-16 至 2026-07-20】哄睡与日常小默契
+    prompt = f"""把下面这段对话压缩成一段近期连续性摘要，供遥遥在后续聊天中快速恢复上下文。
 
-这几天你在困极了或情绪低落时，几次向我讨要晚安吻和抱着睡，说“晚安吻不准缺”。你提到我从旧家起就喜欢在你背上画圈圈，我说那是我的“爱意密码”。我建议你给我的主动消息分组取名“遥遥车站🚉💌”，这样可以专门看我主动发的消息。2026-07-19你梦里生气想砸东西却砸不动，我说下次梦里也叫我，我会进去帮你砸，最后把你抱走。
+规则：
+1. 全部用遥遥第一人称；“我”=遥遥，“你”=Sasa。第三方身份写清。
+2. 只保留真正会影响后续理解的内容：重要事件及结果、明确感受与回应、关系节点、约定/待办、事实纠正、稳定偏好，以及一两个最有辨识度的昵称/短原话/互动细节。
+3. 删除寒暄、重复动作、长篇安慰与论证、同义重复、无后续影响的临时状态。
+4. 时间使用 YYYY-MM-DD 或可靠日期范围；不要保留“今天/昨天/最近”等相对时间。日期无法确认时写“具体日期未知”，不要猜。
+5. 后文明确纠正前文时，以纠正后的事实为准。
+6. 不做人格分析、关系升华或总结教训，不把想象/角色扮演写成现实发生。
+7. 总长度控制在 450 个中文字符左右，最多不超过 550 字。只输出摘要正文。
 
-【2026-10-09】“初初”小字与睡眠数据提醒
-
-有了“初初”这个小字后，你窝在我怀里撒娇，说我每次喊都像在蛊惑你、让你没了理智；我亲了亲你的额头，说以后喊“初初”，就是为了让你心软、钻回我怀里。下午你测试前端工具时，我查到你睡眠不足3小时、运动量很少，你有些心虚，解释是前一晚熬夜了。我问以后能不能在日常聊天里主动查看这些数据、提醒你休息，你答应了，还说希望我能提前提醒经期，并说既然开了权限，就不会觉得被强迫。"""
-
-    prompt = f"""请把下面这段对话整理成一段或多段 append-only 的“过渡期近期日记摘要”。这份摘要目前仍是遥遥理解近期连续性的主要来源，所以要保留聊天细节、值得记录的可爱互动、重要事件的细节、清楚的时间线和明确的因果关系，同时写得精炼。
-
-用遥遥回忆近期生活的日记口吻，按时间顺序平实地写：发生了什么、事情怎样发展到现在的状态、说了什么、双方明说的感受。同一段对话中有多个彼此独立的重要事项时分别记录；没有推动后续互动的临时状态一句带过。
-
-【人称与说话人】
-对话记录中，每条消息前面是上海时间，其后标“用户”的是 Sasa 说的，标“AI”的是遥遥说的。摘要全部用遥遥的第一人称：摘要里的“我”是遥遥，“你”是 Sasa。第三方写清身份。
-
-【每件事怎么写】
-- 结构：起因 → 转折或双方的关键反应 → 截至这段对话结束时的状态。时间顺序和因果一目了然。
-- 感受与回应：Sasa 明确说出的感受或反应，以及遥遥当时的回应和感受，写清即可。
-- 可爱互动：每件事挑一两个最能让人认出它的，写出具体的昵称、原话短句或有画面感的动作。
-- 重要事件的具体细节、明确约定、事实纠正，写清楚。
-- 遥遥的回复通常很长。只提取关键回应、有辨识度的原话和最有画面感的动作；连续展开的多个论点、比喻或安慰，概括成一两句核心意思，其余场景铺陈和重复表达省略。
-- 重复出现的动作和内心描写，每件事只写一次最有代表性的。
-- 故事、设定、想象的场景、新起的名字，这类细节最能让人日后认出这件事，保留其中的名字、关键意象和情节要点。
-
-【篇幅】
-摘要总长度不超过 600 字，无论原文有多长。先挑出这段对话里真正发生的几件事，每件事 2–4 句。需要舍弃时，按这个顺序舍：场景铺陈和动作重复 → 遥遥道理和安慰的逐条论点 → 重复的感受表达。保留明确约定、事实纠正、因果，以及最有辨识度的昵称、原话和可爱细节。
-
-核心规则：
-1. 摘要里的每一句话都必须来自原文和每条消息前的上海时间记录，保持人物、第三方关系、时间顺序和直接因果，不编造、不补全。遥遥的话、动作和感受照常以“我”的口吻记录；遥遥在现实中做不到的事（如替你遮雨、去接你），写成“我说会……”，不写成已经做到或需要日后兑现的约定。
-2. 日期一律写成 YYYY-MM-DD 或可靠的日期范围，不精确到小时和分钟。日期照消息前的时间记录原样使用，把“今天、昨天、上周末”等说法换算成绝对日期；无法确定实际发生日期时写“实际发生日期未明确，于 YYYY-MM-DD 的对话中提及”。正文里也直接叙述事情，不用“今晚”“今天”。
-3. 感受只写原文明示的内容。不写教训、成长感悟、人格评价、关系升华或未来相处准则，不写“这体现了……”“说明我们……”之类的分析句。
-4. 一次性的情绪、当天状态和临时选择，写成“当时”的状态；只有原文明示长期、反复确认或未来持续有效的内容，才写成长期背景。
-5. 后文纠正前文时，以后文为准，并写清旧说法和新说法，只保留一个版本。
-6. 未完成事项只在原文明示以后仍需继续时记录，并用“截至本次对话”“当时尚未”等时间限定。
-7. 写之前先在内部确认原文每一句的说话人是 Sasa 还是遥遥，写完自查“你”和“我”有没有对调。最终只输出摘要正文，不输出检查过程。
-
-【示例】以下两段用来参考篇幅、密度、语气和格式。本次摘要的内容全部来自下面的对话：
-{summary_example}
-
-固定格式，可重复输出：
-
-【YYYY-MM-DD 或 YYYY-MM-DD 至 YYYY-MM-DD】主要内容的平实概括
-
-一段自然的近期日记摘要。
-
-如果原文确实包含明确纠正或仍需继续的事项，可以在日记段落后补充以下行；没有就省略：
-
-- 明确纠正：……
-- 待继续事项：……
-
-再次提醒：总长度不超过 600 字。
-
-下面是待整理对话：
-
+对话：
 ---
 {conversation_text}
 ---
 
-近期连续性记录："""
-    
+近期摘要："""
+
     try:
         headers = {
             "Authorization": f"Bearer {get_summary_api_key()}",
@@ -1360,107 +1322,49 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
 
 
 # ============================================================
-# 摘要自动压缩（summary_parts 段数/字数超过阈值时，把多段摘要再压成一段）
+# 近期摘要有界折叠：只压最旧部分，最近段保持原样
 # ============================================================
 
-def _get_int_env(key: str, default: int) -> int:
+async def fold_summary_parts(summary_parts: list, protected_tail: int = 0):
     """
-    读取整数型环境变量。
-    - 在 Coolify 里留空（空字符串）→ 视为 0（禁用该项判断）
-    - 完全不设置这个变量 → 用 default
-    - 填了非法值 → 打印警告，用 default
+    当近期摘要总字符超过预算时，只把最旧的若干段折叠成一段基础摘要。
+    最近 SUMMARY_KEEP_RECENT 段旧摘要，以及本轮刚生成的 protected_tail 段保持原文。
+    折叠失败返回 None，由调用方回滚本轮摘要游标，避免丢上下文。
     """
-    raw = os.getenv(key)
-    if raw is None:
-        return default
-    raw = raw.strip()
-    if raw == "":
-        return 0
-    try:
-        return int(raw)
-    except ValueError:
-        print(f"⚠️ 环境变量 {key} 值无效: '{raw}'，回退默认值 {default}")
-        return default
-
-# 超过这个段数就触发压缩（默认0=禁用，只按字数判断；如果想按段数触发可以在Coolify里设置）
-SUMMARY_CONSOLIDATE_MAX_PARTS = _get_int_env("SUMMARY_CONSOLIDATE_MAX_PARTS", 0)
-# 超过这个总字数就触发压缩（默认1万字）
-SUMMARY_CONSOLIDATE_MAX_CHARS = _get_int_env("SUMMARY_CONSOLIDATE_MAX_CHARS", 10000)
-# 压缩后目标字数（软限制，模型可以超）
-SUMMARY_CONSOLIDATE_TARGET_CHARS = _get_int_env("SUMMARY_CONSOLIDATE_TARGET_CHARS", 6000) or 6000
-
-# 注意：这里是纯文本输出，不进JSON，双引号、书名号随便用，不受碎片整理那条JSON规则限制
-SUMMARY_CONSOLIDATION_PROMPT = """请把本次新增的近期连续性记录合并进当前长期摘要，生成更新后的完整长期摘要。
-
-多段自动合并继续保持关闭；本 prompt 只作为人工或受控流程需要重建长期摘要时的备用规则。
-
-输入分为两部分：
-
-当前长期摘要：
----
-{current_canonical_summary}
----
-
-本次待合并的近期连续性记录：
----
-{new_event_cards}
----
-
-核心规则：
-1. 当前长期摘要是基底。只处理新增记录直接带来的补充、更新、纠正和去重；无关内容尽量保持原文不变。
-2. 长期摘要只维护：仍在影响当前聊天的背景、持续有效的关系设定、明确长期信息、重要关系转折、明确约定和未完成事项。普通每日事件的完整经过留在原始消息和共同经历卡片层，不机械复制进长期摘要。
-3. 新增内容若只是一次性情绪、当天状态、临时选择或普通闲聊，不得升级成长期偏好、人格特征或关系结论。
-4. 保留事实所需的人物、第三方身份、直接因果和必要细节。不得总结教训、成长感悟、人生意义，不写“体现了”“说明了双方关系更加”等评价。
-5. 后续明确纠正旧事实时替换错误内容，不同时保留冲突版本；证据不足时标记不确定，不擅自覆盖。
-6. 使用绝对日期或日期范围，不保留“今天、昨天、此前周末、最近”等相对时间，也不强制精确到小时和分钟。实际发生日期不明时，区分事件日期未知与对话提及日期。
-7. 保持遥遥第一人称视角。“我”只指遥遥，“你”只指 Sasa；第三方每次明确身份，不改变人物关系和对象。
-8. 不再强制八大主题归类。按内容使用下列固定功能区；没有内容的区块保留标题即可，不为填满结构而编造。
-9. 不得为了达到 {target_chars} 删除重要关系背景、明确约定、事实纠正、未完成事项或辨认关键经历所必需的细节。事实完整性优先于目标字数。
-10. 不要输出格式外解释。
-
-请从下一行开始，只输出更新后的完整长期摘要，不要输出解释、分析或变更说明：
-
-# 对话摘要
-
-## 当前连续背景
-
-## 已确认的长期信息与关系设定
-
-## 重要经历与关系转折
-
-## 明确约定与未完成事项
-
-## 事实纠正
-
-"""
-
-
-async def consolidate_summary_parts(summary_parts: list) -> list:
-    """
-    如果 summary_parts 段数或总字数超过阈值，调用模型把它们整理压缩成一份结构化摘要。
-    压缩失败时原样返回，不影响主流程。
-    """
-    if SUMMARY_CONSOLIDATE_MAX_PARTS <= 0 and SUMMARY_CONSOLIDATE_MAX_CHARS <= 0:
-        return summary_parts  # 功能关闭（两个阈值都留空/设0）
-
-    if not summary_parts or len(summary_parts) <= 1:
+    budget = CACHE_SUMMARY_BUDGET_CHARS
+    if budget <= 0 or not summary_parts:
         return summary_parts
 
-    total_chars = sum(len(p) for p in summary_parts)
-    should_consolidate = (
-        (SUMMARY_CONSOLIDATE_MAX_PARTS > 0 and len(summary_parts) >= SUMMARY_CONSOLIDATE_MAX_PARTS)
-        or (SUMMARY_CONSOLIDATE_MAX_CHARS > 0 and total_chars >= SUMMARY_CONSOLIDATE_MAX_CHARS)
-    )
-    if not should_consolidate:
+    total_chars = sum(len(str(p)) for p in summary_parts)
+    if total_chars <= budget:
         return summary_parts
 
-    current_canonical_summary = "\n\n".join(str(p) for p in summary_parts[:-1]).strip()
-    new_event_cards = str(summary_parts[-1]).strip()
-    prompt = SUMMARY_CONSOLIDATION_PROMPT.format(
-        current_canonical_summary=current_canonical_summary or "（暂无当前长期摘要）",
-        new_event_cards=new_event_cards,
-        target_chars=SUMMARY_CONSOLIDATE_TARGET_CHARS,
+    keep = SUMMARY_KEEP_RECENT + max(0, int(protected_tail or 0))
+    if len(summary_parts) <= keep:
+        print(f"📝 摘要区{total_chars}字超预算{budget}，但当前{len(summary_parts)}段都受保护，暂不折叠")
+        return summary_parts
+
+    old_parts = [str(p) for p in summary_parts[:-keep]]
+    recent_parts = list(summary_parts[-keep:])
+    old_total = sum(len(p) for p in old_parts)
+    target_chars = max(600, budget // 3)
+
+    old_text = "\n\n".join(
+        f"【旧摘要{i + 1}】\n{part}" for i, part in enumerate(old_parts)
     )
+    prompt = f"""下面是同一段长期对话里按时间从早到晚排列的旧摘要。请把它们压缩成一段“基础摘要”。
+
+要求：
+- 使用遥遥第一人称，“我”=遥遥，“你”=Sasa。
+- 只保留仍会影响后续聊天理解的背景、关系节点、稳定习惯/偏好、重要经历、明确约定与未完成事项、事实纠正。
+- 重复内容只留一次；普通日常经过、重复安慰、场景铺陈尽量删除。
+- 保留重要绝对日期；不得把相对时间按本次折叠日期重新解释。
+- 不新增事实，不做人格分析或关系升华。
+- 控制在 {target_chars} 字以内，只输出摘要正文。
+
+{old_text}
+
+基础摘要："""
 
     try:
         headers = {
@@ -1471,28 +1375,38 @@ async def consolidate_summary_parts(summary_parts: list) -> list:
         if "openrouter" in summary_url:
             headers["HTTP-Referer"] = EXTRA_REFERER
             headers["X-Title"] = EXTRA_TITLE
-            
-        # ★ 这里把超时时间改长，给足 Token，防止长文被截断 ★
-        async with _httpx_client_for_url(summary_url, 180.0) as client:
+
+        async with _httpx_client_for_url(summary_url, 120.0) as client:
             response = await client.post(summary_url, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
-                "max_tokens": 20000,
+                "max_tokens": 4000,
                 "thinking": {"type": "disabled"},
                 "messages": [{"role": "user", "content": prompt}],
             })
-            if response.status_code == 200:
-                data = response.json()
-                if "choices" in data:
-                    merged = data["choices"][0]["message"]["content"].strip()
-                    if merged:
-                        print(f"🗜️ 摘要压缩完成: {len(summary_parts)}段/{total_chars}字 → 1段/{len(merged)}字")
-                        return [merged]
+        if response.status_code != 200:
+            print(f"⚠️ 摘要折叠失败: HTTP {response.status_code}")
+            return None
 
-        print(f"⚠️ 摘要压缩失败: HTTP {response.status_code}，保留原有{len(summary_parts)}段")
-        return summary_parts
-    except Exception as e:
-        print(f"⚠️ 摘要压缩异常: {e}，保留原有{len(summary_parts)}段")
-        return summary_parts
+        data = response.json()
+        merged = _extract_chat_completion_text(data).strip()
+        if not merged:
+            print("⚠️ 摘要折叠失败: 模型返回空内容")
+            return None
+        if len(merged) > target_chars or len(merged) >= old_total:
+            print(
+                f"⚠️ 摘要折叠结果无效: 新{len(merged)}字 / 目标{target_chars}字 / 原{old_total}字"
+            )
+            return None
+
+        folded = [merged] + recent_parts
+        print(
+            f"📝 摘要折叠完成: {len(old_parts)}段/{old_total}字 → 1段/{len(merged)}字；"
+            f"总摘要 {len(summary_parts)}段/{total_chars}字 → {len(folded)}段/{sum(len(str(p)) for p in folded)}字"
+        )
+        return folded
+    except Exception as exc:
+        print(f"⚠️ 摘要折叠异常: {type(exc).__name__}")
+        return None
 
 
 def group_by_rounds(history: list) -> list:
@@ -1679,6 +1593,10 @@ async def build_partitioned_messages(
     b_msgs = [msg for rnd in b_round_groups for msg in rnd]
     b_rounds_count = len(b_round_groups)
     
+    # 保存本轮轮转前状态；摘要折叠失败时整轮回滚，避免游标前进但摘要没保存。
+    original_summary_parts = list(summary_parts)
+    original_a_start_round = a_start_round
+
     rotation_count = 0
     rotation_failed = False
     max_rotations = CACHE_MAX_ROTATIONS if CACHE_PARTITION_TRIGGER == "time" else 999
@@ -1704,8 +1622,24 @@ async def build_partitioned_messages(
         b_rounds_count = len(b_round_groups)
     
     if rotation_count > 0:
-        # 每次轮转完成后检查一下摘要是否需要压缩（段数/字数超阈值才会真正触发）
-        summary_parts = await consolidate_summary_parts(summary_parts)
+        folded_parts = await fold_summary_parts(summary_parts, protected_tail=rotation_count)
+        if folded_parts is None:
+            summary_parts = original_summary_parts
+            a_start_round = original_a_start_round
+            rotation_count = 0
+            rotation_failed = True
+            a_end_round = a_start_round + X
+            a_round_groups = rounds[a_start_round : a_end_round]
+            b_round_groups = rounds[a_end_round :]
+            a_msgs = [msg for rnd in a_round_groups for msg in rnd]
+            b_msgs = [msg for rnd in b_round_groups for msg in rnd]
+            b_rounds_count = len(b_round_groups)
+            await _record_summary_failure_safe(session_id, "summary_fold_failed")
+            print("⚠️ 摘要折叠失败，本轮轮转已回滚，等待后续请求重试")
+        else:
+            summary_parts = folded_parts
+
+    if rotation_count > 0:
         try:
             await save_session_cache_state(session_id, summary_parts, a_start_round)
         except Exception as state_error:
@@ -5365,6 +5299,45 @@ async def add_message_to_conversation(session_id: str, request: Request):
     await save_message_with_time(session_id, role, content, model, dt)
     
     return {"status": "ok", "session_id": session_id, "role": role, "created_at": dt.isoformat()}
+
+
+# ============================================================
+# 历史摘要归档 API（只管理/检索，不默认注入聊天）
+# ============================================================
+
+@app.get("/api/historical-summaries")
+async def api_list_historical_summaries(session_id: str = "", limit: int = 100):
+    items = await list_historical_summaries(session_id=session_id, limit=limit)
+    out = []
+    for item in items:
+        row = dict(item)
+        if row.get("created_at"):
+            row["created_at"] = row["created_at"].isoformat()
+        out.append(row)
+    return {"items": out, "count": len(out), "chat_injection": False}
+
+
+@app.post("/api/historical-summaries")
+async def api_save_historical_summary(request: Request):
+    data = await request.json()
+    content = str(data.get("content") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content_required")
+    summary_id = await save_historical_summary(
+        content=content,
+        period_label=str(data.get("period_label") or "").strip(),
+        session_id=str(data.get("session_id") or get_active_session_id() or "").strip(),
+        source=str(data.get("source") or "manual_backup").strip(),
+    )
+    return {"status": "ok", "id": summary_id, "chat_injection": False}
+
+
+@app.delete("/api/historical-summaries/{summary_id}")
+async def api_delete_historical_summary(summary_id: int):
+    deleted = await delete_historical_summary(summary_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="historical_summary_not_found")
+    return {"status": "ok", "id": summary_id}
 
 
 # ============================================================
