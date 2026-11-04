@@ -1325,7 +1325,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
 # 近期摘要有界折叠：只压最旧部分，最近段保持原样
 # ============================================================
 
-async def fold_summary_parts(summary_parts: list, protected_tail: int = 0):
+async def fold_summary_parts(summary_parts: list, protected_tail: int = 0, session_id: str = ""):
     """
     当近期摘要总字符超过预算时，只把最旧的若干段折叠成一段基础摘要。
     最近 SUMMARY_KEEP_RECENT 段旧摘要，以及本轮刚生成的 protected_tail 段保持原文。
@@ -1396,6 +1396,19 @@ async def fold_summary_parts(summary_parts: list, protected_tail: int = 0):
             print(
                 f"⚠️ 摘要折叠结果无效: 新{len(merged)}字 / 目标{target_chars}字 / 原{old_total}字"
             )
+            return None
+
+        # 折叠前的旧摘要原文自动归档，之后不默认注入聊天；这样压缩并不等于丢失。
+        try:
+            local_now = datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)
+            await save_historical_summary(
+                content=old_text,
+                period_label=f"自动折叠归档 {local_now.strftime('%Y-%m-%d')}",
+                session_id=session_id,
+                source="auto_fold",
+            )
+        except Exception as archive_exc:
+            print(f"⚠️ 旧摘要自动归档失败: {type(archive_exc).__name__}；本次折叠不继续")
             return None
 
         folded = [merged] + recent_parts
@@ -1622,7 +1635,7 @@ async def build_partitioned_messages(
         b_rounds_count = len(b_round_groups)
     
     if rotation_count > 0:
-        folded_parts = await fold_summary_parts(summary_parts, protected_tail=rotation_count)
+        folded_parts = await fold_summary_parts(summary_parts, protected_tail=rotation_count, session_id=session_id)
         if folded_parts is None:
             summary_parts = original_summary_parts
             a_start_round = original_a_start_round
@@ -6849,6 +6862,8 @@ async def get_settings():
             "CACHE_SUMMARY_MODEL":     db.get("CACHE_SUMMARY_MODEL") or str(CACHE_SUMMARY_MODEL),
             "SUMMARY_API_BASE_URL":    db.get("SUMMARY_API_BASE_URL") or str(SUMMARY_API_BASE_URL),
             "SUMMARY_API_KEY":         _mask_key(summary_key_raw),
+            "CACHE_SUMMARY_BUDGET_CHARS": int(db.get("CACHE_SUMMARY_BUDGET_CHARS") or CACHE_SUMMARY_BUDGET_CHARS),
+            "SUMMARY_KEEP_RECENT":        int(db.get("SUMMARY_KEEP_RECENT") or SUMMARY_KEEP_RECENT),
 
             # 向量搜索（开源版用 EMBEDDING_API_KEY + EMBEDDING_BASE_URL）
             "MEMORY_VECTOR_ENABLED":   _parse_bool(db.get("MEMORY_VECTOR_ENABLED"), _db_module.MEMORY_VECTOR_ENABLED),
@@ -6907,6 +6922,8 @@ async def save_settings(request: Request):
             "CACHE_SUMMARY_MODEL":   str,
             "SUMMARY_API_BASE_URL":  str,
             "SUMMARY_API_KEY":       str,
+            "CACHE_SUMMARY_BUDGET_CHARS": int,
+            "SUMMARY_KEEP_RECENT":      int,
             "FORCE_STREAM":          lambda v: _parse_bool(v),
             "REASONING_EFFORT":      str,
         }
