@@ -4812,6 +4812,39 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
             stream_started = time.monotonic()
             first_chunk_seen = False
             done_seen = False
+            conversation_persist_scheduled = False
+
+            def schedule_conversation_persist_once(trigger: str):
+                """终止信号出现后立即安排持久化；重复调用只会生效一次。"""
+                nonlocal conversation_persist_scheduled
+                if conversation_persist_scheduled:
+                    return
+                if not MEMORY_ENABLED or not (user_message or tool_messages or user_content is not None):
+                    return
+
+                conversation_persist_scheduled = True
+                assistant_msg_snapshot = "".join(full_response)
+                assistant_reasoning_snapshot = "".join(full_reasoning) if full_reasoning else None
+                assistant_tool_calls_snapshot = list(accumulated_tool_calls.values()) if accumulated_tool_calls else None
+                asyncio.create_task(
+                    process_memories_background(
+                        session_id,
+                        user_message,
+                        assistant_msg_snapshot,
+                        model,
+                        context_messages=original_messages,
+                        skip_conversation_log=skip_conversation_log,
+                        tool_messages=tool_messages,
+                        assistant_tool_calls=assistant_tool_calls_snapshot,
+                        assistant_reasoning=assistant_reasoning_snapshot,
+                        user_content=user_content,
+                    )
+                )
+                print(
+                    f"💾 conversation_persist_scheduled trigger={trigger} "
+                    f"assistant_chars={len(assistant_msg_snapshot)} skip={skip_conversation_log}",
+                    flush=True,
+                )
 
             async def pump_upstream():
                 try:
@@ -4869,14 +4902,15 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
                             flush=True,
                         )
 
-                    # 原始字节直接透传给客户端
-                    yield chunk
-
                     if is_error:
                         error_body_parts.append(chunk)
+                        # 错误响应原样透传；不安排正常对话持久化。
+                        yield chunk
                         continue
 
-                    # 旁路解析：从字节流中提取assistant回复内容，用于后续记忆提取
+                    # 先解析再透传。客户端收到 [DONE] 后可能立刻断开，
+                    # 因此终止信号必须在 yield 之前登记，并提前安排持久化。
+                    terminal_in_chunk = False
                     text = chunk.decode("utf-8", errors="ignore")
                     line_buffer += text
                     while "\n" in line_buffer:
@@ -4884,6 +4918,7 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
                         line = line.strip()
                         if line == "data: [DONE]":
                             done_seen = True
+                            terminal_in_chunk = True
                         elif line.startswith("data: "):
                             try:
                                 data = json.loads(line[6:])
@@ -4891,7 +4926,12 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
                                 if "usage" in data:
                                     stream_usage = data["usage"]
 
-                                delta = data.get("choices", [{}])[0].get("delta", {})
+                                first_choice = data.get("choices", [{}])[0] if data.get("choices") else {}
+                                if first_choice.get("finish_reason"):
+                                    done_seen = True
+                                    terminal_in_chunk = True
+
+                                delta = first_choice.get("delta", {})
                                 content = delta.get("content", "")
                                 if content:
                                     full_response.append(content)
@@ -4922,6 +4962,12 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
                                                 accumulated_tool_calls[idx]["function"]["arguments"] += fn["arguments"]
                             except (json.JSONDecodeError, KeyError, IndexError):
                                 pass
+
+                    if terminal_in_chunk:
+                        schedule_conversation_persist_once("terminal_before_yield")
+
+                    # 原始字节直接透传给客户端
+                    yield chunk
             except asyncio.CancelledError:
                 print(
                     f"⚠️ 下游流被取消: model={model} "
@@ -4944,6 +4990,11 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
                 f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
                 flush=True,
             )
+
+            # 某些上游以 EOF 结束而没有显式 [DONE]/finish_reason；
+            # 正常读完整个 200 流后仍兜底安排一次持久化。
+            if not is_error:
+                schedule_conversation_persist_once("normal_stream_end")
     
     assistant_msg = "".join(full_response)
     if not is_error:
@@ -4973,13 +5024,9 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
     else:
         _log_usage_diag("Stream", None)
     
-    if MEMORY_ENABLED and (user_message or tool_messages or user_content is not None):
-        asyncio.create_task(
-            process_memories_background(session_id, user_message, assistant_msg, model, 
-                                        context_messages=original_messages, skip_conversation_log=skip_conversation_log,
-                                        tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
-                                        assistant_reasoning=assistant_reasoning, user_content=user_content)
-        )
+    # 对话持久化已在终止信号出现时或正常流结束时提前安排；
+    # 这里保留幂等兜底，避免未来改动出现无终止信号的遗漏。
+    schedule_conversation_persist_once("post_stream_fallback")
 
 
 # ============================================================
