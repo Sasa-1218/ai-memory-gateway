@@ -5676,14 +5676,17 @@ async def _run_experience_generation(operation: str, job_id: str, session_id: st
         )
         return {"status": "succeeded", "job_id": job_id, "card_ids": card_ids}
     except Exception as exc:
-        reason = type(exc).__name__
+        error_type = type(exc).__name__
+        error_detail = str(exc).strip()
+        reason = f"{error_type}: {error_detail}" if error_detail else error_type
         await fail_experience_generation_job(job_id, reason)
         print(
             "[experience-generation] failed "
             f"operation={operation} message_id_start={min(message_ids)} "
             f"message_id_end={max(message_ids)} message_count={len(message_ids)} "
             f"model={MEMORY_MODEL or 'not_configured'} "
-            f"elapsed_ms={int((time.monotonic() - started) * 1000)} error_type={reason}"
+            f"elapsed_ms={int((time.monotonic() - started) * 1000)} "
+            f"error_type={error_type} error_detail={error_detail[:160]}"
         )
         raise HTTPException(status_code=502, detail=reason) from exc
 
