@@ -5623,8 +5623,12 @@ async def _run_experience_generation(operation: str, job_id: str, session_id: st
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not created:
-        return {"status": job["status"], "job_id": job_id,
-                "card_ids": list(job.get("result_card_ids") or [])}
+        return {
+            "status": job["status"],
+            "job_id": job_id,
+            "card_ids": list(job.get("result_card_ids") or []),
+            "error_message": str(job.get("error_message") or ""),
+        }
     try:
         if not MEMORY_API_BASE_URL or not MEMORY_API_KEY or not MEMORY_MODEL:
             raise ValueError("memory_config_missing")
@@ -5713,6 +5717,20 @@ async def _experience_card_auto_tick() -> dict:
         result = await _run_experience_generation(
             "auto_generate", job_id, session_id, messages
         )
+        if result.get("status") == "failed":
+            # A deterministic auto job id means a previously failed job cannot
+            # genuinely retry: begin_experience_generation_job() will just
+            # return the same failed row. Advance this auto batch so the
+            # background poller does not hammer the same failure forever.
+            # Source messages remain in conversations and can still be
+            # regenerated manually with a fresh manual job id.
+            await finish_experience_auto_batch(session_id, until_id, True)
+            reason = str(result.get("error_message") or "previous_auto_job_failed")
+            print(
+                "[experience-auto] skipped_failed_job "
+                f"message_count={len(messages)} until_id={until_id} reason={reason}"
+            )
+            return {"status": "skipped", "reason": reason}
         if result.get("status") != "succeeded":
             raise RuntimeError("auto_generation_not_succeeded")
         await finish_experience_auto_batch(session_id, until_id, True)
@@ -5723,13 +5741,27 @@ async def _experience_card_auto_tick() -> dict:
         )
         return result
     except Exception as exc:
-        await finish_experience_auto_batch(session_id, until_id, False)
+        # The generation job itself records the original failure reason.
+        # Do not leave a deterministic failed auto job eligible forever:
+        # that would only re-read the same failed row every poll interval.
+        job = await get_experience_generation_job(job_id)
+        terminal_failed = bool(job and job.get("status") == "failed")
+        await finish_experience_auto_batch(session_id, until_id, terminal_failed)
+        original_reason = str(
+            (job or {}).get("error_message")
+            or getattr(exc, "detail", "")
+            or type(exc).__name__
+        )
         await _record_operational_failure_safe(
             "experience_cards",
-            f"exception_{type(exc).__name__}",
+            f"generation_{original_reason}",
         )
-        print(f"[experience-auto] failed error_type={type(exc).__name__}")
-        return {"status": "failed", "reason": type(exc).__name__}
+        print(
+            "[experience-auto] failed "
+            f"error_type={type(exc).__name__} reason={original_reason} "
+            f"auto_batch_advanced={terminal_failed}"
+        )
+        return {"status": "failed", "reason": original_reason}
 
 
 async def _experience_card_auto_loop():
