@@ -1749,6 +1749,16 @@ async def build_partitioned_messages(
     rotation_count = 0
     rotation_failed = False
     max_rotations = CACHE_MAX_ROTATIONS if CACHE_PARTITION_TRIGGER == "time" else 999
+    # Keep Rora chatting while an explicit repair runs, but do not let normal
+    # X=8 rotation write to the same active summary during repair generation.
+    from summary_repair_job import is_active as _summary_repair_active
+    if _summary_repair_active(session_id):
+        max_rotations = 0
+        print(
+            "[summary-repair] normal_partition_rotation_paused "
+            f"session={_short_hash_text(session_id)}",
+            flush=True,
+        )
     while _should_rotate(b_rounds_count, X, a_msgs) and rotation_count < max_rotations:
         trigger_info = f"B区{b_rounds_count}轮 >= X={X}" if CACHE_PARTITION_TRIGGER != "time" else f"A区首条消息超出{CACHE_PARTITION_WINDOW}分钟窗口"
         print(f"🔄 轮转尝试#{rotation_count + 1}: session={session_id}, {trigger_info}")
