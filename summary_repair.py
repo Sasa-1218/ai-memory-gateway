@@ -2,7 +2,7 @@
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import HTTPException
 from database import get_pool, get_session_cache_state
@@ -124,6 +124,15 @@ async def preview(session_id, archive_id, start_round, preserved_parts, x):
         "regenerate_round_ranges": [
             [start_round + i*x, start_round + (i+1)*x]
             for i in range(len(s["blocks"]))
+        ],
+        "block_date_ranges": [
+            [
+                block[0]["created_at"].astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+                if block and isinstance(block[0].get("created_at"), datetime) else "未知",
+                block[-1]["created_at"].astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+                if block and isinstance(block[-1].get("created_at"), datetime) else "未知",
+            ]
+            for block in s["blocks"]
         ],
         "total_conversation_rounds": s["rounds"],
         "new_cursor_after_repair": s["cursor"],
