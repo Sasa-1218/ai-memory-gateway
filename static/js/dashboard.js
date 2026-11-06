@@ -3622,6 +3622,15 @@ async function previewSummaryRepair() {
         const retainedText = preview.retained_preview.map(p =>
             '\n【保留的现有摘要第 ' + p.index + ' 段 / ' + p.chars + ' 字】\n' + p.text
         ).join('\n');
+        const boundaryReport = '\n\n—— 归档末尾（原样核对）——' +
+            (preview.archive_tail || []).map(p =>
+                '\n【归档段 ' + p.index + ' / ' + p.chars + ' 字】\n' + p.text
+            ).join('\n') +
+            '\n\n—— 本次丢弃的旧摘要（仅供核对，不会保留）——' +
+            (preview.discarded_current_parts || []).map(p =>
+                '\n【旧摘要段 ' + p.index + ' / ' + p.chars + ' 字】\n' + p.text
+            ).join('\n') +
+            '\n\n提示：这只是日期与内容的对照，不代表已自动验证无遗漏。';
         output.textContent =
             '当前：' + preview.current_parts + ' 段 / ' + preview.current_chars + ' 字' +
             '\n归档：#' + preview.archive_id + ' ' + preview.archive_label +
@@ -3635,7 +3644,7 @@ async function previewSummaryRepair() {
             '\n原文总逻辑轮：' + preview.total_conversation_rounds +
             '\n从现有摘要保留：' + preview.keep_existing_parts + ' 段' +
             '\n注意：归档恢复段 + 保留旧段 + 重算新段，将整体替换当前 active summary。' +
-            '\n预览不会改变数据库。请核对保留段的内容和日期是否与归档重叠。' + retainedText;
+            '\n预览不会改变数据库。请核对保留段的内容和日期是否与归档重叠。' + retainedText + boundaryReport;
         document.getElementById('summaryRepairConfirmText').value = '';
         area.style.display = 'block';
         document.getElementById('summaryRepairResult').textContent = '';
