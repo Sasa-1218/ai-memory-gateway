@@ -93,7 +93,8 @@ async def _source(session_id, archive_id, start_round, preserved_parts, x):
             history_hash.update(b"\x00")
     signature = hashlib.sha256(json.dumps(
         [session_id, archive_id, start_round, preserved_parts, x,
-         _state_digest(existing, cursor), history_hash.hexdigest()],
+         _state_digest(existing, cursor), history_hash.hexdigest(),
+         hashlib.sha256(archive["content"].encode("utf-8")).hexdigest()],
         ensure_ascii=False,
     ).encode("utf-8")).hexdigest()
     return {
