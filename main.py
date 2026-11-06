@@ -588,7 +588,7 @@ templates = Jinja2Templates(directory="templates")
 # ============================================================
 
 # 不需要应用层鉴权的路径（根路径精确匹配，其余按前缀匹配）
-PUBLIC_PATHS = ("/", "/static/", "/health", "/favicon.ico", "/api/push/trigger")
+PUBLIC_PATHS = ("/", "/static/", "/health", "/favicon.ico", "/apple-touch-icon.png", "/api/push/trigger")
 
 # Dashboard 页面和网页私有接口由 Cloudflare Access 保护。
 DASHBOARD_ACCESS_PATHS = ("/dashboard",)
@@ -5229,6 +5229,15 @@ async def export_memories():
         )
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/apple-touch-icon.png")
+@app.get("/favicon.ico")
+async def app_touch_icon():
+    """Cached 180px icon for iOS Home Screen and browser tab."""
+    from app_icon import APPLE_TOUCH_ICON
+    return Response(content=APPLE_TOUCH_ICON, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
