@@ -3636,6 +3636,15 @@ async function previewSummaryRepair() {
 async function executeSummaryRepair() {
     const result = document.getElementById('summaryRepairResult');
     if (!summaryRepairPreviewState) { result.textContent = '请先预览。'; return; }
+    const pending = summaryRepairPreviewState.payload;
+    if (Number(document.getElementById('summaryRepairArchive').value) !== pending.archive_id ||
+        Number(document.getElementById('summaryRepairStartRound').value) !== pending.start_round ||
+        Number(document.getElementById('summaryRepairPreserve').value) !== pending.preserved_parts) {
+        result.textContent = '预览后恢复参数已改变。请重新预览后再确认。';
+        summaryRepairPreviewState = null;
+        document.getElementById('summaryRepairConfirmArea').style.display = 'none';
+        return;
+    }
     const confirmation = document.getElementById('summaryRepairConfirmText').value.trim();
     if (confirmation !== '确认恢复摘要') { result.textContent = '确认文字不匹配，未执行。'; return; }
     if (!confirm('确定按已显示的预览恢复摘要？将自动创建恢复前快照，执行期间会调用摘要模型。')) return;
