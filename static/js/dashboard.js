@@ -3721,3 +3721,28 @@ async function rollbackSummaryRepair() {
         result.textContent = '回滚失败：' + err.message;
     }
 }
+
+
+async function uploadDashboardIcon() {
+    const input = document.getElementById('dashboardIconFile');
+    const status = document.getElementById('dashboardIconUploadStatus');
+    const file = input && input.files && input.files[0];
+    if (!file) { status.textContent = '先选择原版猫咪的 PNG 图片。'; return; }
+    if (file.type !== 'image/png' || file.size > 400000) {
+        status.textContent = '请选择小于 400KB 的正方形 PNG。';
+        return;
+    }
+    try {
+        const response = await fetch('/api/dashboard/icon', {
+            method: 'POST', headers: {'Content-Type':'image/png'}, body:file,
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || '图标保存失败');
+        const image = document.getElementById('dashboardIconPreview');
+        image.src = '/apple-touch-icon.png?v=' + Date.now();
+        status.textContent = '原版图标已保存（' + data.width + '×' + data.height +
+            '）。若主屏幕仍是旧猫图，请删除旧快捷方式后重新从 Safari 添加。';
+    } catch(err) {
+        status.textContent = '上传失败：' + err.message;
+    }
+}
