@@ -734,6 +734,41 @@
                         <div style="text-align: center; color: var(--text-muted); padding: 20px 0;">加载中...</div>
                     </div>
                 </div>
+                <div class="card" id="summary-repair-card" style="margin-top:16px;">
+                    <h4 style="margin:0 0 6px;">一次性摘要恢复（仅手动执行）</h4>
+                    <p class="section-desc">先预览归档、保留段和重算轮次。部署不会自动恢复数据；点击确认前不会修改摘要。当前只支持 8 轮分区。</p>
+                    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:end; margin-top:12px;">
+                        <div style="flex:2; min-width:220px;">
+                            <label class="form-label">作为恢复基底的自动折叠归档</label>
+                            <select id="summaryRepairArchive" class="select-input" style="width:100%;"></select>
+                        </div>
+                        <div style="flex:1; min-width:130px;">
+                            <label class="form-label">回退到第几轮</label>
+                            <input id="summaryRepairStartRound" type="number" min="0" step="1" value="2292" class="search-input" style="width:100%;">
+                        </div>
+                        <div style="flex:1; min-width:130px;">
+                            <label class="form-label">从现有摘要保留旧段数</label>
+                            <input id="summaryRepairPreserve" type="number" min="0" step="1" value="2" class="search-input" style="width:100%;">
+                        </div>
+                        <button class="btn btn-secondary" onclick="loadSummaryRepairOptions()">加载归档</button>
+                        <button class="btn btn-primary" onclick="previewSummaryRepair()">预览恢复</button>
+                    </div>
+                    <div id="summaryRepairPreview" style="margin-top:12px; white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; color:var(--text-muted);">尚未预览。请先核对旧摘要的来源和游标。</div>
+                    <div id="summaryRepairConfirmArea" style="display:none; margin-top:12px; padding:12px; border:1px solid var(--border-color); border-radius:8px;">
+                        <label class="form-label">核对无误后输入「确认恢复摘要」</label>
+                        <input type="text" class="search-input" id="summaryRepairConfirmText" style="width:100%; max-width:320px;" autocomplete="off">
+                        <button class="btn btn-primary" id="summaryRepairExecuteBtn" onclick="executeSummaryRepair()" style="margin-top:10px;">执行一次性恢复</button>
+                    </div>
+                    <div id="summaryRepairResult" style="margin-top:12px; white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px;"></div>
+                    <details style="margin-top:12px;">
+                        <summary style="cursor:pointer; font-size:13px;">从恢复前快照回滚（需再次确认）</summary>
+                        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:end; margin-top:10px;">
+                            <div><label class="form-label">快照 ID</label><input id="summaryRepairSnapshotId" class="search-input" type="number" min="1" style="width:140px;"></div>
+                            <div><label class="form-label">输入「确认回滚摘要」</label><input id="summaryRepairRollbackConfirm" class="search-input" type="text" autocomplete="off"></div>
+                            <button class="btn btn-secondary" onclick="rollbackSummaryRepair()">回滚到该快照</button>
+                        </div>
+                    </details>
+                </div>
                 <div class="card" style="margin-top:16px;" id="historical-summary-card">
                     <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; margin-bottom:10px;">
                         <div>
@@ -1048,6 +1083,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.12"></script>
+    <script src="/static/js/dashboard.js?v=3.13"></script>
 </body>
 </html>
