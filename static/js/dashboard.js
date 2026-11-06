@@ -183,6 +183,7 @@ function switchSection(name) {
     }
     if (name === 'threads') {
         loadThreads();
+        loadHistoricalSummaries();
     }
     if (name === 'settings') {
         loadSettings();
@@ -2001,6 +2002,57 @@ async function saveHistoricalSummary() {
     }
 }
 
+let historicalSummaryManageMode = false;
+let historicalSummaryItems = [];
+
+function toggleHistoricalSummaryManage(forceValue = null) {
+    historicalSummaryManageMode = forceValue === null ? !historicalSummaryManageMode : Boolean(forceValue);
+    const btn = document.getElementById('historicalSummaryManageBtn');
+    const actions = document.getElementById('historicalSummaryBulkActions');
+    if (btn) btn.textContent = historicalSummaryManageMode ? '退出管理' : '管理归档';
+    if (actions) actions.style.display = historicalSummaryManageMode ? 'flex' : 'none';
+    renderHistoricalSummaries();
+}
+
+function updateHistoricalSummarySelection() {
+    const checked = [...document.querySelectorAll('.historical-summary-checkbox:checked')];
+    const count = document.getElementById('historicalSummarySelectedCount');
+    const del = document.getElementById('historicalSummaryDeleteSelectedBtn');
+    if (count) count.textContent = '已选择 ' + checked.length + ' 份';
+    if (del) del.disabled = checked.length === 0;
+}
+
+function renderHistoricalSummaries() {
+    const list = document.getElementById('historicalSummaryList');
+    if (!list) return;
+    if (!historicalSummaryItems.length) {
+        list.innerHTML = '<div style="color:var(--text-muted);">暂无历史摘要。</div>';
+        updateHistoricalSummarySelection();
+        return;
+    }
+
+    list.innerHTML = historicalSummaryItems.map(item => {
+        const label = escapeHtml(item.period_label || '未填写时间标签');
+        const full = escapeHtml(item.content || '');
+        const id = Number(item.id);
+        const checkbox = historicalSummaryManageMode
+            ? `<label style="display:flex; align-items:center; gap:7px; margin-right:4px;" onclick="event.stopPropagation();">
+                    <input class="historical-summary-checkbox" type="checkbox" value="${id}" onchange="updateHistoricalSummarySelection()">
+                    <span style="font-size:12px; color:var(--text-muted);">选择</span>
+               </label>`
+            : '';
+        return `
+            <details class="card" style="padding:12px; margin-bottom:10px; border:1px solid var(--border-color);">
+                <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:12px;">
+                    <span style="display:flex; align-items:center; gap:8px; min-width:0;">${checkbox}<strong style="word-break:break-word;">${label}</strong></span>
+                    <span style="color:var(--text-muted); font-size:12px; white-space:nowrap;">#${id} · ${Number((item.content || '').length)} 字</span>
+                </summary>
+                <div style="white-space:pre-wrap; line-height:1.7; margin-top:12px; max-height:65vh; overflow:auto; padding-right:4px;">${full}</div>
+            </details>`;
+    }).join('');
+    updateHistoricalSummarySelection();
+}
+
 async function loadHistoricalSummaries() {
     const list = document.getElementById('historicalSummaryList');
     const status = document.getElementById('historicalSummaryStatus');
@@ -2010,47 +2062,44 @@ async function loadHistoricalSummaries() {
         const resp = await fetch('/api/historical-summaries?limit=100');
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.detail || data.error || ('HTTP ' + resp.status));
-        const items = Array.isArray(data.items) ? data.items : [];
-        if (status) status.textContent = items.length
-            ? '共 ' + items.length + ' 份历史摘要；当前均不参与默认聊天注入。'
+        historicalSummaryItems = Array.isArray(data.items) ? data.items : [];
+        if (status) status.textContent = historicalSummaryItems.length
+            ? '共 ' + historicalSummaryItems.length + ' 份历史摘要；默认不参与聊天注入。点击任意一份可查看全文。'
             : '目前还没有历史摘要。';
-        if (!items.length) {
-            list.innerHTML = '<div style="color:var(--text-muted);">暂无历史摘要。</div>';
-            return;
-        }
-        list.innerHTML = items.map(item => {
-            const label = escapeHtml(item.period_label || '未填写时间标签');
-            const preview = escapeHtml((item.content || '').slice(0, 600));
-            const more = (item.content || '').length > 600 ? '…' : '';
-            return `
-                <details class="card" style="padding:12px; margin-bottom:10px; border:1px solid var(--border-color);">
-                    <summary style="cursor:pointer; display:flex; justify-content:space-between; gap:12px;">
-                        <strong>${label}</strong>
-                        <span style="color:var(--text-muted); font-size:12px;">#${Number(item.id)} · ${Number((item.content || '').length)} 字</span>
-                    </summary>
-                    <div style="white-space:pre-wrap; line-height:1.6; margin-top:10px;">${preview}${more}</div>
-                    <div style="margin-top:10px;">
-                        <button class="btn btn-sm btn-danger" onclick="deleteHistoricalSummary(${Number(item.id)})">删除这份归档</button>
-                    </div>
-                </details>`;
-        }).join('');
+        renderHistoricalSummaries();
     } catch (e) {
+        historicalSummaryItems = [];
         list.innerHTML = '';
         if (status) status.textContent = '读取失败：' + e.message;
     }
 }
 
-async function deleteHistoricalSummary(id) {
-    if (!confirm('确定删除这份历史摘要归档吗？')) return;
+async function deleteSelectedHistoricalSummaries() {
+    const ids = [...document.querySelectorAll('.historical-summary-checkbox:checked')]
+        .map(el => Number(el.value))
+        .filter(Number.isFinite);
+    if (!ids.length) return;
+    if (!confirm('确定永久删除选中的 ' + ids.length + ' 份历史摘要吗？\n\n删除后无法恢复。')) return;
+
     const status = document.getElementById('historicalSummaryStatus');
+    const btn = document.getElementById('historicalSummaryDeleteSelectedBtn');
+    if (btn) btn.disabled = true;
     try {
-        const resp = await fetch('/api/historical-summaries/' + Number(id), {method: 'DELETE'});
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.detail || data.error || ('HTTP ' + resp.status));
-        if (status) status.textContent = '已删除历史摘要 #' + Number(id);
+        for (const id of ids) {
+            const resp = await fetch('/api/historical-summaries/' + id, {method: 'DELETE'});
+            const data = await resp.json();
+            if (!resp.ok) throw new Error('删除 #' + id + ' 失败：' + (data.detail || data.error || ('HTTP ' + resp.status)));
+        }
+        if (status) status.textContent = '已删除选中的 ' + ids.length + ' 份历史摘要。';
+        historicalSummaryManageMode = false;
+        const manageBtn = document.getElementById('historicalSummaryManageBtn');
+        const actions = document.getElementById('historicalSummaryBulkActions');
+        if (manageBtn) manageBtn.textContent = '管理归档';
+        if (actions) actions.style.display = 'none';
         await loadHistoricalSummaries();
     } catch (e) {
         if (status) status.textContent = '删除失败：' + e.message;
+        updateHistoricalSummarySelection();
     }
 }
 
