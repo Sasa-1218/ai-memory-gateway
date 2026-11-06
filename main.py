@@ -1439,6 +1439,96 @@ def group_by_rounds(history: list) -> list:
     return rounds
 
 
+def _compact_historical_tool_round(round_msgs: list) -> list:
+    """压缩已经结束的历史工具轮：丢掉原始tool结果和tool_calls，仅保留可读对话文本。
+
+    搜索/工具结果可能非常大；历史轮已经有最终assistant回答时，无需把原始工具载荷
+    继续重复发送给上游。若一轮最后仍是tool，说明这是当前正在继续的工具流程，原样保留。
+    """
+    cleaned = [{k: v for k, v in msg.items() if k != "created_at"} for msg in round_msgs]
+    if cleaned and cleaned[-1].get("role") == "tool":
+        return cleaned
+
+    has_tool_artifact = any(
+        msg.get("role") == "tool" or (msg.get("role") == "assistant" and msg.get("tool_calls"))
+        for msg in cleaned
+    )
+    if not has_tool_artifact:
+        return cleaned
+
+    compacted = []
+    for msg in cleaned:
+        if msg.get("role") == "tool":
+            continue
+        m = {k: v for k, v in msg.items() if k != "tool_calls"}
+        if m.get("role") == "assistant" and not str(m.get("content") or "").strip():
+            continue
+        compacted.append(m)
+    print(
+        f"🧹 历史工具轮压缩: {len(cleaned)}条 → {len(compacted)}条 "
+        f"(移除原始tool结果/tool_calls)",
+        flush=True,
+    )
+    return compacted
+
+
+def _sanitize_tool_call_sequences(messages: list) -> list:
+    """发送上游前兜底清洗不完整tool链，避免 OpenAI 400。
+
+    assistant(tool_calls) 后必须紧跟对应 tool_call_id 的 tool 消息。
+    对历史中已损坏/残缺的链条：保留assistant可读文本、去掉tool_calls；
+    空assistant则整条丢弃，并丢弃其后已成孤立状态的tool消息。
+    """
+    result = []
+    i = 0
+    repaired = 0
+    orphan_tools = 0
+
+    while i < len(messages):
+        msg = messages[i]
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            required = {
+                tc.get("id") for tc in (msg.get("tool_calls") or [])
+                if isinstance(tc, dict) and tc.get("id")
+            }
+            j = i + 1
+            following_tools = []
+            while j < len(messages) and messages[j].get("role") == "tool":
+                following_tools.append(messages[j])
+                j += 1
+            present = {m.get("tool_call_id") for m in following_tools if m.get("tool_call_id")}
+
+            if required and required.issubset(present):
+                result.append(msg)
+                result.extend(following_tools)
+                i = j
+                continue
+
+            repaired += 1
+            readable = {k: v for k, v in msg.items() if k != "tool_calls"}
+            if str(readable.get("content") or "").strip():
+                result.append(readable)
+            orphan_tools += len(following_tools)
+            i = j
+            continue
+
+        if msg.get("role") == "tool":
+            orphan_tools += 1
+            i += 1
+            continue
+
+        result.append(msg)
+        i += 1
+
+    if repaired or orphan_tools:
+        print(
+            f"🧯 上游tool链修复: dangling_assistant={repaired} "
+            f"orphan_tool={orphan_tools}",
+            flush=True,
+        )
+    return result
+
+
 def _should_rotate(b_rounds_count: int, X: int, a_msgs: list) -> bool:
     """
     判断是否应该触发A区→摘要的轮转。
@@ -1712,8 +1802,11 @@ async def build_partitioned_messages(
     for m in cleaned_a:
         result.append(m)
     
-    # B区：先构建去掉created_at的副本，再从末尾往前打BP
-    b_cleaned = [{k: v for k, v in msg.items() if k not in ('created_at',)} for msg in b_msgs]
+    # B区：已完成的历史工具轮压缩掉原始tool结果/tool_calls，避免搜索后上下文暴涨。
+    # 当前仍以tool结尾的活跃工具轮保持原样，确保工具调用可以继续完成。
+    b_cleaned = []
+    for rnd in b_round_groups:
+        b_cleaned.extend(_compact_historical_tool_round(rnd))
     
     for j in range(len(b_cleaned) - 1, -1, -1):
         if b_cleaned[j].get('role') != 'tool' and _apply_breakpoint(b_cleaned[j]):
@@ -4606,6 +4699,11 @@ async def chat_completions(request: Request):
     cache_diag["api_provider"] = _api_provider_label(API_BASE_URL)
     cache_diag.setdefault("constructed_breakpoints", _count_cache_breakpoints(body.get("messages", [])))
     
+    # ---------- 上游消息结构兜底 ----------
+    # DB/客户端若遗留不完整的 assistant(tool_calls) → tool 链，OpenAI 会直接 400。
+    # 在真正发出请求前做最后一次结构校验与修复。
+    body["messages"] = _sanitize_tool_call_sequences(body.get("messages", []))
+
     # ---------- cache_control 兼容性处理 ----------
     if CACHE_PARTITION_ENABLED and not _is_anthropic_model(model):
         _strip_cache_control(body.get("messages", []))
@@ -4818,6 +4916,9 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
                 """终止信号出现后立即安排持久化；重复调用只会生效一次。"""
                 nonlocal conversation_persist_scheduled
                 if conversation_persist_scheduled:
+                    return
+                # 上游HTTP错误/空错误流不能作为一轮正常聊天写进conversations。
+                if is_error:
                     return
                 if not MEMORY_ENABLED or not (user_message or tool_messages or user_content is not None):
                     return
