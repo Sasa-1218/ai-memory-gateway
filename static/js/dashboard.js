@@ -3667,38 +3667,51 @@ async function executeSummaryRepair() {
     }
     const confirmation = document.getElementById('summaryRepairConfirmText').value.trim();
     if (confirmation !== '确认恢复摘要') { result.textContent = '确认文字不匹配，未执行。'; return; }
-    if (!confirm('确定按已显示的预览恢复摘要？将自动创建恢复前快照，执行期间会调用摘要模型。')) return;
+    if (!confirm('确定按预览开始恢复？后台会生成四段摘要，完成前不要重新部署服务器。')) return;
     const btn = document.getElementById('summaryRepairExecuteBtn');
     btn.disabled = true;
-    result.textContent = '正在执行本次恢复。此时不要重复提交。';
     try {
         const {payload, preview} = summaryRepairPreviewState;
-        const data = await summaryRepairRequest('execute', {
-            ...payload, preview_token: preview.preview_token, confirmation
+        const job = await summaryRepairRequest('start', {
+            ...payload, preview_token: preview.preview_token, confirmation,
         });
-        result.textContent = '恢复完成：' + data.summary_parts.length + ' 段 / 游标 ' +
-            data.a_start_round + ' / 重算 ' + data.generated_blocks +
-            ' 块。恢复前快照 ID：' + data.snapshot_id;
-        document.getElementById('summaryRepairSnapshotId').value = data.snapshot_id;
-        const details = document.createElement('details');
-        details.style.marginTop = '10px';
-        const detailsSummary = document.createElement('summary');
-        detailsSummary.textContent = '查看恢复后的全部摘要段';
-        detailsSummary.style.cursor = 'pointer';
-        const fullText = document.createElement('pre');
-        fullText.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;max-height:460px;overflow:auto;';
-        fullText.textContent = data.summary_parts.map((part, i) =>
-            '【摘要段 ' + (i + 1) + '】\n' + part
-        ).join('\n\n');
-        details.append(detailsSummary, fullText);
-        result.append(details);
+        result.textContent = '恢复任务已提交。任务编号：' + job.job_id +
+            '\n正在等待摘要模型生成；页面会自动检查状态，请勿反复点击。';
+        // Each status request is short; no Safari/Cloudflare long-running POST.
+        let status = job;
+        for (let i = 0; i < 180; i++) {
+            if (status.status === 'succeeded' || status.status === 'failed') break;
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            const response = await fetch('/api/summary-repair/job/' + encodeURIComponent(job.job_id),
+                {cache: 'no-store'});
+            if (!response.ok) {
+                throw new Error('任务状态暂时不可读取（HTTP ' + response.status +
+                    '）。请先刷新摘要状态核对是否已恢复，不要重复执行。');
+            }
+            status = await response.json();
+            result.textContent = '恢复任务：' + status.status +
+                '\n阶段：' + status.stage +
+                '\n任务编号：' + job.job_id +
+                '\n第 ' + (i + 1) + ' 次状态检查';
+        }
+        if (status.status === 'failed') {
+            throw new Error('恢复任务失败：' + (status.error || '未提供错误信息') +
+                '。如需诊断请查看 Coolify 日志中的 [summary-repair-job]。');
+        }
+        if (status.status !== 'succeeded') {
+            throw new Error('任务仍在执行，页面等待已结束。请先刷新摘要状态，避免重复提交。');
+        }
+        result.textContent = '恢复完成：' + status.summary_part_count + ' 段 / 游标 ' +
+            status.a_start_round + ' / 重算 ' + status.generated_blocks +
+            ' 块。恢复前快照 ID：' + status.snapshot_id;
+        document.getElementById('summaryRepairSnapshotId').value = status.snapshot_id;
         summaryRepairPreviewState = null;
         document.getElementById('summaryRepairConfirmArea').style.display = 'none';
         await loadThreads();
         await loadHistoricalSummaries();
     } catch (err) {
-        result.textContent = '未完成恢复：' + err.message +
-            '\n如果提示预览过期，请重新预览；若请求超时，请先刷新摘要状态，核对是否已执行。';
+        result.textContent = '恢复状态未确认：' + err.message +
+            '\n请先刷新当前摘要与游标，核对是否已恢复；不要盲目重试。';
     } finally {
         btn.disabled = false;
     }
