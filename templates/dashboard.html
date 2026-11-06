@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=3.11">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=3.12">
 </head>
 <body>
     <div id="sakuraPetals" class="sakura-petals" aria-hidden="true"></div>
@@ -63,7 +63,7 @@
                 </a>
                 <a href="#" class="nav-item" data-section="threads">
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
-                    <span class="nav-label">对话线</span>
+                    <span class="nav-label">对话线 / 摘要</span>
                 </a>
                 <a href="#" class="nav-item" data-section="settings">
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="2" x2="6" y1="14" y2="14"/><line x1="10" x2="14" y1="8" y2="8"/><line x1="18" x2="22" y1="16" y2="16"/></svg></span>
@@ -585,25 +585,6 @@
                     </div>
                 </div>
 
-                <div class="card" style="margin-top:16px;">
-                    <h3 style="margin-bottom:8px;">历史摘要归档</h3>
-                    <p class="section-desc" style="margin-bottom:14px;">保存以前手动备份的旧摘要。归档内容不会默认注入聊天，只作为以后检索和回溯的数据源。</p>
-                    <div class="form-group">
-                        <label class="form-label">时间标签（可选）</label>
-                        <input type="text" id="historicalSummaryPeriod" class="input" placeholder="例如：2026-01 至 2026-03">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">旧摘要正文</label>
-                        <textarea id="historicalSummaryContent" class="textarea" rows="10" placeholder="把以前备份的摘要原样粘贴到这里。可以一整份保存，不需要拆成很多条。"></textarea>
-                    </div>
-                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                        <button class="btn btn-primary" onclick="saveHistoricalSummary()">保存到历史摘要</button>
-                        <button class="btn btn-secondary" onclick="loadHistoricalSummaries()">刷新列表</button>
-                    </div>
-                    <div id="historicalSummaryStatus" style="margin-top:10px; color:var(--text-muted); font-size:13px;"></div>
-                    <div id="historicalSummaryList" style="margin-top:12px;"></div>
-                </div>
-
                 <div id="import-result" class="msg-container"></div>
             </section>
 
@@ -720,8 +701,8 @@
             <!-- 对话线管理 Section -->
             <section id="section-threads" class="section">
                 <div class="section-header">
-                    <h1>对话线管理</h1>
-                    <p class="section-desc">管理分区缓存的对话线、查看编辑摘要</p>
+                    <h1>对话线 / 摘要</h1>
+                    <p class="section-desc">查看当前活跃摘要、管理对话线，并保留可回溯的历史摘要版本</p>
                 </div>
                 <div class="card" id="thread-status-card">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
@@ -753,6 +734,41 @@
                         <div style="text-align: center; color: var(--text-muted); padding: 20px 0;">加载中...</div>
                     </div>
                 </div>
+                <div class="card" style="margin-top:16px;" id="historical-summary-card">
+                    <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; margin-bottom:10px;">
+                        <div>
+                            <h4 style="margin:0 0 6px;">历史摘要归档</h4>
+                            <p class="section-desc" style="margin:0;">保存旧摘要完整版本，默认不注入聊天；用于回溯、恢复和后续召回。</p>
+                        </div>
+                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                            <button class="btn btn-sm btn-secondary" onclick="loadHistoricalSummaries()">刷新</button>
+                            <button class="btn btn-sm" id="historicalSummaryManageBtn" onclick="toggleHistoricalSummaryManage()">管理归档</button>
+                        </div>
+                    </div>
+
+                    <details style="margin-bottom:12px;">
+                        <summary style="cursor:pointer; color:var(--text-muted); font-size:13px;">手动保存一份历史摘要</summary>
+                        <div style="margin-top:12px;">
+                            <div class="form-group">
+                                <label class="form-label">时间标签（可选）</label>
+                                <input type="text" id="historicalSummaryPeriod" class="input" placeholder="例如：2026-06 至 2026-10">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">摘要正文</label>
+                                <textarea id="historicalSummaryContent" class="textarea" rows="8" placeholder="把旧摘要原样粘贴到这里。可以整份保存，不需要拆成很多条。"></textarea>
+                            </div>
+                            <button class="btn btn-primary" onclick="saveHistoricalSummary()">保存到历史摘要</button>
+                        </div>
+                    </details>
+
+                    <div id="historicalSummaryStatus" style="margin-top:8px; color:var(--text-muted); font-size:13px;">正在读取历史摘要...</div>
+                    <div id="historicalSummaryBulkActions" style="display:none; margin:10px 0; padding:10px; border:1px solid var(--border-color); border-radius:8px; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+                        <span id="historicalSummarySelectedCount" style="color:var(--text-muted); font-size:13px;">已选择 0 份</span>
+                        <button class="btn btn-sm btn-danger" id="historicalSummaryDeleteSelectedBtn" onclick="deleteSelectedHistoricalSummaries()" disabled>删除选中</button>
+                    </div>
+                    <div id="historicalSummaryList" style="margin-top:12px;"></div>
+                </div>
+
                 <div id="summaryModal" class="modal" style="display:none;">
                     <div class="modal-content" style="max-width: 700px;">
                         <h3>编辑摘要 — <span id="summary-modal-sid"></span></h3>
@@ -854,12 +870,12 @@
                     <div class="settings-field">
                         <label>近期摘要总预算（字符）</label>
                         <input type="number" id="set-CACHE_SUMMARY_BUDGET_CHARS" class="input" min="0" step="500">
-                        <small class="form-hint">默认 6000。超过后只折叠最旧摘要，最近内容保持原样；0 = 不自动折叠。</small>
+                        <small class="form-hint">当前自动二次折叠已暂停；0 = 不自动折叠。原来的每 8 轮近期摘要仍正常生成。</small>
                     </div>
                     <div class="settings-field">
                         <label>折叠时保留最近摘要段数</label>
                         <input type="number" id="set-SUMMARY_KEEP_RECENT" class="input" min="1" max="10">
-                        <small class="form-hint">默认保留最近 2 段旧摘要；本轮刚生成的摘要会另外保护。</small>
+                        <small class="form-hint">仅供以后重新启用二次折叠时使用；当前不会自动二次压缩长期摘要。</small>
                     </div>
                     <div class="settings-field">
                         <label>轮转周期 (CACHE_PARTITION_X)</label>
@@ -1032,6 +1048,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.18"></script>
+    <script src="/static/js/dashboard.js?v=3.12"></script>
 </body>
 </html>
