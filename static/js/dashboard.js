@@ -3668,8 +3668,8 @@ async function executeSummaryRepair() {
         const fullText = document.createElement('pre');
         fullText.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;max-height:460px;overflow:auto;';
         fullText.textContent = data.summary_parts.map((part, i) =>
-            '【摘要段 ' + (i + 1) + '】\\n' + part
-        ).join('\\n\\n');
+            '【摘要段 ' + (i + 1) + '】\n' + part
+        ).join('\n\n');
         details.append(detailsSummary, fullText);
         result.append(details);
         summaryRepairPreviewState = null;
