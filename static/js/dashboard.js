@@ -3660,6 +3660,18 @@ async function executeSummaryRepair() {
             data.a_start_round + ' / 重算 ' + data.generated_blocks +
             ' 块。恢复前快照 ID：' + data.snapshot_id;
         document.getElementById('summaryRepairSnapshotId').value = data.snapshot_id;
+        const details = document.createElement('details');
+        details.style.marginTop = '10px';
+        const detailsSummary = document.createElement('summary');
+        detailsSummary.textContent = '查看恢复后的全部摘要段';
+        detailsSummary.style.cursor = 'pointer';
+        const fullText = document.createElement('pre');
+        fullText.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;max-height:460px;overflow:auto;';
+        fullText.textContent = data.summary_parts.map((part, i) =>
+            '【摘要段 ' + (i + 1) + '】\\n' + part
+        ).join('\\n\\n');
+        details.append(detailsSummary, fullText);
+        result.append(details);
         summaryRepairPreviewState = null;
         document.getElementById('summaryRepairConfirmArea').style.display = 'none';
         await loadThreads();
