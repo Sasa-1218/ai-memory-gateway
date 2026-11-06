@@ -86,3 +86,10 @@ def status(session_id, job_id):
     if not job or job["session_id"] != session_id:
         return None
     return _public(job)
+
+
+def is_active(session_id: str) -> bool:
+    """True only while this process is generating or committing a recovery."""
+    job_id = _session_active.get(session_id)
+    job = _jobs.get(job_id) if job_id else None
+    return bool(job and job.get("status") in ("queued", "running"))
