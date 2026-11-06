@@ -3620,6 +3620,7 @@ async function previewSummaryRepair() {
             '\n计划从第 ' + preview.rewind_to_round + ' 轮重算' +
             '\n预计重算：' + preview.regenerate_blocks + ' 个 8 轮区块' +
             '\n区块范围（左闭右开）：' + JSON.stringify(preview.regenerate_round_ranges) +
+            '\n区块对应上海时间：' + JSON.stringify(preview.block_date_ranges) +
             '\n修复后游标：' + preview.new_cursor_after_repair +
             '\n原文总逻辑轮：' + preview.total_conversation_rounds +
             '\n从现有摘要保留：' + preview.keep_existing_parts + ' 段' +
