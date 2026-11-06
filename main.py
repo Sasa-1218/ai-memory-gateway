@@ -20,6 +20,7 @@ import asyncio
 import secrets
 import re
 import hashlib
+import base64
 import logging
 import time
 import httpx
@@ -5234,10 +5235,42 @@ async def export_memories():
 @app.get("/apple-touch-icon.png")
 @app.get("/favicon.ico")
 async def app_touch_icon():
-    """Cached 180px icon for iOS Home Screen and browser tab."""
+    """Use the owner's original uploaded image, falling back to the built-in icon."""
     from app_icon import APPLE_TOUCH_ICON
-    return Response(content=APPLE_TOUCH_ICON, media_type="image/png",
-                    headers={"Cache-Control": "public, max-age=604800"})
+    icon = APPLE_TOUCH_ICON
+    if MEMORY_ENABLED:
+        try:
+            saved = await get_gateway_config("dashboard_home_icon_png", "")
+            if saved:
+                decoded = base64.b64decode(saved, validate=True)
+                if decoded.startswith(b"\x89PNG\r\n\x1a\n") and len(decoded) <= 400000:
+                    icon = decoded
+        except Exception as icon_error:
+            print(f"[app-icon] fallback error_type={type(icon_error).__name__}", flush=True)
+    return Response(content=icon, media_type="image/png",
+                    headers={"Cache-Control": "no-cache, must-revalidate"})
+
+
+@app.post("/api/dashboard/icon")
+async def api_upload_dashboard_icon(request: Request):
+    """Dashboard Access protected. Only square PNG files; never change chat memory."""
+    raw = await request.body()
+    if request.headers.get("content-type", "").split(";")[0].strip().lower() != "image/png":
+        raise HTTPException(status_code=415, detail="png_required")
+    if len(raw) < 33 or len(raw) > 400000 or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise HTTPException(status_code=400, detail="invalid_png_or_too_large")
+    if raw[12:16] != b"IHDR":
+        raise HTTPException(status_code=400, detail="invalid_png_header")
+    import struct
+    width, height = struct.unpack(">II", raw[16:24])
+    if width != height or width < 128 or width > 1024:
+        raise HTTPException(status_code=400, detail="square_png_128_to_1024_required")
+    if not MEMORY_ENABLED:
+        raise HTTPException(status_code=503, detail="memory_database_disabled")
+    await set_gateway_config("dashboard_home_icon_png", base64.b64encode(raw).decode("ascii"))
+    return {"status": "ok", "size": len(raw), "width": width, "height": height,
+            "note": "Remove then add the iPhone Home Screen shortcut again if iOS cached its old icon."}
+
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
