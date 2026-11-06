@@ -713,6 +713,24 @@
                     <h1>对话线 / 摘要</h1>
                     <p class="section-desc">查看当前活跃摘要、管理对话线，并保留可回溯的历史摘要版本</p>
                 </div>
+                <div class="card" id="summary-layers-guide" style="margin-bottom:16px;">
+                    <h4 style="margin:0 0 8px;">三层摘要结构（保留独立来源）</h4>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;">
+                        <div style="border:1px solid var(--border-color);border-radius:8px;padding:12px;">
+                            <strong>① 完整历史母本</strong>
+                            <p class="section-desc" style="margin:6px 0 0;">从 6 月开始的人工长版本，保存到下方「历史摘要归档」，时间标签标记“完整母本”；目前默认不注入聊天，不覆盖 active。</p>
+                        </div>
+                        <div style="border:1px solid var(--border-color);border-radius:8px;padding:12px;">
+                            <strong>② 折叠前长期摘要</strong>
+                            <p class="section-desc" style="margin:6px 0 0;">约 2.5 万字，经过预览与明确确认后恢复到当前 active summary。要还原原始分段，避免误覆盖游标。</p>
+                        </div>
+                        <div style="border:1px solid var(--border-color);border-radius:8px;padding:12px;">
+                            <strong>③ 每 8 轮新增近期摘要</strong>
+                            <p class="section-desc" style="margin:6px 0 0;">从原始对话重新补齐遗漏区块，随后正常 append。尚未完成的轮次保留原文。</p>
+                        </div>
+                    </div>
+                    <p class="section-desc" style="margin:10px 0 0;">提示：这是三层数据管理说明；完整历史母本的按需注入功能尚未实现。不要把三层直接粘贴成一份。</p>
+                </div>
                 <div class="card" id="thread-status-card">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
                         <h4>当前活跃对话线</h4>
