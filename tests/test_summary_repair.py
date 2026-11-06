@@ -22,7 +22,7 @@ class SummaryRecoveryTests(unittest.TestCase):
 
     def test_apple_icon_is_decodable_png(self):
         data = APPLE_TOUCH_ICON
-        self.assertTrue(data.startswith(b"\x89PNG\\r\n\x1a\n"))
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
         length = struct.unpack(">I", data[8:12])[0]
         self.assertEqual(length, 13)
         self.assertEqual(struct.unpack(">II", data[16:24]), (180, 180))
