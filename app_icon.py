@@ -52,10 +52,10 @@ def _chunk(label, payload):
 
 def build_icon_png():
     width = height = 180
-    raw = b"".join(b"\\x00" + b"".join(_pixel(x,y) for x in range(width))
+    raw = b"".join(b"\x00" + b"".join(_pixel(x,y) for x in range(width))
                    for y in range(height))
     header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
-    return (b"\\x89PNG\\r\\n\\x1a\\n" + _chunk(b"IHDR", header) +
+    return (b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", header) +
             _chunk(b"IDAT", zlib.compress(raw, 9)) + _chunk(b"IEND", b""))
 
 
