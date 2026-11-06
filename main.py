@@ -5551,6 +5551,50 @@ async def api_delete_historical_summary(summary_id: int):
 
 
 # ============================================================
+# 显式摘要恢复（只有用户在 Dashboard 确认后才执行）
+# ============================================================
+
+@app.post("/api/summary-repair/preview")
+async def api_summary_repair_preview(request: Request):
+    from summary_repair import preview
+    body = await request.json()
+    sid = get_active_session_id()
+    if not sid or body.get("session_id") != sid:
+        raise HTTPException(status_code=400, detail="active_session_id_required")
+    return await preview(
+        sid, int(body["archive_id"]), int(body["start_round"]),
+        int(body.get("preserved_parts", 2)), CACHE_PARTITION_X
+    )
+
+
+@app.post("/api/summary-repair/execute")
+async def api_summary_repair_execute(request: Request):
+    from summary_repair import execute
+    body = await request.json()
+    sid = get_active_session_id()
+    if not sid or body.get("session_id") != sid:
+        raise HTTPException(status_code=400, detail="active_session_id_required")
+    return await execute(
+        sid, int(body["archive_id"]), int(body["start_round"]),
+        int(body.get("preserved_parts", 2)), CACHE_PARTITION_X,
+        str(body.get("preview_token") or ""),
+        str(body.get("confirmation") or ""), generate_summary,
+    )
+
+
+@app.post("/api/summary-repair/rollback")
+async def api_summary_repair_rollback(request: Request):
+    from summary_repair import rollback
+    body = await request.json()
+    sid = get_active_session_id()
+    if not sid or body.get("session_id") != sid:
+        raise HTTPException(status_code=400, detail="active_session_id_required")
+    return await rollback(
+        sid, int(body["snapshot_id"]), str(body.get("confirmation") or "")
+    )
+
+
+# ============================================================
 # 管理 API
 # ============================================================
 
