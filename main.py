@@ -5279,7 +5279,18 @@ async def dashboard_page(request: Request):
     if not MEMORY_ENABLED:
         return HTMLResponse("<h3>记忆系统未启用（设置 MEMORY_ENABLED=true 开启）</h3>")
     
-    return templates.TemplateResponse(request, "dashboard.html")
+    # A new image creates a new URL, avoiding Safari's persistent touch-icon cache.
+    icon_version = "default"
+    try:
+        saved_icon = await get_gateway_config("dashboard_home_icon_png", "")
+        if saved_icon:
+            icon_version = hashlib.sha256(saved_icon.encode("ascii")).hexdigest()[:16]
+    except Exception as icon_error:
+        print(f"[app-icon] version_lookup_failed error_type={type(icon_error).__name__}", flush=True)
+    return templates.TemplateResponse(
+        request, "dashboard.html", {"icon_version": icon_version},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/push/status")
