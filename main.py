@@ -5907,8 +5907,23 @@ async def _run_experience_generation(operation: str, job_id: str, session_id: st
                     "[experience-generation] token_log_failed "
                     f"error_type={type(usage_exc).__name__}"
                 )
-        content = ((response_data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
-        cards = validate_generated_cards(_clean_experience_json(content), set(message_ids))
+        choice = (response_data.get("choices") or [{}])[0] or {}
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
+        parsed = _clean_experience_json(content)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("cards"), list) or not parsed.get("cards"):
+            print(
+                "[experience-generation] invalid_card_envelope "
+                f"operation={operation} finish_reason={str(choice.get('finish_reason') or '')[:60]} "
+                f"content_chars={len(content) if isinstance(content, str) else 0} "
+                f"parsed_type={type(parsed).__name__} "
+                f"parsed_keys={list(parsed.keys())[:12] if isinstance(parsed, dict) else []} "
+                f"cards_type={type(parsed.get('cards')).__name__ if isinstance(parsed, dict) else 'none'} "
+                f"cards_count={len(parsed.get('cards')) if isinstance(parsed, dict) and isinstance(parsed.get('cards'), list) else 'n/a'} "
+                f"reasoning_present={bool(message.get('reasoning_content') or message.get('reasoning'))}",
+                flush=True,
+            )
+        cards = validate_generated_cards(parsed, set(message_ids))
         card_ids = await complete_experience_generation_job(job_id, cards, MEMORY_MODEL)
         print(
             "[experience-generation] succeeded "
