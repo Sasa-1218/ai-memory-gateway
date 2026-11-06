@@ -3583,8 +3583,18 @@ async function loadSummaryRepairOptions() {
             '\n当前 a_start_round：' + status.a_start_round +
             '\n可选自动折叠归档：' + matches.length + ' 份。' +
             '\n请核对回退轮次、受保护旧段数量后点击“预览恢复”。';
-        if (!matches.length) result.textContent = '找不到与当前对话线匹配的 auto_fold 归档，请先检查历史归档。';
-        else result.textContent = '';
+        if (!matches.length) {
+            const allAuto = (archives.items || []).filter(a => a.source === 'auto_fold');
+            const currentManual = (archives.items || []).filter(a =>
+                a.session_id === status.active_session_id && a.source !== 'auto_fold');
+            const others = allAuto.filter(a => a.session_id !== status.active_session_id);
+            result.textContent = '当前对话线没有可直接恢复的自动折叠归档。' +
+                '\\n全库自动折叠归档：' + allAuto.length + ' 份' +
+                '\\n其中属于其他对话线：' + others.length + ' 份' +
+                '\\n当前对话线其他来源归档：' + currentManual.length + ' 份' +
+                '\\n如存在其他对话线的折叠归档，可能是 session_id 不一致；如仅有手动归档，恢复工具当前不会选中它。' +
+                '\\n请先核对下方「历史摘要归档」中的来源与对话线，不要直接覆盖 active summary。';
+        } else result.textContent = '';
     } catch (err) {
         result.textContent = '读取失败：' + err.message;
     }
