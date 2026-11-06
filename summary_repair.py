@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from database import get_pool, get_session_cache_state
 
-_ARCHIVE_PART = re.compile(r"(?m)^【旧摘要(\\d+)】\\s*\\n")
+_ARCHIVE_PART = re.compile(r"(?m)^【旧摘要(\d+)】\s*\n")
 CONFIRM = "确认恢复摘要"
 ROLLBACK_CONFIRM = "确认回滚摘要"
 
@@ -22,7 +22,7 @@ def _split_archive(content):
     parts = []
     for i, marker in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(content)
-        part = content[marker.end():end].strip("\\n")
+        part = content[marker.end():end].strip("\n")
         if not part.strip():
             raise HTTPException(400, "archive_contains_empty_part")
         parts.append(part)
@@ -90,7 +90,7 @@ async def _source(session_id, archive_id, start_round, preserved_parts, x):
     for row in rows:
         for key in ("role", "content", "metadata", "created_at"):
             history_hash.update(str(row[key]).encode("utf-8"))
-            history_hash.update(b"\\x00")
+            history_hash.update(b"\x00")
     signature = hashlib.sha256(json.dumps(
         [session_id, archive_id, start_round, preserved_parts, x,
          _state_digest(existing, cursor), history_hash.hexdigest()],
