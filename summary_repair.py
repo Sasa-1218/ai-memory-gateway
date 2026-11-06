@@ -165,10 +165,33 @@ async def execute(session_id, archive_id, start_round, preserved_parts, x, token
     if not token or s["signature"] != token:
         raise HTTPException(409, "preview_stale_refresh_before_execute")
     generated = []
-    for block in s["blocks"]:
+    for block_index, block in enumerate(s["blocks"], start=1):
         summary = await generator(block, session_id)
-        if not summary or not summary.strip() or len(summary) > 600:
-            raise HTTPException(502, "summary_generation_failed_or_exceeds_600_chars_no_state_changed")
+        summary = summary.strip() if isinstance(summary, str) else ""
+        if not summary:
+            print(
+                f"[summary-repair] invalid_output block={block_index}/{len(s['blocks'])} "
+                f"reason=empty_result input_messages={len(block)}",
+                flush=True,
+            )
+            raise HTTPException(
+                502, f"summary_block_{block_index}_empty_result_no_state_changed"
+            )
+        if len(summary) > 600:
+            print(
+                f"[summary-repair] invalid_output block={block_index}/{len(s['blocks'])} "
+                f"reason=over_600_chars chars={len(summary)} input_messages={len(block)}",
+                flush=True,
+            )
+            raise HTTPException(
+                502, f"summary_block_{block_index}_over_600_chars_"
+                     f"actual_{len(summary)}_no_state_changed"
+            )
+        print(
+            f"[summary-repair] validated block={block_index}/{len(s['blocks'])} "
+            f"chars={len(summary)}",
+            flush=True,
+        )
         generated.append(summary)
     next_parts = s["archive_parts"] + s["retained"] + generated
     pool = await get_pool()
