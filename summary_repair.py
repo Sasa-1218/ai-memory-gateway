@@ -121,6 +121,21 @@ async def preview(session_id, archive_id, start_round, preserved_parts, x):
             {"index": i + 2, "chars": len(p), "text": p}
             for i, p in enumerate(s["retained"])
         ],
+        # Boundary audit is READ-ONLY. Date mentions inside text can refer to older events,
+        # so provide the actual paragraphs, not an unreliable automatic "safe" verdict.
+        "archive_tail": [
+            {"index": len(s["archive_parts"]) - min(3, len(s["archive_parts"])) + i + 1,
+             "chars": len(part), "text": part}
+            for i, part in enumerate(s["archive_parts"][-3:])
+        ],
+        "discarded_current_parts": [
+            {"index": i + 2, "chars": len(part), "text": part}
+            for i, part in enumerate(s["existing"][1 + preserved_parts:], start=preserved_parts)
+        ],
+        "boundary_check_note": (
+            "逐段检查归档末尾、将舍弃的近期段及原始对话的时间范围。"
+            "日期文字可能是在追述过去事件；预览不自动宣称无重叠或无遗漏。"
+        ),
         "regenerate_blocks": len(s["blocks"]),
         "regenerate_round_ranges": [
             [start_round + i*x, start_round + (i+1)*x]
