@@ -5635,6 +5635,46 @@ async def api_summary_repair_execute(request: Request):
     )
 
 
+@app.post("/api/summary-repair/start")
+async def api_summary_repair_start(request: Request):
+    """Start a manually confirmed job and return immediately; poll /job/{id}."""
+    from summary_repair import CONFIRM, _source
+    from summary_repair_job import start
+    body = await request.json()
+    sid = get_active_session_id()
+    if not sid or body.get("session_id") != sid:
+        raise HTTPException(status_code=400, detail="active_session_id_required")
+    if str(body.get("confirmation") or "") != CONFIRM:
+        raise HTTPException(status_code=400, detail="confirmation_phrase_required")
+    archive_id = int(body["archive_id"])
+    start_round = int(body["start_round"])
+    preserved_parts = int(body.get("preserved_parts", 0))
+    # Validate snapshot and source before scheduling, so malformed requests do
+    # not enter the background coordinator.
+    source = await _source(sid, archive_id, start_round, preserved_parts, CACHE_PARTITION_X)
+    if str(body.get("preview_token") or "") != source["signature"]:
+        raise HTTPException(status_code=409, detail="preview_stale_refresh_before_execute")
+    return await start({
+        "session_id": sid, "archive_id": archive_id,
+        "start_round": start_round, "preserved_parts": preserved_parts,
+        "x": CACHE_PARTITION_X,
+        "preview_token": str(body["preview_token"]),
+        "confirmation": CONFIRM,
+    }, generate_summary)
+
+
+@app.get("/api/summary-repair/job/{job_id}")
+async def api_summary_repair_job(job_id: str):
+    from summary_repair_job import status
+    sid = get_active_session_id()
+    if not sid:
+        raise HTTPException(status_code=400, detail="active_session_id_required")
+    result = status(sid, job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="job_not_found_or_server_restarted")
+    return result
+
+
 @app.post("/api/summary-repair/rollback")
 async def api_summary_repair_rollback(request: Request):
     from summary_repair import rollback
