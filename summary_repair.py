@@ -179,14 +179,25 @@ async def execute(session_id, archive_id, start_round, preserved_parts, x, token
             )
         if len(summary) > 600:
             print(
-                f"[summary-repair] invalid_output block={block_index}/{len(s['blocks'])} "
-                f"reason=over_600_chars chars={len(summary)} input_messages={len(block)}",
+                f"[summary-repair] over_limit_retry block={block_index}/{len(s['blocks'])} "
+                f"first_chars={len(summary)} input_messages={len(block)}",
                 flush=True,
             )
-            raise HTTPException(
-                502, f"summary_block_{block_index}_over_600_chars_"
-                     f"actual_{len(summary)}_no_state_changed"
-            )
+            # One bounded fresh attempt with the existing, unchanged prompt.
+            # Never cut the ending or store an over-limit draft.
+            retry = await generator(block, session_id)
+            summary = retry.strip() if isinstance(retry, str) else ""
+            if len(summary) > 600 or not summary:
+                failure = "empty_after_retry" if not summary else "over_600_after_retry"
+                print(
+                    f"[summary-repair] invalid_output block={block_index}/{len(s['blocks'])} "
+                    f"reason={failure} chars={len(summary)}",
+                    flush=True,
+                )
+                raise HTTPException(
+                    502, f"summary_block_{block_index}_{failure}_"
+                         f"actual_{len(summary)}_no_state_changed"
+                )
         print(
             f"[summary-repair] validated block={block_index}/{len(s['blocks'])} "
             f"chars={len(summary)}",
