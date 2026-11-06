@@ -9,10 +9,10 @@
   "theme_color": "#E75A7C",
   "icons": [
     {
-      "src": "/static/icons/rora-garden.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
     }
   ]
 }
