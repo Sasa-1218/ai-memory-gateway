@@ -10,7 +10,7 @@
     <meta name="apple-mobile-web-app-title" content="Rora">
     <meta name="mobile-web-app-capable" content="yes">
     <link rel="manifest" href="/static/manifest.webmanifest">
-    <link rel="icon" type="image/svg+xml" href="/static/icons/rora-garden.svg">
+    <link rel="icon" type="image/png" href="/apple-touch-icon.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
     <style>html,body{background:#f7f6f3;min-height:100%;margin:0}</style>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -856,6 +856,17 @@
                     <div id="settings-msg" class="msg-box" style="display:none;"></div>
                 </div>
 
+                <div class="card settings-card">
+                    <h3 class="settings-group-title">iPhone 主屏幕图标</h3>
+                    <p class="section-desc">使用你选好的原版小猫图。上传 128–1024 像素的正方形 PNG（最大 400KB），仅更新图标，不会修改记忆或摘要。</p>
+                    <div style="display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-top:12px;">
+                        <img id="dashboardIconPreview" src="/apple-touch-icon.png" alt="当前图标" style="width:78px;height:78px;border-radius:18px;object-fit:cover;">
+                        <input id="dashboardIconFile" type="file" accept="image/png" class="input" style="max-width:260px;">
+                        <button class="btn btn-primary" onclick="uploadDashboardIcon()">上传这张图标</button>
+                    </div>
+                    <p id="dashboardIconUploadStatus" class="section-desc" style="margin:10px 0 0;">上传成功后，iOS 如仍显示旧图标，请删除原主屏幕快捷方式，再从 Safari 重新添加。</p>
+                </div>
+
                 <!-- 基础连接 -->
                 <div class="card settings-card">
                     <h3 class="settings-group-title">基础连接</h3>
@@ -1110,6 +1121,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.13"></script>
+    <script src="/static/js/dashboard.js?v=3.14"></script>
 </body>
 </html>
