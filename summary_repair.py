@@ -177,27 +177,16 @@ async def execute(session_id, archive_id, start_round, preserved_parts, x, token
             raise HTTPException(
                 502, f"summary_block_{block_index}_empty_result_no_state_changed"
             )
+        # The original summary prompt treats 600 Chinese characters as a writing
+        # target, not a database validity rule. Preserve complete nonempty output.
+        # Rejected output is limited to truly empty content; do not silently
+        # truncate, discard, or regenerate useful long summaries.
         if len(summary) > 600:
             print(
-                f"[summary-repair] over_limit_retry block={block_index}/{len(s['blocks'])} "
-                f"first_chars={len(summary)} input_messages={len(block)}",
+                f"[summary-repair] soft_length_target_exceeded "
+                f"block={block_index}/{len(s['blocks'])} chars={len(summary)}",
                 flush=True,
             )
-            # One bounded fresh attempt with the existing, unchanged prompt.
-            # Never cut the ending or store an over-limit draft.
-            retry = await generator(block, session_id)
-            summary = retry.strip() if isinstance(retry, str) else ""
-            if len(summary) > 600 or not summary:
-                failure = "empty_after_retry" if not summary else "over_600_after_retry"
-                print(
-                    f"[summary-repair] invalid_output block={block_index}/{len(s['blocks'])} "
-                    f"reason={failure} chars={len(summary)}",
-                    flush=True,
-                )
-                raise HTTPException(
-                    502, f"summary_block_{block_index}_{failure}_"
-                         f"actual_{len(summary)}_no_state_changed"
-                )
         print(
             f"[summary-repair] validated block={block_index}/{len(s['blocks'])} "
             f"chars={len(summary)}",
