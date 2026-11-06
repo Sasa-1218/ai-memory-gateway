@@ -3537,3 +3537,155 @@ function showMsg(text, type) {
     container.innerHTML = `<div class="msg msg-${type}">${text}</div>`;
     setTimeout(() => { container.innerHTML = ''; }, 5000);
 }
+
+
+/* Explicit, one-time partition summary recovery. Never called automatically on startup. */
+let summaryRepairPreviewState = null;
+
+async function summaryRepairRequest(endpoint, payload) {
+    const response = await fetch('/api/summary-repair/' + endpoint, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+        throw new Error(typeof body.detail === 'string' ? body.detail : JSON.stringify(body));
+    }
+    return body;
+}
+
+async function loadSummaryRepairOptions() {
+    summaryRepairPreviewState = null;
+    document.getElementById('summaryRepairConfirmArea').style.display = 'none';
+    const result = document.getElementById('summaryRepairResult');
+    try {
+        const [statusResponse, archivesResponse] = await Promise.all([
+            fetch('/api/partition/status'),
+            fetch('/api/historical-summaries?limit=500'),
+        ]);
+        if (!statusResponse.ok || !archivesResponse.ok) throw new Error('读取摘要状态或归档失败');
+        const status = await statusResponse.json();
+        const archives = await archivesResponse.json();
+        const select = document.getElementById('summaryRepairArchive');
+        select.replaceChildren();
+        const matches = (archives.items || []).filter(a =>
+            a.source === 'auto_fold' && a.session_id === status.active_session_id);
+        for (const a of matches) {
+            const opt = document.createElement('option');
+            opt.value = String(a.id);
+            opt.textContent = '#' + a.id + ' ' + (a.period_label || '自动折叠') + '（' + a.content.length + ' 字）';
+            select.append(opt);
+        }
+        document.getElementById('summaryRepairPreview').textContent =
+            '当前活跃对话线：' + (status.active_session_id || '未设置') +
+            '\n当前摘要：' + status.summary_count + ' 段 / ' + status.summary_length + ' 字' +
+            '\n当前 a_start_round：' + status.a_start_round +
+            '\n可选自动折叠归档：' + matches.length + ' 份。' +
+            '\n请核对回退轮次、受保护旧段数量后点击“预览恢复”。';
+        if (!matches.length) result.textContent = '找不到与当前对话线匹配的 auto_fold 归档，请先检查历史归档。';
+        else result.textContent = '';
+    } catch (err) {
+        result.textContent = '读取失败：' + err.message;
+    }
+}
+
+async function previewSummaryRepair() {
+    const area = document.getElementById('summaryRepairConfirmArea');
+    area.style.display = 'none';
+    summaryRepairPreviewState = null;
+    const output = document.getElementById('summaryRepairPreview');
+    try {
+        const statusResp = await fetch('/api/partition/status');
+        if (!statusResp.ok) throw new Error('无法获取当前对话线');
+        const status = await statusResp.json();
+        const payload = {
+            session_id: status.active_session_id,
+            archive_id: Number(document.getElementById('summaryRepairArchive').value),
+            start_round: Number(document.getElementById('summaryRepairStartRound').value),
+            preserved_parts: Number(document.getElementById('summaryRepairPreserve').value),
+        };
+        if (!payload.archive_id || !Number.isInteger(payload.start_round) ||
+            !Number.isInteger(payload.preserved_parts)) throw new Error('归档和整数轮次不能为空');
+        const preview = await summaryRepairRequest('preview', payload);
+        summaryRepairPreviewState = {payload, preview};
+        const retainedText = preview.retained_preview.map(p =>
+            '\n【保留的现有摘要第 ' + p.index + ' 段 / ' + p.chars + ' 字】\n' + p.text
+        ).join('\n');
+        output.textContent =
+            '当前：' + preview.current_parts + ' 段 / ' + preview.current_chars + ' 字' +
+            '\n归档：#' + preview.archive_id + ' ' + preview.archive_label +
+            '（' + preview.archive_parts + ' 段 / ' + preview.archive_chars + ' 字）' +
+            '\n当前游标：' + preview.current_a_start_round +
+            '\n计划从第 ' + preview.rewind_to_round + ' 轮重算' +
+            '\n预计重算：' + preview.regenerate_blocks + ' 个 8 轮区块' +
+            '\n区块范围（左闭右开）：' + JSON.stringify(preview.regenerate_round_ranges) +
+            '\n修复后游标：' + preview.new_cursor_after_repair +
+            '\n原文总逻辑轮：' + preview.total_conversation_rounds +
+            '\n从现有摘要保留：' + preview.keep_existing_parts + ' 段' +
+            '\n注意：归档恢复段 + 保留旧段 + 重算新段，将整体替换当前 active summary。' +
+            '\n预览不会改变数据库。请核对保留段的内容和日期是否与归档重叠。' + retainedText;
+        document.getElementById('summaryRepairConfirmText').value = '';
+        area.style.display = 'block';
+        document.getElementById('summaryRepairResult').textContent = '';
+    } catch (err) {
+        output.textContent = '无法预览：' + err.message;
+    }
+}
+
+async function executeSummaryRepair() {
+    const result = document.getElementById('summaryRepairResult');
+    if (!summaryRepairPreviewState) { result.textContent = '请先预览。'; return; }
+    const confirmation = document.getElementById('summaryRepairConfirmText').value.trim();
+    if (confirmation !== '确认恢复摘要') { result.textContent = '确认文字不匹配，未执行。'; return; }
+    if (!confirm('确定按已显示的预览恢复摘要？将自动创建恢复前快照，执行期间会调用摘要模型。')) return;
+    const btn = document.getElementById('summaryRepairExecuteBtn');
+    btn.disabled = true;
+    result.textContent = '正在执行本次恢复。此时不要重复提交。';
+    try {
+        const {payload, preview} = summaryRepairPreviewState;
+        const data = await summaryRepairRequest('execute', {
+            ...payload, preview_token: preview.preview_token, confirmation
+        });
+        result.textContent = '恢复完成：' + data.summary_parts.length + ' 段 / 游标 ' +
+            data.a_start_round + ' / 重算 ' + data.generated_blocks +
+            ' 块。恢复前快照 ID：' + data.snapshot_id;
+        document.getElementById('summaryRepairSnapshotId').value = data.snapshot_id;
+        summaryRepairPreviewState = null;
+        document.getElementById('summaryRepairConfirmArea').style.display = 'none';
+        await loadThreads();
+        await loadHistoricalSummaries();
+    } catch (err) {
+        result.textContent = '未完成恢复：' + err.message +
+            '\n如果提示预览过期，请重新预览；若请求超时，请先刷新摘要状态，核对是否已执行。';
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function rollbackSummaryRepair() {
+    const result = document.getElementById('summaryRepairResult');
+    const snapshotId = Number(document.getElementById('summaryRepairSnapshotId').value);
+    const confirmation = document.getElementById('summaryRepairRollbackConfirm').value.trim();
+    if (!Number.isInteger(snapshotId) || snapshotId < 1 ||
+        confirmation !== '确认回滚摘要') {
+        result.textContent = '快照 ID 或回滚确认文字无效，未执行。';
+        return;
+    }
+    if (!confirm('确定用该快照覆盖当前摘要和游标？当前状态也会保存为新快照。')) return;
+    try {
+        const response = await fetch('/api/partition/status');
+        if (!response.ok) throw new Error('无法取得当前对话线');
+        const status = await response.json();
+        const data = await summaryRepairRequest('rollback', {
+            session_id: status.active_session_id, snapshot_id: snapshotId, confirmation
+        });
+        result.textContent = '回滚完成：' + data.summary_parts.length + ' 段 / 游标 ' +
+            data.a_start_round + '。回滚前状态也已备份到快照 #' + data.saved_current_as_snapshot_id;
+        summaryRepairPreviewState = null;
+        document.getElementById('summaryRepairConfirmArea').style.display = 'none';
+        await loadThreads();
+    } catch (err) {
+        result.textContent = '回滚失败：' + err.message;
+    }
+}
