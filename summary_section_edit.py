@@ -138,9 +138,11 @@ def _range_edit(parts, start_part, start_section, end_part, end_section, origina
         except ValueError:
             raise HTTPException(400, "invalid_date_in_heading")
     from_date, to_date = parse_bounds(first["heading"])[0], parse_bounds(last["heading"])[1]
-    dates = [parse_bounds(m.group(0))[0] for m in markers]
+    bounds = [parse_bounds(m.group(0)) for m in markers]
+    dates = [pair[0] for pair in bounds]
     if (from_date > to_date or dates[0] != from_date or
-            any(d < from_date or d > to_date for d in dates) or
+            any(start < from_date or end > to_date or end < start
+                for start, end in bounds) or
             any(a > b for a, b in zip(dates, dates[1:]))):
         raise HTTPException(400, "replacement_dates_must_stay_in_selected_range")
 
