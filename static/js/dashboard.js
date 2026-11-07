@@ -2803,6 +2803,7 @@ let _summarySectionState = null;
 let _summarySelectedSection = null;
 let _summarySelectedKey = '';
 let _summarySectionSaving = false;
+let _summaryMergeCandidate = null;
 
 async function loadThreads() {
     try {
@@ -3096,6 +3097,18 @@ function selectSummarySection(force = false) {
     if (!next) return;
     _summarySelectedSection = next;
     _summarySelectedKey = nextKey;
+    const nextIndex = _summarySectionState.sections.findIndex(x => summarySectionKey(x) === nextKey);
+    const adjacent = _summarySectionState.sections[nextIndex + 1];
+    const dateOf = x => x && (x.heading.match(/^【(20\\d{2}[-年]\\d{1,2}(?:[-月]\\d{1,2}(?:日)?)?)/) || [])[1];
+    _summaryMergeCandidate = adjacent && adjacent.part_index === next.part_index &&
+        adjacent.section_index === next.section_index + 1 &&
+        dateOf(next) && dateOf(next) === dateOf(adjacent) ? adjacent : null;
+    const mergeBox = document.getElementById('summarySectionMergeNext');
+    mergeBox.checked = false;
+    mergeBox.disabled = !_summaryMergeCandidate;
+    document.getElementById('summarySectionMergeHint').textContent = _summaryMergeCandidate
+        ? '可合并下一节：' + _summaryMergeCandidate.heading + '。请在上方粘贴包含两节内容的最终稿。'
+        : '下一节不属于同一天或跨摘要段，当前无法自动合并。';
     document.getElementById('summarySectionEditor').value = next.text;
     document.getElementById('summarySectionMessage').textContent = '';
     updateSummarySectionPreview();
@@ -3104,26 +3117,32 @@ function selectSummarySection(force = false) {
 function updateSummarySectionPreview() {
     const current = _summarySelectedSection;
     const next = document.getElementById('summarySectionEditor').value;
-    document.getElementById('summarySectionBefore').textContent = current ? current.text : '';
+    const merge = !!(document.getElementById('summarySectionMergeNext').checked && _summaryMergeCandidate);
+    const before = current ? current.text + (merge ? _summaryMergeCandidate.text : '') : '';
+    document.getElementById('summarySectionBefore').textContent = before;
     document.getElementById('summarySectionAfter').textContent = next;
-    const oldLen = current ? current.text.length : 0;
+    const oldLen = before.length;
     const delta = next.length - oldLen;
     document.getElementById('summarySectionStats').textContent =
         '原文 ' + oldLen + ' 字 → 修改后 ' + next.length + ' 字（' +
         (delta >= 0 ? '+' : '') + delta + '）' +
-        (current && next === current.text ? ' · 尚无修改' : ' · 有未保存修改');
+        (current && next === before ? ' · 尚无修改' : ' · 有未保存修改') +
+        (merge ? ' · 将合并下一节' : '');
     document.getElementById('summarySectionSaveBtn').disabled =
         !_summarySelectedSection || !_summarySectionState || !next.trim() ||
-        (current && next === current.text) || _summarySectionSaving;
+        (current && next === before) || _summarySectionSaving;
 }
 
 async function saveSummarySection() {
     if (!_summarySectionState || !_summarySelectedSection || _summarySectionSaving) return;
     const original = _summarySelectedSection;
     const next = document.getElementById('summarySectionEditor').value;
-    if (!next.trim() || next === original.text) return;
-    if (!confirm('确认只替换「' + original.heading +
-        '」这一小节？服务器会先完整备份当前摘要，并检查有没有其他修改。')) return;
+    const merge = !!(document.getElementById('summarySectionMergeNext').checked && _summaryMergeCandidate);
+    const combinedOriginal = original.text + (merge ? _summaryMergeCandidate.text : '');
+    if (!next.trim() || next === combinedOriginal) return;
+    if (!confirm(merge ? '确认合并「' + original.heading + '」及下一节「' +
+        _summaryMergeCandidate.heading + '」？服务器会完整备份并删除原下一节标题及正文。'
+        : '确认替换「' + original.heading + '」？服务器会先完整备份并校验当前摘要。')) return;
     const message = document.getElementById('summarySectionMessage');
     const btn = document.getElementById('summarySectionSaveBtn');
     _summarySectionSaving = true;
@@ -3140,6 +3159,8 @@ async function saveSummarySection() {
                 state_token: _summarySectionState.state_token,
                 original_text: original.text,
                 replacement: next,
+                merge_next: merge,
+                next_original_text: merge ? _summaryMergeCandidate.text : null,
             }),
         });
         const data = await response.json();
@@ -3148,7 +3169,7 @@ async function saveSummarySection() {
         _summarySelectedKey = summarySectionKey(original);
         _summarySectionState = null;
         await refreshSummarySections();
-        message.textContent = '保存成功。只替换了选中小节；摘要仍为 ' +
+        message.textContent = (merge ? '合并成功。原下一节已移除；' : '保存成功。只替换了选中小节；') + '摘要仍为 ' +
             data.part_count + ' 段，游标 ' + data.a_start_round +
             '，总字数 ' + data.summary_length + '。修改前快照 #' +
             data.snapshot_id + '（可在一次性摘要恢复区使用回滚功能）。';
