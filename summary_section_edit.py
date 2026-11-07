@@ -20,6 +20,9 @@ DATE_HEADING = re.compile(
 )
 SNAPSHOT_FORMAT = "summary_repair_snapshot_v1"
 DATE_PREFIX = re.compile(r"^【(20\d{2}[-年]\d{1,2}(?:[-月]\d{1,2}(?:日)?)?)")
+# Diagnostic only: a date-shaped title embedded in prose may be a former
+# section boundary accidentally joined by an older save. Never auto-change it.
+INLINE_DATE = re.compile(r"【20\d{2}[-年]\d{1,2}(?:[-月]\d{1,2}(?:日)?)?[^】\n]{0,70}】")
 
 
 def _digest(parts, cursor):
@@ -86,6 +89,10 @@ async def read(session_id):
                 "heading": section["heading"],
                 "chars": len(section["text"]),
                 "text": section["text"],
+                "suspected_joined_dates": [
+                    match.group(0) for match in INLINE_DATE.finditer(section["text"])
+                    if match.start() > 0 and section["text"][match.start() - 1] != "\n"
+                ],
             }
             for section in split_sections(parts)
         ],
