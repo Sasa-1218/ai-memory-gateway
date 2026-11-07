@@ -19,6 +19,7 @@ DATE_HEADING = re.compile(
     r"[^】\n]{0,70}】[^\n]*"
 )
 SNAPSHOT_FORMAT = "summary_repair_snapshot_v1"
+DATE_PREFIX = re.compile(r"^【(20\d{2}[-年]\d{1,2}(?:[-月]\d{1,2}(?:日)?)?)")
 
 
 def _digest(parts, cursor):
@@ -78,13 +79,15 @@ async def read(session_id):
     }
 
 
-async def replace(session_id, part_index, section_index, expected_token, original_text, replacement):
+async def replace(session_id, part_index, section_index, expected_token, original_text, replacement, merge_next=False, next_original_text=None):
     if not isinstance(replacement, str) or not replacement.strip():
         raise HTTPException(400, "replacement_cannot_be_empty")
     if not isinstance(original_text, str) or not isinstance(expected_token, str):
         raise HTTPException(400, "invalid_original_or_token")
     if replacement == original_text:
         raise HTTPException(400, "no_changes_to_save")
+    if not isinstance(merge_next, bool):
+        raise HTTPException(400, "invalid_merge_flag")
     if len(replacement) > 100000:
         raise HTTPException(400, "replacement_too_long")
     # The dated header remains byte-for-byte the same: this safeguards
@@ -111,14 +114,35 @@ async def replace(session_id, part_index, section_index, expected_token, origina
             if section["text"] != original_text:
                 raise HTTPException(409, "selected_section_changed_refresh_editor")
             original_heading = section["heading"]
+            end_offset = section["end"]
             if original_heading != "整段（无日期标题）":
-                if not replacement.startswith(original_heading):
-                    raise HTTPException(400, "keep_original_date_heading_unchanged")
-                if len(DATE_HEADING.findall(replacement)) != 1:
+                old_date = DATE_PREFIX.match(original_heading)
+                new_date = DATE_PREFIX.match(replacement)
+                if not old_date or not new_date or old_date.group(1) != new_date.group(1):
+                    raise HTTPException(400, "keep_original_date_unchanged")
+                matches = list(DATE_HEADING.finditer(replacement))
+                if len(matches) != 1 or matches[0].start() != 0:
                     raise HTTPException(400, "replacement_must_contain_one_date_heading")
+            elif merge_next:
+                raise HTTPException(400, "cannot_merge_undated_section")
+            if merge_next:
+                next_section = next((
+                    item for item in split_sections(parts)
+                    if item["part_index"] == part_index and
+                       item["section_index"] == section_index + 1
+                ), None)
+                if next_section is None or next_section["start"] != section["end"]:
+                    raise HTTPException(400, "next_section_not_in_same_summary_part")
+                next_date = DATE_PREFIX.match(next_section["heading"])
+                current_date = DATE_PREFIX.match(original_heading)
+                if not next_date or not current_date or next_date.group(1) != current_date.group(1):
+                    raise HTTPException(400, "merge_requires_same_date")
+                if next_original_text != next_section["text"]:
+                    raise HTTPException(409, "next_section_changed_refresh_editor")
+                end_offset = next_section["end"]
             next_part = (
                 parts[part_index][:section["start"]] + replacement +
-                parts[part_index][section["end"]:]
+                parts[part_index][end_offset:]
             )
             updated_parts = list(parts)
             updated_parts[part_index] = next_part
@@ -130,6 +154,7 @@ async def replace(session_id, part_index, section_index, expected_token, origina
                 "reason": "manual_date_section_edit",
                 "part_index": part_index,
                 "section_index": section_index,
+                "merge_next": merge_next,
             }, ensure_ascii=False)
             snap = await conn.fetchrow(
                 "INSERT INTO historical_summaries(session_id, period_label, content, source) "
@@ -149,4 +174,5 @@ async def replace(session_id, part_index, section_index, expected_token, origina
         "summary_length": sum(map(len, updated_parts)),
         "old_section_chars": len(original_text),
         "new_section_chars": len(replacement),
+        "merged_next": merge_next,
     }
