@@ -3317,7 +3317,7 @@ function updateSummaryRangePreview() {
           ' 字（' + (delta >= 0 ? '+' : '') + delta +
           '）；范围外文本保持原样。'
         : '请先选择有效的起止小节。';
-    const firstHeading = state && (state.first.heading.match(/^【20\\d{2}[-年]\\d{1,2}[-月]\\d{1,2}/) || [])[0];
+    const firstHeading = state && (state.first.heading.match(/^【20\d{2}[-年]\d{1,2}[-月]\d{1,2}/) || [])[0];
     document.getElementById('summaryRangeSaveBtn').disabled =
         !state || _summaryRangeSaving || !after.trim() || after === before ||
         !firstHeading || !after.startsWith(firstHeading);
