@@ -6931,6 +6931,30 @@ async def api_partition_threads():
     return {"threads": threads, "active_session_id": active_sid}
 
 
+@app.get("/api/partition/summary-sections")
+async def api_get_summary_sections(session_id: str):
+    """Read a summary as individually editable dated diary sections."""
+    from summary_section_edit import read
+    if not session_id.strip():
+        raise HTTPException(status_code=400, detail="session_id_required")
+    return await read(session_id)
+
+
+@app.post("/api/partition/summary-sections/replace")
+async def api_replace_summary_section(request: Request):
+    """Atomic one-section edit with full pre-edit snapshot and stale-state guard."""
+    from summary_section_edit import replace
+    body = await request.json()
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id_required")
+    return await replace(
+        sid, body.get("part_index"), body.get("section_index"),
+        body.get("state_token"), body.get("original_text"),
+        body.get("replacement"),
+    )
+
+
 @app.put("/api/partition/summary")
 async def api_update_summary(request: Request):
     try:
