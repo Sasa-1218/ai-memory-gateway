@@ -1,7 +1,7 @@
 """Regression tests for date-section parsing and targeted replacements."""
 import unittest
 
-from summary_section_edit import DATE_HEADING, INLINE_DATE, _digest, _validate_selection, split_sections, splice_section
+from summary_section_edit import DATE_HEADING, INLINE_DATE, _digest, _validate_selection, split_sections, splice_section, _range_edit
 
 
 class DateSectionEditTests(unittest.TestCase):
@@ -95,6 +95,68 @@ class DateSectionEditTests(unittest.TestCase):
             [m.group(0) for m in INLINE_DATE.finditer(healthy)
              if m.start() > 0 and healthy[m.start()-1] != "\\n"], []
         )
+
+    def test_date_range_replaces_two_days_without_touching_neighbors(self):
+        parts = [
+            "开头保留\\n【2026-10-29】旧事\\n不要改\\n"
+            "【2026-10-30】A\\n旧A\\n"
+            "【2026-10-31】B\\n旧B\\n"
+            "【2026-11-01】C\\n旧C\\n"
+            "【2026-11-02】D\\n保留D"
+        ]
+        sections = split_sections(parts)
+        original = "".join(x["text"] for x in sections[1:4])
+        replacement = ("【2026-10-30】新标题\\n新版A\\n\\n"
+                       "【2026-10-31】新标题\\n新版B\\n"
+                       "【2026-11-01】新标题\\n新版C")
+        after, audit = _range_edit(parts, 0, 1, 0, 3, original, replacement)
+        self.assertEqual(len(after), 1)
+        self.assertIn("【2026-10-29】旧事\\n不要改", after[0])
+        self.assertIn("【2026-11-02】D\\n保留D", after[0])
+        self.assertIn("新版C\\n\\n【2026-11-02】D", after[0])
+        self.assertNotIn("旧B", after[0])
+        self.assertEqual(audit["selected_sections"], 3)
+        self.assertEqual(len(split_sections(after)), 5)
+
+    def test_date_range_across_parts_preserves_outside_text(self):
+        parts = [
+            "【2026-10-29】旧事\\n保留\\n【2026-10-30】A\\n旧A\\n",
+            "【2026-10-31】B\\n旧B\\n【2026-11-01】C\\n旧C\\n",
+            "【2026-11-02】D\\n保留D\\n【2026-11-03】E\\n保留E",
+        ]
+        selected = split_sections(parts)
+        original = "".join(x["text"] for x in selected[1:4])
+        new = ("【2026-10-30】合并第一天\\n内容1\\n"
+               "【2026-10-31】合并第二天\\n内容2\\n"
+               "【2026-11-01】合并第三天\\n内容3")
+        result, audit = _range_edit(parts, 0, 1, 1, 1, original, new)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[1], parts[2])
+        self.assertEqual(result[0].count("【2026-11-01】"), 1)
+        self.assertIn("【2026-10-29】旧事\\n保留", result[0])
+        self.assertEqual(len(split_sections(result)), 6)
+        self.assertEqual(audit["old_chars"], len(original))
+
+    def test_date_range_rejects_unselected_dates_and_stale_text(self):
+        from fastapi import HTTPException
+        parts = ["【2026-10-30】A\\n旧A\\n【2026-10-31】B\\n旧B"]
+        selected = split_sections(parts)
+        original = selected[0]["text"]
+        with self.assertRaises(HTTPException):
+            _range_edit(parts, 0, 0, 0, 0, original, "【2026-11-01】错日期\\n正文")
+        with self.assertRaises(HTTPException):
+            _range_edit(parts, 0, 0, 0, 0, "旧内容和实际不符", "【2026-10-30】A\\n改了")
+
+    def test_date_range_merges_duplicate_day_headings(self):
+        parts = ["【2026-10-31】樱花\\n旧A\\n【2026-10-31】汉服\\n旧B\\n"
+                 "【2026-11-01】下一天\\n不修改"]
+        secs = split_sections(parts)
+        result, _ = _range_edit(parts, 0, 0, 0, 1,
+                                secs[0]["text"] + secs[1]["text"],
+                                "【2026-10-31】樱花与汉服\\n合并后的新稿")
+        self.assertEqual(len(split_sections(result)), 2)
+        self.assertTrue(result[0].endswith("【2026-11-01】下一天\\n不修改"))
+        self.assertIn("合并后的新稿\\n\\n【2026-11-01】", result[0])
 
     def test_heading_match_is_anchored_to_line(self):
         self.assertFalse(DATE_HEADING.search("今天提到【2026-11-01】的故事"))
