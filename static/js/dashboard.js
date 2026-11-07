@@ -3169,10 +3169,23 @@ async function saveSummarySection() {
         _summarySelectedKey = summarySectionKey(original);
         _summarySectionState = null;
         await refreshSummarySections();
-        message.textContent = (merge ? '合并成功。原下一节已移除；' : '保存成功。只替换了选中小节；') + '摘要仍为 ' +
-            data.part_count + ' 段，游标 ' + data.a_start_round +
-            '，总字数 ' + data.summary_length + '。修改前快照 #' +
-            data.snapshot_id + '（可在一次性摘要恢复区使用回滚功能）。';
+        const saved = _summarySelectedSection;
+        if (!saved || saved.part_index !== original.part_index ||
+            saved.heading !== next.split('\n')[0] ||
+            saved.text.trimEnd() !== next.trimEnd()) {
+            message.textContent = '重要：服务器已接受写入，但重新读取后内容或日期边界与提交稿不一致。' +
+                '不要继续修改或重复提交！请保存草稿并核对自动快照 #' + data.snapshot_id + '。';
+            document.getElementById('summarySectionSaveBtn').disabled = true;
+            document.getElementById('summaryWholeSaveBtn').disabled = true;
+            return;
+        }
+        const totalDelta = data.summary_length - data.previous_summary_length;
+        message.textContent = (merge ? '合并成功，原下一节已移除；' : '保存成功；') +
+            '已重新读取并核对本节。摘要仍为 ' + data.part_count +
+            ' 段，游标 ' + data.a_start_round + '，总字数 ' +
+            data.previous_summary_length + ' → ' + data.summary_length +
+            '（' + (totalDelta >= 0 ? '+' : '') + totalDelta +
+            '）。修改前快照 #' + data.snapshot_id + '。';
         // The legacy full-summary textarea was opened before this atomic edit.
         // Disable its write button until the modal is reopened with fresh data.
         document.getElementById('summaryWholeSaveBtn').disabled = true;
