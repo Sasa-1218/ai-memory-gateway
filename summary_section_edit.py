@@ -119,7 +119,7 @@ def _range_edit(parts, start_part, start_section, end_part, end_section, origina
     # Every replacement date must be inside the original selected inclusive span.
     # Do not infer dates from prose; only date-heading starts determine boundaries.
     def parse_date(heading):
-        m = re.match(r"^【(20\\d{2})[-年](\\d{1,2})[-月](\\d{1,2})", heading)
+        m = re.match(r"^【(20\d{2})[-年](\d{1,2})[-月](\d{1,2})", heading)
         if not m:
             raise HTTPException(400, "range_requires_full_ymd_headings")
         from datetime import date
@@ -154,8 +154,8 @@ def _range_edit(parts, start_part, start_section, end_part, end_section, origina
         )
         tail = parts[pj][last["end"]:]
         candidate = parts[pi][:first["start"]] + replacement
-        if tail and DATE_HEADING.match(tail) and not candidate.endswith("\\n"):
-            candidate += "\\n\\n"
+        if tail and DATE_HEADING.match(tail) and not candidate.endswith("\n"):
+            candidate += "\n\n"
         updated = list(parts[:pi]) + [candidate + tail] + list(parts[pj + 1:])
     if actual_original != original_text:
         raise HTTPException(409, "selected_range_changed_reload_preview")
