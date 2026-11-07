@@ -3110,7 +3110,11 @@ function selectSummarySection(force = false) {
         ? '可合并下一节：' + _summaryMergeCandidate.heading + '。请在上方粘贴包含两节内容的最终稿。'
         : '下一节不属于同一天或跨摘要段，当前无法自动合并。';
     document.getElementById('summarySectionEditor').value = next.text;
-    document.getElementById('summarySectionMessage').textContent = '';
+    const suspect = next.suspected_joined_dates || [];
+    document.getElementById('summarySectionMessage').textContent = suspect.length
+        ? '警告：本节正文中发现疑似被拼接进去的日期标题：' +
+          suspect.join('、') + '。本节暂时禁止继续保存。请先复制草稿并核对保存前快照。'
+        : '';
     updateSummarySectionPreview();
 }
 
@@ -3130,7 +3134,8 @@ function updateSummarySectionPreview() {
         (merge ? ' · 将合并下一节' : '');
     document.getElementById('summarySectionSaveBtn').disabled =
         !_summarySelectedSection || !_summarySectionState || !next.trim() ||
-        (current && next === before) || _summarySectionSaving;
+        (current && next === before) || _summarySectionSaving ||
+        (current && (current.suspected_joined_dates || []).length > 0);
 }
 
 async function saveSummarySection() {
@@ -3139,6 +3144,11 @@ async function saveSummarySection() {
     const next = document.getElementById('summarySectionEditor').value;
     const merge = !!(document.getElementById('summarySectionMergeNext').checked && _summaryMergeCandidate);
     const combinedOriginal = original.text + (merge ? _summaryMergeCandidate.text : '');
+    if ((original.suspected_joined_dates || []).length) {
+        document.getElementById('summarySectionMessage').textContent =
+            '检测到疑似日期粘连；已阻止保存以免扩大损坏。请核对保存前快照。';
+        return;
+    }
     if (!next.trim() || next === combinedOriginal) return;
     if (!confirm(merge ? '确认合并「' + original.heading + '」及下一节「' +
         _summaryMergeCandidate.heading + '」？服务器会完整备份并删除原下一节标题及正文。'
