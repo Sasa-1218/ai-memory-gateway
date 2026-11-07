@@ -183,6 +183,7 @@ function switchSection(name) {
     }
     if (name === 'threads') {
         loadThreads();
+        loadHistoricalSummaries();
     }
     if (name === 'settings') {
         loadSettings();
@@ -1971,6 +1972,137 @@ async function doTextImport() {
     }
 }
 
+async function saveHistoricalSummary() {
+    const content = document.getElementById('historicalSummaryContent')?.value.trim() || '';
+    const periodLabel = document.getElementById('historicalSummaryPeriod')?.value.trim() || '';
+    const status = document.getElementById('historicalSummaryStatus');
+    if (!content) {
+        if (status) status.textContent = '请先粘贴旧摘要正文。';
+        return;
+    }
+    if (status) status.textContent = '正在保存...';
+    try {
+        const resp = await fetch('/api/historical-summaries', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                period_label: periodLabel,
+                content,
+                source: 'manual_backup'
+            })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || data.error || ('HTTP ' + resp.status));
+        if (status) status.textContent = '已保存到历史摘要。它不会默认注入聊天。';
+        document.getElementById('historicalSummaryContent').value = '';
+        document.getElementById('historicalSummaryPeriod').value = '';
+        await loadHistoricalSummaries();
+    } catch (e) {
+        if (status) status.textContent = '保存失败：' + e.message;
+    }
+}
+
+let historicalSummaryManageMode = false;
+let historicalSummaryItems = [];
+
+function toggleHistoricalSummaryManage(forceValue = null) {
+    historicalSummaryManageMode = forceValue === null ? !historicalSummaryManageMode : Boolean(forceValue);
+    const btn = document.getElementById('historicalSummaryManageBtn');
+    const actions = document.getElementById('historicalSummaryBulkActions');
+    if (btn) btn.textContent = historicalSummaryManageMode ? '退出管理' : '管理归档';
+    if (actions) actions.style.display = historicalSummaryManageMode ? 'flex' : 'none';
+    renderHistoricalSummaries();
+}
+
+function updateHistoricalSummarySelection() {
+    const checked = [...document.querySelectorAll('.historical-summary-checkbox:checked')];
+    const count = document.getElementById('historicalSummarySelectedCount');
+    const del = document.getElementById('historicalSummaryDeleteSelectedBtn');
+    if (count) count.textContent = '已选择 ' + checked.length + ' 份';
+    if (del) del.disabled = checked.length === 0;
+}
+
+function renderHistoricalSummaries() {
+    const list = document.getElementById('historicalSummaryList');
+    if (!list) return;
+    if (!historicalSummaryItems.length) {
+        list.innerHTML = '<div style="color:var(--text-muted);">暂无历史摘要。</div>';
+        updateHistoricalSummarySelection();
+        return;
+    }
+
+    list.innerHTML = historicalSummaryItems.map(item => {
+        const label = escapeHtml(item.period_label || '未填写时间标签');
+        const full = escapeHtml(item.content || '');
+        const id = Number(item.id);
+        const checkbox = historicalSummaryManageMode
+            ? `<label style="display:flex; align-items:center; gap:7px; margin-right:4px;" onclick="event.stopPropagation();">
+                    <input class="historical-summary-checkbox" type="checkbox" value="${id}" onchange="updateHistoricalSummarySelection()">
+                    <span style="font-size:12px; color:var(--text-muted);">选择</span>
+               </label>`
+            : '';
+        return `
+            <details class="card" style="padding:12px; margin-bottom:10px; border:1px solid var(--border-color);">
+                <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:12px;">
+                    <span style="display:flex; align-items:center; gap:8px; min-width:0;">${checkbox}<strong style="word-break:break-word;">${label}</strong></span>
+                    <span style="color:var(--text-muted); font-size:12px; white-space:nowrap;">#${id} · ${Number((item.content || '').length)} 字</span>
+                </summary>
+                <div style="white-space:pre-wrap; line-height:1.7; margin-top:12px; max-height:65vh; overflow:auto; padding-right:4px;">${full}</div>
+            </details>`;
+    }).join('');
+    updateHistoricalSummarySelection();
+}
+
+async function loadHistoricalSummaries() {
+    const list = document.getElementById('historicalSummaryList');
+    const status = document.getElementById('historicalSummaryStatus');
+    if (!list) return;
+    list.innerHTML = '<div style="color:var(--text-muted);">正在读取历史摘要...</div>';
+    try {
+        const resp = await fetch('/api/historical-summaries?limit=100');
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || data.error || ('HTTP ' + resp.status));
+        historicalSummaryItems = Array.isArray(data.items) ? data.items : [];
+        if (status) status.textContent = historicalSummaryItems.length
+            ? '共 ' + historicalSummaryItems.length + ' 份历史摘要；默认不参与聊天注入。点击任意一份可查看全文。'
+            : '目前还没有历史摘要。';
+        renderHistoricalSummaries();
+    } catch (e) {
+        historicalSummaryItems = [];
+        list.innerHTML = '';
+        if (status) status.textContent = '读取失败：' + e.message;
+    }
+}
+
+async function deleteSelectedHistoricalSummaries() {
+    const ids = [...document.querySelectorAll('.historical-summary-checkbox:checked')]
+        .map(el => Number(el.value))
+        .filter(Number.isFinite);
+    if (!ids.length) return;
+    if (!confirm('确定永久删除选中的 ' + ids.length + ' 份历史摘要吗？\n\n删除后无法恢复。')) return;
+
+    const status = document.getElementById('historicalSummaryStatus');
+    const btn = document.getElementById('historicalSummaryDeleteSelectedBtn');
+    if (btn) btn.disabled = true;
+    try {
+        for (const id of ids) {
+            const resp = await fetch('/api/historical-summaries/' + id, {method: 'DELETE'});
+            const data = await resp.json();
+            if (!resp.ok) throw new Error('删除 #' + id + ' 失败：' + (data.detail || data.error || ('HTTP ' + resp.status)));
+        }
+        if (status) status.textContent = '已删除选中的 ' + ids.length + ' 份历史摘要。';
+        historicalSummaryManageMode = false;
+        const manageBtn = document.getElementById('historicalSummaryManageBtn');
+        const actions = document.getElementById('historicalSummaryBulkActions');
+        if (manageBtn) manageBtn.textContent = '管理归档';
+        if (actions) actions.style.display = 'none';
+        await loadHistoricalSummaries();
+    } catch (e) {
+        if (status) status.textContent = '删除失败：' + e.message;
+        updateHistoricalSummarySelection();
+    }
+}
+
 async function previewJson() {
     const file = document.getElementById('jsonFile').files[0];
     const text = document.getElementById('jsonInput').value.trim();
@@ -2667,6 +2799,10 @@ function formatConvTime(isoStr) {
 let _threadData = { threads: [], active_session_id: '' };
 let _summaryEditSid = '';
 let _summaryOriginalText = '';
+let _summarySectionState = null;
+let _summarySelectedSection = null;
+let _summarySelectedKey = '';
+let _summarySectionSaving = false;
 
 async function loadThreads() {
     try {
@@ -2872,6 +3008,7 @@ async function openSummaryModal(sessionId) {
         _summaryOriginalText = summary;
         updateSummaryCharCount();
         document.getElementById('summaryModal').style.display = 'flex';
+        await refreshSummarySections();
     } catch(e) {
         alert('获取摘要失败: ' + e.message);
     }
@@ -2881,6 +3018,147 @@ function closeSummaryModal() {
     document.getElementById('summaryModal').style.display = 'none';
     _summaryEditSid = '';
     _summaryOriginalText = '';
+    _summarySectionState = null;
+    _summarySelectedSection = null;
+    _summarySelectedKey = '';
+}
+
+
+function summarySectionKey(section) {
+    return section.part_index + ':' + section.section_index;
+}
+
+function summarySectionIsDirty() {
+    return _summarySelectedSection &&
+        document.getElementById('summarySectionEditor').value !== _summarySelectedSection.text;
+}
+
+async function refreshSummarySections() {
+    if (!_summaryEditSid) return;
+    if (_summarySectionState && summarySectionIsDirty() &&
+        !confirm('当前小节有尚未保存的修改。确定放弃这些修改并重新加载吗？')) return;
+    const msg = document.getElementById('summarySectionMessage');
+    const btn = document.getElementById('summarySectionSaveBtn');
+    msg.textContent = '正在读取日期小节…';
+    btn.disabled = true;
+    try {
+        const resp = await fetch(
+            '/api/partition/summary-sections?session_id=' + encodeURIComponent(_summaryEditSid),
+            {cache:'no-store'});
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'HTTP ' + resp.status);
+        _summarySectionState = data;
+        const sel = document.getElementById('summarySectionSelect');
+        const priorKey = _summarySelectedKey;
+        sel.replaceChildren();
+        for (const section of data.sections) {
+            const opt = document.createElement('option');
+            opt.value = summarySectionKey(section);
+            opt.textContent = section.heading + '（' + section.chars + '字，摘要段' +
+                (section.part_index + 1) + '）';
+            sel.append(opt);
+        }
+        if (!data.sections.length) {
+            _summarySelectedSection = null;
+            _summarySelectedKey = '';
+            document.getElementById('summarySectionEditor').value = '';
+            msg.textContent = '当前对话线没有可编辑的摘要小节。';
+            return;
+        }
+        const match = data.sections.find(section => summarySectionKey(section) === priorKey);
+        sel.value = match ? priorKey : summarySectionKey(data.sections[0]);
+        _summarySelectedKey = '';
+        selectSummarySection(true);
+        msg.textContent = '已读取 ' + data.sections.length + ' 个小节 / ' +
+            data.part_count + ' 个摘要段。保存时将自动创建可回滚快照。';
+    } catch (err) {
+        _summarySectionState = null;
+        _summarySelectedSection = null;
+        document.getElementById('summarySectionEditor').value = '';
+        msg.textContent = '加载失败：' + err.message;
+    } finally {
+        btn.disabled = !_summarySelectedSection;
+    }
+}
+
+function selectSummarySection(force = false) {
+    if (!_summarySectionState) return;
+    const sel = document.getElementById('summarySectionSelect');
+    const nextKey = sel.value;
+    if (!force && _summarySelectedKey !== nextKey && summarySectionIsDirty()) {
+        if (!confirm('上一小节有未保存的修改。确定切换并放弃修改吗？')) {
+            sel.value = _summarySelectedKey;
+            return;
+        }
+    }
+    const next = _summarySectionState.sections.find(section => summarySectionKey(section) === nextKey);
+    if (!next) return;
+    _summarySelectedSection = next;
+    _summarySelectedKey = nextKey;
+    document.getElementById('summarySectionEditor').value = next.text;
+    document.getElementById('summarySectionMessage').textContent = '';
+    updateSummarySectionPreview();
+}
+
+function updateSummarySectionPreview() {
+    const current = _summarySelectedSection;
+    const next = document.getElementById('summarySectionEditor').value;
+    document.getElementById('summarySectionBefore').textContent = current ? current.text : '';
+    document.getElementById('summarySectionAfter').textContent = next;
+    const oldLen = current ? current.text.length : 0;
+    const delta = next.length - oldLen;
+    document.getElementById('summarySectionStats').textContent =
+        '原文 ' + oldLen + ' 字 → 修改后 ' + next.length + ' 字（' +
+        (delta >= 0 ? '+' : '') + delta + '）' +
+        (current && next === current.text ? ' · 尚无修改' : ' · 有未保存修改');
+    document.getElementById('summarySectionSaveBtn').disabled =
+        !_summarySelectedSection || !_summarySectionState || !next.trim() ||
+        (current && next === current.text) || _summarySectionSaving;
+}
+
+async function saveSummarySection() {
+    if (!_summarySectionState || !_summarySelectedSection || _summarySectionSaving) return;
+    const original = _summarySelectedSection;
+    const next = document.getElementById('summarySectionEditor').value;
+    if (!next.trim() || next === original.text) return;
+    if (!confirm('确认只替换「' + original.heading +
+        '」这一小节？服务器会先完整备份当前摘要，并检查有没有其他修改。')) return;
+    const message = document.getElementById('summarySectionMessage');
+    const btn = document.getElementById('summarySectionSaveBtn');
+    _summarySectionSaving = true;
+    btn.disabled = true;
+    message.textContent = '正在保存单节并生成恢复前快照…';
+    try {
+        const response = await fetch('/api/partition/summary-sections/replace', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({
+                session_id: _summaryEditSid,
+                part_index: original.part_index,
+                section_index: original.section_index,
+                state_token: _summarySectionState.state_token,
+                original_text: original.text,
+                replacement: next,
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'HTTP ' + response.status);
+        // Reload from the source of truth; do not assume a cached local edit.
+        _summarySelectedKey = summarySectionKey(original);
+        _summarySectionState = null;
+        await refreshSummarySections();
+        message.textContent = '保存成功。只替换了选中小节；摘要仍为 ' +
+            data.part_count + ' 段，游标 ' + data.a_start_round +
+            '，总字数 ' + data.summary_length + '。修改前快照 #' +
+            data.snapshot_id + '（可在一次性摘要恢复区使用回滚功能）。';
+        await loadThreads();
+    } catch (err) {
+        message.textContent = '未确认保存：' + err.message +
+            '。当前草稿仍在编辑框中；不要重复提交，请先刷新核对。';
+    } finally {
+        _summarySectionSaving = false;
+        updateSummarySectionPreview();
+    }
 }
 
 function updateSummaryCharCount() {
@@ -3042,7 +3320,7 @@ const _SETTINGS_FIELDS = {
     str: ['API_BASE_URL', 'API_KEY', 'DEFAULT_MODEL', 'MEMORY_API_BASE_URL', 'MEMORY_API_KEY', 'MEMORY_MODEL', 'MEMORY_API_THINKING',
           'CACHE_SUMMARY_MODEL', 'SUMMARY_API_BASE_URL', 'SUMMARY_API_KEY', 'CACHE_PARTITION_TRIGGER', 'EMBEDDING_API_KEY', 'EMBEDDING_BASE_URL', 'EMBEDDING_MODEL', 'REASONING_EFFORT',
          'role_display_user', 'role_display_assistant'],
-    int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'EMBEDDING_DIM'],
+    int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'CACHE_SUMMARY_BUDGET_CHARS', 'SUMMARY_KEEP_RECENT', 'EMBEDDING_DIM'],
     float: ['MIN_SCORE_THRESHOLD'],
     bool: ['MEMORY_ENABLED', 'CACHE_PARTITION_ENABLED', 'MEMORY_VECTOR_ENABLED', 'FORCE_STREAM'],
     range: ['MEMORY_HW_KEYWORD', 'MEMORY_HW_SEMANTIC', 'MEMORY_HW_IMPORTANCE',
@@ -3404,4 +3682,235 @@ function showMsg(text, type) {
     if (!container) return;
     container.innerHTML = `<div class="msg msg-${type}">${text}</div>`;
     setTimeout(() => { container.innerHTML = ''; }, 5000);
+}
+
+
+/* Explicit, one-time partition summary recovery. Never called automatically on startup. */
+let summaryRepairPreviewState = null;
+
+async function summaryRepairRequest(endpoint, payload) {
+    const response = await fetch('/api/summary-repair/' + endpoint, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+        throw new Error(typeof body.detail === 'string' ? body.detail : JSON.stringify(body));
+    }
+    return body;
+}
+
+async function loadSummaryRepairOptions() {
+    summaryRepairPreviewState = null;
+    document.getElementById('summaryRepairConfirmArea').style.display = 'none';
+    const result = document.getElementById('summaryRepairResult');
+    try {
+        const [statusResponse, archivesResponse] = await Promise.all([
+            fetch('/api/partition/status'),
+            fetch('/api/historical-summaries?limit=500'),
+        ]);
+        if (!statusResponse.ok || !archivesResponse.ok) throw new Error('读取摘要状态或归档失败');
+        const status = await statusResponse.json();
+        const archives = await archivesResponse.json();
+        const select = document.getElementById('summaryRepairArchive');
+        select.replaceChildren();
+        const matches = (archives.items || []).filter(a =>
+            a.source === 'auto_fold' && a.session_id === status.active_session_id);
+        for (const a of matches) {
+            const opt = document.createElement('option');
+            opt.value = String(a.id);
+            opt.textContent = '#' + a.id + ' ' + (a.period_label || '自动折叠') + '（' + a.content.length + ' 字）';
+            select.append(opt);
+        }
+        document.getElementById('summaryRepairPreview').textContent =
+            '当前活跃对话线：' + (status.active_session_id || '未设置') +
+            '\n当前摘要：' + status.summary_count + ' 段 / ' + status.summary_length + ' 字' +
+            '\n当前 a_start_round：' + status.a_start_round +
+            '\n可选自动折叠归档：' + matches.length + ' 份。' +
+            '\n请核对回退轮次、受保护旧段数量后点击“预览恢复”。';
+        if (!matches.length) {
+            const allAuto = (archives.items || []).filter(a => a.source === 'auto_fold');
+            const currentManual = (archives.items || []).filter(a =>
+                a.session_id === status.active_session_id && a.source !== 'auto_fold');
+            const others = allAuto.filter(a => a.session_id !== status.active_session_id);
+            result.textContent = '当前对话线没有可直接恢复的自动折叠归档。' +
+                '\\n全库自动折叠归档：' + allAuto.length + ' 份' +
+                '\\n其中属于其他对话线：' + others.length + ' 份' +
+                '\\n当前对话线其他来源归档：' + currentManual.length + ' 份' +
+                '\\n如存在其他对话线的折叠归档，可能是 session_id 不一致；如仅有手动归档，恢复工具当前不会选中它。' +
+                '\\n请先核对下方「历史摘要归档」中的来源与对话线，不要直接覆盖 active summary。';
+        } else result.textContent = '';
+    } catch (err) {
+        result.textContent = '读取失败：' + err.message;
+    }
+}
+
+async function previewSummaryRepair() {
+    const area = document.getElementById('summaryRepairConfirmArea');
+    area.style.display = 'none';
+    summaryRepairPreviewState = null;
+    const output = document.getElementById('summaryRepairPreview');
+    try {
+        const statusResp = await fetch('/api/partition/status');
+        if (!statusResp.ok) throw new Error('无法获取当前对话线');
+        const status = await statusResp.json();
+        const payload = {
+            session_id: status.active_session_id,
+            archive_id: Number(document.getElementById('summaryRepairArchive').value),
+            start_round: Number(document.getElementById('summaryRepairStartRound').value),
+            preserved_parts: Number(document.getElementById('summaryRepairPreserve').value),
+        };
+        if (!payload.archive_id || !Number.isInteger(payload.start_round) ||
+            !Number.isInteger(payload.preserved_parts)) throw new Error('归档和整数轮次不能为空');
+        const preview = await summaryRepairRequest('preview', payload);
+        summaryRepairPreviewState = {payload, preview};
+        const retainedText = preview.retained_preview.map(p =>
+            '\n【保留的现有摘要第 ' + p.index + ' 段 / ' + p.chars + ' 字】\n' + p.text
+        ).join('\n');
+        const boundaryReport = '\n\n—— 归档末尾（原样核对）——' +
+            (preview.archive_tail || []).map(p =>
+                '\n【归档段 ' + p.index + ' / ' + p.chars + ' 字】\n' + p.text
+            ).join('\n') +
+            '\n\n—— 本次丢弃的旧摘要（仅供核对，不会保留）——' +
+            (preview.discarded_current_parts || []).map(p =>
+                '\n【旧摘要段 ' + p.index + ' / ' + p.chars + ' 字】\n' + p.text
+            ).join('\n') +
+            '\n\n提示：这只是日期与内容的对照，不代表已自动验证无遗漏。';
+        output.textContent =
+            '当前：' + preview.current_parts + ' 段 / ' + preview.current_chars + ' 字' +
+            '\n归档：#' + preview.archive_id + ' ' + preview.archive_label +
+            '（' + preview.archive_parts + ' 段 / ' + preview.archive_chars + ' 字）' +
+            '\n当前游标：' + preview.current_a_start_round +
+            '\n计划从第 ' + preview.rewind_to_round + ' 轮重算' +
+            '\n预计重算：' + preview.regenerate_blocks + ' 个 8 轮区块' +
+            '\n区块范围（左闭右开）：' + JSON.stringify(preview.regenerate_round_ranges) +
+            '\n区块对应上海时间：' + JSON.stringify(preview.block_date_ranges) +
+            '\n修复后游标：' + preview.new_cursor_after_repair +
+            '\n原文总逻辑轮：' + preview.total_conversation_rounds +
+            '\n从现有摘要保留：' + preview.keep_existing_parts + ' 段' +
+            '\n注意：归档恢复段 + 保留旧段 + 重算新段，将整体替换当前 active summary。' +
+            '\n预览不会改变数据库。请核对保留段的内容和日期是否与归档重叠。' + retainedText + boundaryReport;
+        document.getElementById('summaryRepairConfirmText').value = '';
+        area.style.display = 'block';
+        document.getElementById('summaryRepairResult').textContent = '';
+    } catch (err) {
+        output.textContent = '无法预览：' + err.message;
+    }
+}
+
+async function executeSummaryRepair() {
+    const result = document.getElementById('summaryRepairResult');
+    if (!summaryRepairPreviewState) { result.textContent = '请先预览。'; return; }
+    const pending = summaryRepairPreviewState.payload;
+    if (Number(document.getElementById('summaryRepairArchive').value) !== pending.archive_id ||
+        Number(document.getElementById('summaryRepairStartRound').value) !== pending.start_round ||
+        Number(document.getElementById('summaryRepairPreserve').value) !== pending.preserved_parts) {
+        result.textContent = '预览后恢复参数已改变。请重新预览后再确认。';
+        summaryRepairPreviewState = null;
+        document.getElementById('summaryRepairConfirmArea').style.display = 'none';
+        return;
+    }
+    const confirmation = document.getElementById('summaryRepairConfirmText').value.trim();
+    if (confirmation !== '确认恢复摘要') { result.textContent = '确认文字不匹配，未执行。'; return; }
+    if (!confirm('确定按预览开始恢复？后台会生成四段摘要，完成前不要重新部署服务器。')) return;
+    const btn = document.getElementById('summaryRepairExecuteBtn');
+    btn.disabled = true;
+    try {
+        const {payload, preview} = summaryRepairPreviewState;
+        const job = await summaryRepairRequest('start', {
+            ...payload, preview_token: preview.preview_token, confirmation,
+        });
+        result.textContent = '恢复任务已提交。任务编号：' + job.job_id +
+            '\n正在等待摘要模型生成；页面会自动检查状态，请勿反复点击。';
+        // Each status request is short; no Safari/Cloudflare long-running POST.
+        let status = job;
+        for (let i = 0; i < 180; i++) {
+            if (status.status === 'succeeded' || status.status === 'failed') break;
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            const response = await fetch('/api/summary-repair/job/' + encodeURIComponent(job.job_id),
+                {cache: 'no-store'});
+            if (!response.ok) {
+                throw new Error('任务状态暂时不可读取（HTTP ' + response.status +
+                    '）。请先刷新摘要状态核对是否已恢复，不要重复执行。');
+            }
+            status = await response.json();
+            result.textContent = '恢复任务：' + status.status +
+                '\n阶段：' + status.stage +
+                '\n任务编号：' + job.job_id +
+                '\n第 ' + (i + 1) + ' 次状态检查';
+        }
+        if (status.status === 'failed') {
+            throw new Error('恢复任务失败：' + (status.error || '未提供错误信息') +
+                '。如需诊断请查看 Coolify 日志中的 [summary-repair-job]。');
+        }
+        if (status.status !== 'succeeded') {
+            throw new Error('任务仍在执行，页面等待已结束。请先刷新摘要状态，避免重复提交。');
+        }
+        result.textContent = '恢复完成：' + status.summary_part_count + ' 段 / 游标 ' +
+            status.a_start_round + ' / 重算 ' + status.generated_blocks +
+            ' 块。恢复前快照 ID：' + status.snapshot_id;
+        document.getElementById('summaryRepairSnapshotId').value = status.snapshot_id;
+        summaryRepairPreviewState = null;
+        document.getElementById('summaryRepairConfirmArea').style.display = 'none';
+        await loadThreads();
+        await loadHistoricalSummaries();
+    } catch (err) {
+        result.textContent = '恢复状态未确认：' + err.message +
+            '\n请先刷新当前摘要与游标，核对是否已恢复；不要盲目重试。';
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function rollbackSummaryRepair() {
+    const result = document.getElementById('summaryRepairResult');
+    const snapshotId = Number(document.getElementById('summaryRepairSnapshotId').value);
+    const confirmation = document.getElementById('summaryRepairRollbackConfirm').value.trim();
+    if (!Number.isInteger(snapshotId) || snapshotId < 1 ||
+        confirmation !== '确认回滚摘要') {
+        result.textContent = '快照 ID 或回滚确认文字无效，未执行。';
+        return;
+    }
+    if (!confirm('确定用该快照覆盖当前摘要和游标？当前状态也会保存为新快照。')) return;
+    try {
+        const response = await fetch('/api/partition/status');
+        if (!response.ok) throw new Error('无法取得当前对话线');
+        const status = await response.json();
+        const data = await summaryRepairRequest('rollback', {
+            session_id: status.active_session_id, snapshot_id: snapshotId, confirmation
+        });
+        result.textContent = '回滚完成：' + data.summary_parts.length + ' 段 / 游标 ' +
+            data.a_start_round + '。回滚前状态也已备份到快照 #' + data.saved_current_as_snapshot_id;
+        summaryRepairPreviewState = null;
+        document.getElementById('summaryRepairConfirmArea').style.display = 'none';
+        await loadThreads();
+    } catch (err) {
+        result.textContent = '回滚失败：' + err.message;
+    }
+}
+
+
+async function uploadDashboardIcon() {
+    const input = document.getElementById('dashboardIconFile');
+    const status = document.getElementById('dashboardIconUploadStatus');
+    const file = input && input.files && input.files[0];
+    if (!file) { status.textContent = '先选择原版猫咪的 PNG 图片。'; return; }
+    if (file.type !== 'image/png' || file.size > 400000) {
+        status.textContent = '请选择小于 400KB 的正方形 PNG。';
+        return;
+    }
+    try {
+        const response = await fetch('/api/dashboard/icon', {
+            method: 'POST', headers: {'Content-Type':'image/png'}, body:file,
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || '图标保存失败');
+        const image = document.getElementById('dashboardIconPreview');
+        image.src = '/apple-touch-icon.png?v=' + Date.now();
+        status.textContent = '原版图标已保存（' + data.width + '×' + data.height +
+            '）。若主屏幕仍是旧猫图，请删除旧快捷方式后重新从 Safari 添加。';
+    } catch(err) {
+        status.textContent = '上传失败：' + err.message;
+    }
 }
