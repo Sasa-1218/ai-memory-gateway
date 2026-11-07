@@ -2799,6 +2799,10 @@ function formatConvTime(isoStr) {
 let _threadData = { threads: [], active_session_id: '' };
 let _summaryEditSid = '';
 let _summaryOriginalText = '';
+let _summarySectionState = null;
+let _summarySelectedSection = null;
+let _summarySelectedKey = '';
+let _summarySectionSaving = false;
 
 async function loadThreads() {
     try {
@@ -3004,6 +3008,7 @@ async function openSummaryModal(sessionId) {
         _summaryOriginalText = summary;
         updateSummaryCharCount();
         document.getElementById('summaryModal').style.display = 'flex';
+        await refreshSummarySections();
     } catch(e) {
         alert('获取摘要失败: ' + e.message);
     }
@@ -3013,6 +3018,147 @@ function closeSummaryModal() {
     document.getElementById('summaryModal').style.display = 'none';
     _summaryEditSid = '';
     _summaryOriginalText = '';
+    _summarySectionState = null;
+    _summarySelectedSection = null;
+    _summarySelectedKey = '';
+}
+
+
+function summarySectionKey(section) {
+    return section.part_index + ':' + section.section_index;
+}
+
+function summarySectionIsDirty() {
+    return _summarySelectedSection &&
+        document.getElementById('summarySectionEditor').value !== _summarySelectedSection.text;
+}
+
+async function refreshSummarySections() {
+    if (!_summaryEditSid) return;
+    if (_summarySectionState && summarySectionIsDirty() &&
+        !confirm('当前小节有尚未保存的修改。确定放弃这些修改并重新加载吗？')) return;
+    const msg = document.getElementById('summarySectionMessage');
+    const btn = document.getElementById('summarySectionSaveBtn');
+    msg.textContent = '正在读取日期小节…';
+    btn.disabled = true;
+    try {
+        const resp = await fetch(
+            '/api/partition/summary-sections?session_id=' + encodeURIComponent(_summaryEditSid),
+            {cache:'no-store'});
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'HTTP ' + resp.status);
+        _summarySectionState = data;
+        const sel = document.getElementById('summarySectionSelect');
+        const priorKey = _summarySelectedKey;
+        sel.replaceChildren();
+        for (const section of data.sections) {
+            const opt = document.createElement('option');
+            opt.value = summarySectionKey(section);
+            opt.textContent = section.heading + '（' + section.chars + '字，摘要段' +
+                (section.part_index + 1) + '）';
+            sel.append(opt);
+        }
+        if (!data.sections.length) {
+            _summarySelectedSection = null;
+            _summarySelectedKey = '';
+            document.getElementById('summarySectionEditor').value = '';
+            msg.textContent = '当前对话线没有可编辑的摘要小节。';
+            return;
+        }
+        const match = data.sections.find(section => summarySectionKey(section) === priorKey);
+        sel.value = match ? priorKey : summarySectionKey(data.sections[0]);
+        _summarySelectedKey = '';
+        selectSummarySection(true);
+        msg.textContent = '已读取 ' + data.sections.length + ' 个小节 / ' +
+            data.part_count + ' 个摘要段。保存时将自动创建可回滚快照。';
+    } catch (err) {
+        _summarySectionState = null;
+        _summarySelectedSection = null;
+        document.getElementById('summarySectionEditor').value = '';
+        msg.textContent = '加载失败：' + err.message;
+    } finally {
+        btn.disabled = !_summarySelectedSection;
+    }
+}
+
+function selectSummarySection(force = false) {
+    if (!_summarySectionState) return;
+    const sel = document.getElementById('summarySectionSelect');
+    const nextKey = sel.value;
+    if (!force && _summarySelectedKey !== nextKey && summarySectionIsDirty()) {
+        if (!confirm('上一小节有未保存的修改。确定切换并放弃修改吗？')) {
+            sel.value = _summarySelectedKey;
+            return;
+        }
+    }
+    const next = _summarySectionState.sections.find(section => summarySectionKey(section) === nextKey);
+    if (!next) return;
+    _summarySelectedSection = next;
+    _summarySelectedKey = nextKey;
+    document.getElementById('summarySectionEditor').value = next.text;
+    document.getElementById('summarySectionMessage').textContent = '';
+    updateSummarySectionPreview();
+}
+
+function updateSummarySectionPreview() {
+    const current = _summarySelectedSection;
+    const next = document.getElementById('summarySectionEditor').value;
+    document.getElementById('summarySectionBefore').textContent = current ? current.text : '';
+    document.getElementById('summarySectionAfter').textContent = next;
+    const oldLen = current ? current.text.length : 0;
+    const delta = next.length - oldLen;
+    document.getElementById('summarySectionStats').textContent =
+        '原文 ' + oldLen + ' 字 → 修改后 ' + next.length + ' 字（' +
+        (delta >= 0 ? '+' : '') + delta + '）' +
+        (current && next === current.text ? ' · 尚无修改' : ' · 有未保存修改');
+    document.getElementById('summarySectionSaveBtn').disabled =
+        !_summarySelectedSection || !_summarySectionState || !next.trim() ||
+        (current && next === current.text) || _summarySectionSaving;
+}
+
+async function saveSummarySection() {
+    if (!_summarySectionState || !_summarySelectedSection || _summarySectionSaving) return;
+    const original = _summarySelectedSection;
+    const next = document.getElementById('summarySectionEditor').value;
+    if (!next.trim() || next === original.text) return;
+    if (!confirm('确认只替换「' + original.heading +
+        '」这一小节？服务器会先完整备份当前摘要，并检查有没有其他修改。')) return;
+    const message = document.getElementById('summarySectionMessage');
+    const btn = document.getElementById('summarySectionSaveBtn');
+    _summarySectionSaving = true;
+    btn.disabled = true;
+    message.textContent = '正在保存单节并生成恢复前快照…';
+    try {
+        const response = await fetch('/api/partition/summary-sections/replace', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({
+                session_id: _summaryEditSid,
+                part_index: original.part_index,
+                section_index: original.section_index,
+                state_token: _summarySectionState.state_token,
+                original_text: original.text,
+                replacement: next,
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'HTTP ' + response.status);
+        // Reload from the source of truth; do not assume a cached local edit.
+        _summarySelectedKey = summarySectionKey(original);
+        _summarySectionState = null;
+        await refreshSummarySections();
+        message.textContent = '保存成功。只替换了选中小节；摘要仍为 ' +
+            data.part_count + ' 段，游标 ' + data.a_start_round +
+            '，总字数 ' + data.summary_length + '。修改前快照 #' +
+            data.snapshot_id + '（可在一次性摘要恢复区使用回滚功能）。';
+        await loadThreads();
+    } catch (err) {
+        message.textContent = '未确认保存：' + err.message +
+            '。当前草稿仍在编辑框中；不要重复提交，请先刷新核对。';
+    } finally {
+        _summarySectionSaving = false;
+        updateSummarySectionPreview();
+    }
 }
 
 function updateSummaryCharCount() {
