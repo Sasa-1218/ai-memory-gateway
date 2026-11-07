@@ -99,6 +99,140 @@ async def read(session_id):
     }
 
 
+def _range_edit(parts, start_part, start_section, end_part, end_section, original_text, replacement):
+    """Pure range edit. Replaces inclusive dated sections, across DB parts if needed."""
+    sections = split_sections(parts)
+    first = next((x for x in sections if
+                  (x["part_index"], x["section_index"]) == (start_part, start_section)), None)
+    last = next((x for x in sections if
+                 (x["part_index"], x["section_index"]) == (end_part, end_section)), None)
+    if first is None or last is None or sections.index(first) > sections.index(last):
+        raise HTTPException(400, "invalid_date_range")
+    if first["heading"] == "整段（无日期标题）" or last["heading"] == "整段（无日期标题）":
+        raise HTTPException(400, "date_range_requires_dated_sections")
+    if not isinstance(replacement, str) or not replacement.strip() or len(replacement) > 150000:
+        raise HTTPException(400, "invalid_replacement_length")
+    markers = list(DATE_HEADING.finditer(replacement))
+    if not markers or markers[0].start() != 0:
+        raise HTTPException(400, "replacement_must_start_with_date_heading")
+    if any(m.start() > 0 and replacement[m.start() - 1] != "\n"
+           for m in INLINE_DATE.finditer(replacement)):
+        raise HTTPException(400, "new_draft_contains_joined_date_heading")
+
+    # Every replacement date must be inside the original selected inclusive span.
+    # Do not infer dates from prose; only date-heading starts determine boundaries.
+    def parse_date(heading):
+        m = re.match(r"^【(20\d{2})[-年](\d{1,2})[-月](\d{1,2})", heading)
+        if not m:
+            raise HTTPException(400, "range_requires_full_ymd_headings")
+        from datetime import date
+        try:
+            return date(*map(int, m.groups()))
+        except ValueError:
+            raise HTTPException(400, "invalid_date_in_heading")
+    from_date, to_date = parse_date(first["heading"]), parse_date(last["heading"])
+    dates = [parse_date(m.group(0)) for m in markers]
+    if (from_date > to_date or dates[0] != from_date or
+            any(d < from_date or d > to_date for d in dates) or
+            any(a > b for a, b in zip(dates, dates[1:]))):
+        raise HTTPException(400, "replacement_dates_must_stay_in_selected_range")
+
+    pi, pj = first["part_index"], last["part_index"]
+    if pi == pj:
+        actual_original = parts[pi][first["start"]:last["end"]]
+        next_part = splice_section(parts[pi], first["start"], last["end"], replacement)
+        updated = list(parts)
+        updated[pi] = next_part
+    else:
+        # Reject unexpected non-section prefixes inside the span. They must
+        # never be silently removed or moved without being shown to the user.
+        for part_index in range(pi + 1, pj + 1):
+            first_in_part = next((x for x in sections if x["part_index"] == part_index), None)
+            if first_in_part is None or first_in_part["start"] != 0:
+                raise HTTPException(409, "unrecognized_part_prefix_in_range")
+        actual_original = (
+            parts[pi][first["start"]:] +
+            "".join(parts[pi + 1:pj]) +
+            parts[pj][:last["end"]]
+        )
+        tail = parts[pj][last["end"]:]
+        candidate = parts[pi][:first["start"]] + replacement
+        if tail and DATE_HEADING.match(tail) and not candidate.endswith("\n"):
+            candidate += "\n\n"
+        updated = list(parts[:pi]) + [candidate + tail] + list(parts[pj + 1:])
+    if actual_original != original_text:
+        raise HTTPException(409, "selected_range_changed_reload_preview")
+    if actual_original == replacement:
+        raise HTTPException(400, "no_changes_to_save")
+
+    # Verify the outside of the requested range is byte-identical and all
+    # replacement headings are still recognized as standalone date headings.
+    old_prefix = parts[pi][:first["start"]]
+    old_suffix = parts[pj][last["end"]:]
+    if not updated[pi].startswith(old_prefix) or (
+        old_suffix and not updated[pi].endswith(old_suffix)
+    ):
+        raise HTTPException(409, "outside_range_modified")
+    new_dated = DATE_HEADING.findall(updated[pi])
+    if len(new_dated) != len(DATE_HEADING.findall(old_prefix)) + len(markers) + len(DATE_HEADING.findall(old_suffix)):
+        raise HTTPException(409, "date_boundary_integrity_check_failed")
+    if updated[:pi] != parts[:pi] or updated[pi + 1:] != parts[pj + 1:]:
+        raise HTTPException(409, "unselected_parts_modified")
+    return updated, {"old_chars": len(actual_original), "new_chars": len(replacement),
+                     "selected_sections": sections.index(last) - sections.index(first) + 1,
+                     "first_heading": first["heading"], "last_heading": last["heading"]}
+
+
+async def replace_range(session_id, start_part, start_section, end_part, end_section,
+                        expected_token, original_text, replacement):
+    if not isinstance(expected_token, str) or not isinstance(original_text, str):
+        raise HTTPException(400, "invalid_original_or_token")
+    for value in (start_part, start_section, end_part, end_section):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise HTTPException(400, "invalid_range_index")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            current = await conn.fetchrow(
+                "SELECT summary, a_start_round FROM session_cache_state "
+                "WHERE session_id=$1 FOR UPDATE", session_id)
+            if not current:
+                raise HTTPException(404, "session_summary_not_found")
+            try:
+                parts = json.loads(current["summary"] or "[]")
+            except (ValueError, TypeError):
+                parts = [current["summary"] or ""]
+            if not isinstance(parts, list) or any(not isinstance(p, str) for p in parts):
+                raise HTTPException(409, "invalid_current_summary_structure")
+            cursor = int(current["a_start_round"] or 0)
+            if _digest(parts, cursor) != expected_token:
+                raise HTTPException(409, "summary_changed_since_open_reload_preview")
+            updated_parts, audit = _range_edit(
+                parts, start_part, start_section, end_part, end_section, original_text, replacement)
+            snapshot = json.dumps({
+                "format": SNAPSHOT_FORMAT, "summary_parts": parts,
+                "a_start_round": cursor, "saved_at": datetime.now(timezone.utc).isoformat(),
+                "reason": "manual_date_range_replace",
+                "first_heading": audit["first_heading"],
+                "last_heading": audit["last_heading"],
+            }, ensure_ascii=False)
+            snap = await conn.fetchrow(
+                "INSERT INTO historical_summaries(session_id, period_label, content, source) "
+                "VALUES($1,$2,$3,'repair_snapshot') RETURNING id",
+                session_id, "日期范围替换前自动快照", snapshot)
+            await conn.execute(
+                "UPDATE session_cache_state SET summary=$2, a_start_round=$3, updated_at=NOW() "
+                "WHERE session_id=$1",
+                session_id, json.dumps(updated_parts, ensure_ascii=False), cursor)
+    return {
+        "status": "ok", "snapshot_id": snap["id"],
+        "a_start_round": cursor, "part_count": len(updated_parts),
+        "previous_summary_length": sum(map(len, parts)),
+        "summary_length": sum(map(len, updated_parts)),
+        "saved_state_token": _digest(updated_parts, cursor), **audit,
+    }
+
+
 async def replace(session_id, part_index, section_index, expected_token, original_text, replacement, merge_next=False, next_original_text=None):
     if not isinstance(replacement, str) or not replacement.strip():
         raise HTTPException(400, "replacement_cannot_be_empty")
