@@ -3099,7 +3099,7 @@ function selectSummarySection(force = false) {
     _summarySelectedKey = nextKey;
     const nextIndex = _summarySectionState.sections.findIndex(x => summarySectionKey(x) === nextKey);
     const adjacent = _summarySectionState.sections[nextIndex + 1];
-    const dateOf = x => x && (x.heading.match(/^【(20\\d{2}[-年]\\d{1,2}(?:[-月]\\d{1,2}(?:日)?)?)/) || [])[1];
+    const dateOf = x => x && (x.heading.match(/^【(20\d{2}[-年]\d{1,2}(?:[-月]\d{1,2}(?:日)?)?)/) || [])[1];
     _summaryMergeCandidate = adjacent && adjacent.part_index === next.part_index &&
         adjacent.section_index === next.section_index + 1 &&
         dateOf(next) && dateOf(next) === dateOf(adjacent) ? adjacent : null;
