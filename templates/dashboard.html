@@ -861,6 +861,29 @@
                                 <button id="summarySectionSaveBtn" class="btn btn-primary" onclick="saveSummarySection()">备份并替换这一节</button>
                             </div>
                         </div>
+                        <div style="margin-top:14px;padding:12px;border:1px solid var(--border-color);border-radius:8px;">
+                            <h4 style="margin:0 0 6px;">按日期范围批量替换</h4>
+                            <p class="section-desc" style="margin:0 0 12px;">选择开始和结束日期小节（包含两端），可跨数据库摘要段。粘贴完整替换稿，范围外文字保持不变；保存前自动完整备份。支持合并同一天多个标题。</p>
+                            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin-bottom:12px;">
+                                <div><label class="form-label" for="summaryRangeStart">从这一节开始</label><select class="select-input" id="summaryRangeStart" style="width:100%;" onchange="updateSummaryRangeSelection()"></select></div>
+                                <div><label class="form-label" for="summaryRangeEnd">到这一节结束（包含）</label><select class="select-input" id="summaryRangeEnd" style="width:100%;" onchange="updateSummaryRangeSelection()"></select></div>
+                            </div>
+                            <div id="summaryRangeSelectionInfo" style="font-size:12px;color:var(--text-muted);margin-bottom:8px;"></div>
+                            <label class="form-label" for="summaryRangeEditor">替换范围的完整新稿</label>
+                            <textarea id="summaryRangeEditor" class="textarea" rows="13" style="font-size:14px;line-height:1.6;" oninput="updateSummaryRangePreview()"></textarea>
+                            <div id="summaryRangeStats" style="font-size:13px;color:var(--text-muted);margin:10px 0;"></div>
+                            <details style="margin-bottom:10px;">
+                                <summary style="cursor:pointer;">查看将替换的完整旧文与新稿</summary>
+                                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin-top:10px;">
+                                    <div><strong style="font-size:13px;">范围内旧文</strong><pre id="summaryRangeBefore" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;font-size:12px;"></pre></div>
+                                    <div><strong style="font-size:13px;">完整新稿</strong><pre id="summaryRangeAfter" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;font-size:12px;"></pre></div>
+                                </div>
+                            </details>
+                            <div id="summaryRangeMessage" style="white-space:pre-wrap;font-size:13px;margin-bottom:10px;"></div>
+                            <div style="display:flex;justify-content:flex-end;">
+                                <button class="btn btn-primary" id="summaryRangeSaveBtn" onclick="saveSummaryDateRange()" disabled>自动备份并替换所选日期范围</button>
+                            </div>
+                        </div>
                         <details style="margin-top:14px;">
                             <summary style="cursor:pointer;font-size:13px;color:var(--text-muted);">旧版整份摘要编辑（会合并原有分段，请谨慎使用）</summary>
                             <p class="section-desc" style="margin-top:10px;">下面会把所有摘要段拼成一段保存，不会自动备份。推荐用上方的单节替换。</p>
@@ -1154,6 +1177,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.21-date-boundary-guard"></script>
+    <script src="/static/js/dashboard.js?v=3.22-date-range-editor"></script>
 </body>
 </html>
