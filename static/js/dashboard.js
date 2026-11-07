@@ -3006,6 +3006,7 @@ async function openSummaryModal(sessionId) {
         
         document.getElementById('summary-editor').value = summary;
         _summaryOriginalText = summary;
+        document.getElementById('summaryWholeSaveBtn').disabled = false;
         updateSummaryCharCount();
         document.getElementById('summaryModal').style.display = 'flex';
         await refreshSummarySections();
@@ -3151,6 +3152,9 @@ async function saveSummarySection() {
             data.part_count + ' 段，游标 ' + data.a_start_round +
             '，总字数 ' + data.summary_length + '。修改前快照 #' +
             data.snapshot_id + '（可在一次性摘要恢复区使用回滚功能）。';
+        // The legacy full-summary textarea was opened before this atomic edit.
+        // Disable its write button until the modal is reopened with fresh data.
+        document.getElementById('summaryWholeSaveBtn').disabled = true;
         await loadThreads();
     } catch (err) {
         message.textContent = '未确认保存：' + err.message +
