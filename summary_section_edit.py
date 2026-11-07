@@ -225,7 +225,8 @@ async def replace_range(session_id, start_part, start_section, end_part, end_sec
         "status": "ok", "snapshot_id": snap["id"],
         "a_start_round": cursor, "part_count": len(updated_parts),
         "previous_summary_length": sum(map(len, parts)),
-        "summary_length": sum(map(len, updated_parts)), **audit,
+        "summary_length": sum(map(len, updated_parts)),
+        "saved_state_token": _digest(updated_parts, cursor), **audit,
     }
 
 
