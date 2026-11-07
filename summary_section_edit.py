@@ -115,6 +115,9 @@ def _range_edit(parts, start_part, start_section, end_part, end_section, origina
     markers = list(DATE_HEADING.finditer(replacement))
     if not markers or markers[0].start() != 0:
         raise HTTPException(400, "replacement_must_start_with_date_heading")
+    if any(m.start() > 0 and replacement[m.start() - 1] != "\n"
+           for m in INLINE_DATE.finditer(replacement)):
+        raise HTTPException(400, "new_draft_contains_joined_date_heading")
 
     # Every replacement date must be inside the original selected inclusive span.
     # Do not infer dates from prose; only date-heading starts determine boundaries.
