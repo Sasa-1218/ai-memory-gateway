@@ -6951,7 +6951,8 @@ async def api_replace_summary_section(request: Request):
     return await replace(
         sid, body.get("part_index"), body.get("section_index"),
         body.get("state_token"), body.get("original_text"),
-        body.get("replacement"),
+        body.get("replacement"), body.get("merge_next", False),
+        body.get("next_original_text"),
     )
 
 
