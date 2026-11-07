@@ -832,18 +832,49 @@
                 </div>
 
                 <div id="summaryModal" class="modal" style="display:none;">
-                    <div class="modal-content" style="max-width: 700px;">
+                    <div class="modal-content" style="max-width:760px; max-height:90vh; overflow-y:auto;">
                         <h3>编辑摘要 — <span id="summary-modal-sid"></span></h3>
-                        <div class="form-group">
-                            <textarea id="summary-editor" class="textarea" rows="16" style="font-size: 14px; line-height: 1.6;"></textarea>
-                        </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <span id="summary-char-count" style="color: var(--text-muted); font-size: 13px;"></span>
-                            <div style="display: flex; gap: 8px;">
-                                <button class="btn btn-danger" onclick="clearSummary()">清空摘要</button>
-                                <button class="btn btn-secondary" onclick="closeSummaryModal()">取消</button>
-                                <button class="btn btn-primary" onclick="saveSummary()">覆盖保存</button>
+                        <div style="padding:12px; border:1px solid var(--border-color); border-radius:8px;">
+                            <h4 style="margin:0 0 6px;">按日期小节安全替换（推荐）</h4>
+                            <p class="section-desc" style="margin:0 0 12px;">选一节修改，其他文字与摘要段结构保持不变；保存时自动创建完整快照，保留摘要游标。原日期标题必须保留。</p>
+                            <div class="form-group">
+                                <label class="form-label" for="summarySectionSelect">选择要编辑的日期小节</label>
+                                <select class="select-input" id="summarySectionSelect" style="width:100%;" onchange="selectSummarySection()"></select>
                             </div>
+                            <div class="form-group">
+                                <label class="form-label" for="summarySectionEditor">修改这一节（可以直接粘贴微调后的版本）</label>
+                                <textarea id="summarySectionEditor" class="textarea" rows="12" style="font-size:14px;line-height:1.6;" oninput="updateSummarySectionPreview()"></textarea>
+                            </div>
+                            <div id="summarySectionStats" style="font-size:13px;color:var(--text-muted);margin-bottom:10px;"></div>
+                            <details id="summarySectionDiff" style="margin-bottom:12px;">
+                                <summary style="cursor:pointer;">保存前对比原文与修改后内容</summary>
+                                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin-top:10px;">
+                                    <div><strong style="font-size:13px;">原文</strong><pre id="summarySectionBefore" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;font-size:12px;"></pre></div>
+                                    <div><strong style="font-size:13px;">修改后</strong><pre id="summarySectionAfter" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;font-size:12px;"></pre></div>
+                                </div>
+                            </details>
+                            <div id="summarySectionMessage" style="white-space:pre-wrap;font-size:13px;margin-bottom:10px;"></div>
+                            <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;">
+                                <button class="btn btn-secondary" onclick="refreshSummarySections()">重新加载小节</button>
+                                <button id="summarySectionSaveBtn" class="btn btn-primary" onclick="saveSummarySection()">备份并替换这一节</button>
+                            </div>
+                        </div>
+                        <details style="margin-top:14px;">
+                            <summary style="cursor:pointer;font-size:13px;color:var(--text-muted);">旧版整份摘要编辑（会合并原有分段，请谨慎使用）</summary>
+                            <p class="section-desc" style="margin-top:10px;">下面会把所有摘要段拼成一段保存，不会自动备份。推荐用上方的单节替换。</p>
+                            <div class="form-group">
+                                <textarea id="summary-editor" class="textarea" rows="12" style="font-size:14px;line-height:1.6;"></textarea>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+                                <span id="summary-char-count" style="color:var(--text-muted);font-size:13px;"></span>
+                                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                    <button class="btn btn-danger" onclick="clearSummary()">清空摘要</button>
+                                    <button class="btn btn-primary" onclick="saveSummary()">整份覆盖保存</button>
+                                </div>
+                            </div>
+                        </details>
+                        <div style="display:flex;justify-content:flex-end;margin-top:14px;">
+                            <button class="btn btn-secondary" onclick="closeSummaryModal()">关闭</button>
                         </div>
                     </div>
                 </div>
