@@ -158,6 +158,15 @@ class DateSectionEditTests(unittest.TestCase):
         self.assertTrue(result[0].endswith("【2026-11-01】下一天\\n不修改"))
         self.assertIn("合并后的新稿\\n\\n【2026-11-01】", result[0])
 
+    def test_range_heading_includes_end_date(self):
+        parts = ["【2026-11-06 至 2026-11-07】电子花束\\n旧事"]
+        result, _ = _range_edit(
+            parts, 0, 0, 0, 0, parts[0],
+            "【2026-11-06】电子花束\\n新内容\\n"
+            "【2026-11-07】蛋糕\\n新内容")
+        self.assertEqual(len(split_sections(result)), 2)
+        self.assertIn("【2026-11-07】蛋糕", result[0])
+
     def test_heading_match_is_anchored_to_line(self):
         self.assertFalse(DATE_HEADING.search("今天提到【2026-11-01】的故事"))
         self.assertTrue(DATE_HEADING.search("\n【2026-11-01】南瓜灯"))
