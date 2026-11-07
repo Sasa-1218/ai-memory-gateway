@@ -15,8 +15,8 @@ from database import get_pool, get_session_cache_state
 # Match dated diary headings only at start of line. Normal prose and other
 # bracketed titles within paragraphs must not become replacement boundaries.
 DATE_HEADING = re.compile(
-    r"(?m)^【(?:20\\d{2}[-年]\\d{1,2}(?:[-月]\\d{1,2}(?:日)?)?)"
-    r"[^】\\n]{0,70}】[^\\n]*"
+    r"(?m)^【(?:20\d{2}[-年]\d{1,2}(?:[-月]\d{1,2}(?:日)?)?)"
+    r"[^】\n]{0,70}】[^\n]*"
 )
 SNAPSHOT_FORMAT = "summary_repair_snapshot_v1"
 
