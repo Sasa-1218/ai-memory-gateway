@@ -3071,8 +3071,11 @@ async function refreshSummarySections() {
         sel.value = match ? priorKey : summarySectionKey(data.sections[0]);
         _summarySelectedKey = '';
         selectSummarySection(true);
+        const suspect = (_summarySelectedSection && _summarySelectedSection.suspected_joined_dates) || [];
         msg.textContent = '已读取 ' + data.sections.length + ' 个小节 / ' +
-            data.part_count + ' 个摘要段。保存时将自动创建可回滚快照。';
+            data.part_count + ' 个摘要段。保存时将自动创建可回滚快照。' +
+            (suspect.length ? '\n警告：当前节发现疑似被拼接的日期标题：' +
+                suspect.join('、') + '。已禁止保存本节，请核对快照。' : '');
     } catch (err) {
         _summarySectionState = null;
         _summarySelectedSection = null;
