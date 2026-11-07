@@ -3355,17 +3355,15 @@ async function saveSummaryDateRange() {
             {cache:'no-store'});
         if (!readResponse.ok) throw new Error('写入返回成功，但重新读取失败；请勿重试，快照 #' + data.snapshot_id);
         const actual = await readResponse.json();
-        const remaining = actual.sections.find(x =>
-            x.part_index === state.first.part_index &&
-            x.section_index === state.first.section_index);
-        if (!remaining || !remaining.text.startsWith(replacement)) {
-            msg.textContent = '服务器确认写入，但回读内容未通过核对。请勿再次保存！快照 #' +
+        if (actual.state_token !== data.saved_state_token ||
+            actual.a_start_round !== data.a_start_round) {
+            msg.textContent = '服务器确认写入，但重新读取的整份摘要校验值不匹配。请勿再次保存！快照 #' +
                 data.snapshot_id + '，请先检查现有摘要。';
             return;
         }
         const delta = data.summary_length - data.previous_summary_length;
         _summaryRangeOriginal = replacement;
-        msg.textContent = '范围替换成功，已重新读取并核对首节。旧文 ' +
+        msg.textContent = '范围替换成功，已重新读取并校验整份摘要。旧文 ' +
             data.old_chars + ' 字 → 新稿 ' + data.new_chars +
             ' 字；整份摘要总字数 ' + data.previous_summary_length +
             ' → ' + data.summary_length + '（' + (delta >= 0 ? '+' : '') + delta +
