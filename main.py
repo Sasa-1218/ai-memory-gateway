@@ -6956,6 +6956,22 @@ async def api_replace_summary_section(request: Request):
     )
 
 
+@app.post("/api/partition/summary-sections/replace-range")
+async def api_replace_summary_date_range(request: Request):
+    """Atomic multi-section replacement, preserving nonselected text and cursor."""
+    from summary_section_edit import replace_range
+    body = await request.json()
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id_required")
+    return await replace_range(
+        sid, body.get("start_part"), body.get("start_section"),
+        body.get("end_part"), body.get("end_section"),
+        body.get("state_token"), body.get("original_text"),
+        body.get("replacement"),
+    )
+
+
 @app.put("/api/partition/summary")
 async def api_update_summary(request: Request):
     try:
