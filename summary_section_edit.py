@@ -121,17 +121,24 @@ def _range_edit(parts, start_part, start_section, end_part, end_section, origina
 
     # Every replacement date must be inside the original selected inclusive span.
     # Do not infer dates from prose; only date-heading starts determine boundaries.
-    def parse_date(heading):
-        m = re.match(r"^【(20\d{2})[-年](\d{1,2})[-月](\d{1,2})", heading)
-        if not m:
-            raise HTTPException(400, "range_requires_full_ymd_headings")
+    def parse_bounds(heading):
         from datetime import date
+        full = list(re.finditer(r"(20\d{2})[-年](\d{1,2})[-月](\d{1,2})", heading))
+        if not full:
+            raise HTTPException(400, "range_requires_full_ymd_headings")
         try:
-            return date(*map(int, m.groups()))
+            first = date(*map(int, full[0].groups()))
+            last = date(*map(int, full[-1].groups()))
+            # Allow abbreviated "至 11-02" in dated ranges.
+            if len(full) == 1:
+                short = re.search(r"至\s*(\d{1,2})[-月](\d{1,2})", heading[full[0].end():])
+                if short:
+                    last = date(first.year, int(short.group(1)), int(short.group(2)))
+            return first, last
         except ValueError:
             raise HTTPException(400, "invalid_date_in_heading")
-    from_date, to_date = parse_date(first["heading"]), parse_date(last["heading"])
-    dates = [parse_date(m.group(0)) for m in markers]
+    from_date, to_date = parse_bounds(first["heading"])[0], parse_bounds(last["heading"])[1]
+    dates = [parse_bounds(m.group(0))[0] for m in markers]
     if (from_date > to_date or dates[0] != from_date or
             any(d < from_date or d > to_date for d in dates) or
             any(a > b for a, b in zip(dates, dates[1:]))):
