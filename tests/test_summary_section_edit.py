@@ -1,7 +1,7 @@
 """Regression tests for date-section parsing and targeted replacements."""
 import unittest
 
-from summary_section_edit import DATE_HEADING, _digest, _validate_selection, split_sections
+from summary_section_edit import DATE_HEADING, _digest, _validate_selection, split_sections, splice_section
 
 
 class DateSectionEditTests(unittest.TestCase):
@@ -46,6 +46,43 @@ class DateSectionEditTests(unittest.TestCase):
         self.assertNotEqual(_digest(parts, 2324), _digest(parts, 2332))
         self.assertNotEqual(_digest(parts, 2324),
                             _digest(["【2026-11-01】日记\n改后"], 2324))
+
+    def test_merge_without_final_newline_keeps_following_day_separate(self):
+        original = (
+            "【2026-10-31】樱花照\\n原文A\\n"
+            "【2026-10-31】汉服\\n原文B\\n"
+            "【2026-11-01】南瓜灯\\n下一天原文\\n"
+        )
+        parts = [original]
+        sections = split_sections(parts)
+        replacement = "【2026-10-31】樱花照与汉服\\n合并稿没有末尾换行"
+        after = splice_section(original, sections[0]["start"],
+                               sections[1]["end"], replacement)
+        parsed = split_sections([after])
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[0]["heading"], "【2026-10-31】樱花照与汉服")
+        self.assertEqual(parsed[1]["heading"], "【2026-11-01】南瓜灯")
+        self.assertTrue(parsed[1]["text"].endswith("下一天原文\\n"))
+        self.assertIn("合并稿没有末尾换行\\n\\n【2026-11-01】", after)
+
+    def test_two_consecutive_saves_do_not_consume_next_day(self):
+        original = (
+            "【2026-10-31】原始标题\\n正文A\\n"
+            "【2026-11-01】次日标题\\n正文B"
+        )
+        first_section = split_sections([original])[0]
+        after_first = splice_section(original, first_section["start"],
+                                     first_section["end"],
+                                     "【2026-10-31】新标题\\n第一次修改")
+        first_after = split_sections([after_first])
+        self.assertEqual(len(first_after), 2)
+        after_second = splice_section(after_first, first_after[0]["start"],
+                                      first_after[0]["end"],
+                                      "【2026-10-31】新标题\\n第二次修改")
+        second_after = split_sections([after_second])
+        self.assertEqual(len(second_after), 2)
+        self.assertEqual(second_after[1]["text"], "【2026-11-01】次日标题\\n正文B")
+        self.assertEqual(after_second.count("【2026-11-01】"), 1)
 
     def test_heading_match_is_anchored_to_line(self):
         self.assertFalse(DATE_HEADING.search("今天提到【2026-11-01】的故事"))
