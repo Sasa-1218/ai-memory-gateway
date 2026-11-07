@@ -2804,6 +2804,9 @@ let _summarySelectedSection = null;
 let _summarySelectedKey = '';
 let _summarySectionSaving = false;
 let _summaryMergeCandidate = null;
+let _summaryRangeOriginal = '';
+let _summaryRangeSaving = false;
+let _summaryRangeSnapshot = null;
 
 async function loadThreads() {
     try {
@@ -3023,11 +3026,18 @@ function closeSummaryModal() {
     _summarySectionState = null;
     _summarySelectedSection = null;
     _summarySelectedKey = '';
+    _summaryRangeOriginal = '';
+    _summaryRangeSnapshot = null;
 }
 
 
 function summarySectionKey(section) {
     return section.part_index + ':' + section.section_index;
+}
+
+function summaryRangeIsDirty() {
+    const editor = document.getElementById('summaryRangeEditor');
+    return !!editor && !!_summaryRangeSnapshot && editor.value !== _summaryRangeOriginal;
 }
 
 function summarySectionIsDirty() {
@@ -3037,8 +3047,8 @@ function summarySectionIsDirty() {
 
 async function refreshSummarySections() {
     if (!_summaryEditSid) return;
-    if (_summarySectionState && summarySectionIsDirty() &&
-        !confirm('当前小节有尚未保存的修改。确定放弃这些修改并重新加载吗？')) return;
+    if (_summarySectionState && (summarySectionIsDirty() || summaryRangeIsDirty()) &&
+        !confirm('当前编辑内容有尚未保存的修改。确定放弃这些修改并重新加载吗？')) return;
     const msg = document.getElementById('summarySectionMessage');
     const btn = document.getElementById('summarySectionSaveBtn');
     msg.textContent = '正在读取日期小节…';
@@ -3071,6 +3081,7 @@ async function refreshSummarySections() {
         sel.value = match ? priorKey : summarySectionKey(data.sections[0]);
         _summarySelectedKey = '';
         selectSummarySection(true);
+        populateSummaryRangeSelectors();
         const suspect = (_summarySelectedSection && _summarySelectedSection.suspected_joined_dates) || [];
         msg.textContent = '已读取 ' + data.sections.length + ' 个小节 / ' +
             data.part_count + ' 个摘要段。保存时将自动创建可回滚快照。' +
@@ -3209,6 +3220,172 @@ async function saveSummarySection() {
     } finally {
         _summarySectionSaving = false;
         updateSummarySectionPreview();
+    }
+}
+
+
+function populateSummaryRangeSelectors() {
+    const start = document.getElementById('summaryRangeStart');
+    const end = document.getElementById('summaryRangeEnd');
+    if (!start || !end || !_summarySectionState) return;
+    const sections = _summarySectionState.sections.filter(s => s.heading !== '整段（无日期标题）');
+    start.replaceChildren();
+    end.replaceChildren();
+    for (const section of sections) {
+        for (const sel of [start, end]) {
+            const opt = document.createElement('option');
+            opt.value = summarySectionKey(section);
+            opt.textContent = section.heading + '（摘要段' + (section.part_index + 1) + '）';
+            sel.append(opt);
+        }
+    }
+    // First use: select the first date; subsequent refreshes intentionally
+    // discard stale range selections because the underlying structure changed.
+    if (sections.length) {
+        start.value = summarySectionKey(sections[0]);
+        end.value = summarySectionKey(sections[0]);
+    }
+    _summaryRangeSnapshot = null;
+    _summaryRangeOriginal = '';
+    document.getElementById('summaryRangeEditor').value = '';
+    updateSummaryRangeSelection(true);
+}
+
+function updateSummaryRangeSelection(force = false) {
+    if (!_summarySectionState) return;
+    if (!force && summaryRangeIsDirty() &&
+        !confirm('切换日期范围会放弃未保存的整段修改，确定继续吗？')) {
+        // Restore previous selection; leave draft untouched.
+        if (_summaryRangeSnapshot) {
+            document.getElementById('summaryRangeStart').value = _summaryRangeSnapshot.startKey;
+            document.getElementById('summaryRangeEnd').value = _summaryRangeSnapshot.endKey;
+        }
+        return;
+    }
+    const startKey = document.getElementById('summaryRangeStart').value;
+    const endKey = document.getElementById('summaryRangeEnd').value;
+    const all = _summarySectionState.sections;
+    const i = all.findIndex(x => summarySectionKey(x) === startKey);
+    const j = all.findIndex(x => summarySectionKey(x) === endKey);
+    const msg = document.getElementById('summaryRangeMessage');
+    if (i < 0 || j < i) {
+        _summaryRangeSnapshot = null;
+        _summaryRangeOriginal = '';
+        document.getElementById('summaryRangeEditor').value = '';
+        document.getElementById('summaryRangeSelectionInfo').textContent = '结束日期不能早于开始日期。';
+        updateSummaryRangePreview();
+        return;
+    }
+    const chosen = all.slice(i, j + 1);
+    if (chosen.some(x => x.heading === '整段（无日期标题）')) {
+        _summaryRangeSnapshot = null;
+        document.getElementById('summaryRangeSelectionInfo').textContent =
+            '此范围包含没有日期标题的数据库摘要段，暂不能安全批量替换。';
+        updateSummaryRangePreview();
+        return;
+    }
+    const original = chosen.map(x => x.text).join('');
+    _summaryRangeSnapshot = {
+        startKey, endKey, first: chosen[0], last: chosen[chosen.length - 1],
+        count: chosen.length, token: _summarySectionState.state_token,
+        original,
+    };
+    _summaryRangeOriginal = original;
+    document.getElementById('summaryRangeEditor').value = original;
+    const suspicious = chosen.flatMap(x => x.suspected_joined_dates || []);
+    document.getElementById('summaryRangeSelectionInfo').textContent =
+        '选择了 ' + chosen.length + ' 个原日期小节，' +
+        (chosen[0].part_index === chosen[chosen.length - 1].part_index ?
+          '位于同一摘要段。' : '横跨多个摘要段，保存后会合并被覆盖的数据库段。') +
+        ' 从 ' + chosen[0].heading + ' 到 ' + chosen[chosen.length - 1].heading;
+    msg.textContent = suspicious.length
+        ? '注意：旧文含疑似粘连日期 ' + suspicious.join('、') +
+          '。请在新稿中修复这些标题，仔细比对后再保存。'
+        : '';
+    updateSummaryRangePreview();
+}
+
+function updateSummaryRangePreview() {
+    const state = _summaryRangeSnapshot;
+    const after = document.getElementById('summaryRangeEditor').value;
+    const before = state ? state.original : '';
+    document.getElementById('summaryRangeBefore').textContent = before;
+    document.getElementById('summaryRangeAfter').textContent = after;
+    const delta = after.length - before.length;
+    document.getElementById('summaryRangeStats').textContent = state
+        ? '所选旧文 ' + before.length + ' 字 → 新稿 ' + after.length +
+          ' 字（' + (delta >= 0 ? '+' : '') + delta +
+          '）；范围外文本保持原样。'
+        : '请先选择有效的起止小节。';
+    const firstHeading = state && (state.first.heading.match(/^【20\\d{2}[-年]\\d{1,2}[-月]\\d{1,2}/) || [])[0];
+    document.getElementById('summaryRangeSaveBtn').disabled =
+        !state || _summaryRangeSaving || !after.trim() || after === before ||
+        !firstHeading || !after.startsWith(firstHeading);
+}
+
+async function saveSummaryDateRange() {
+    const state = _summaryRangeSnapshot;
+    const editor = document.getElementById('summaryRangeEditor');
+    if (!state || _summaryRangeSaving) return;
+    const replacement = editor.value;
+    if (!replacement.trim() || replacement === state.original) return;
+    const rangeName = state.first.heading + ' 至 ' + state.last.heading;
+    if (!confirm('确认整体替换以下日期范围？\\n' + rangeName +
+        '\\n原范围内所有旧文字会被新稿取代，范围外保持不变。保存前自动备份整份摘要。')) return;
+    const btn = document.getElementById('summaryRangeSaveBtn');
+    const msg = document.getElementById('summaryRangeMessage');
+    _summaryRangeSaving = true;
+    btn.disabled = true;
+    msg.textContent = '正在校验日期范围并创建完整快照…';
+    try {
+        const response = await fetch('/api/partition/summary-sections/replace-range', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({
+                session_id: _summaryEditSid,
+                start_part: state.first.part_index, start_section: state.first.section_index,
+                end_part: state.last.part_index, end_section: state.last.section_index,
+                state_token: state.token, original_text: state.original, replacement,
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'HTTP ' + response.status);
+        // Do not reset the edited draft before an independent read confirms the save.
+        const readResponse = await fetch(
+            '/api/partition/summary-sections?session_id=' + encodeURIComponent(_summaryEditSid),
+            {cache:'no-store'});
+        if (!readResponse.ok) throw new Error('写入返回成功，但重新读取失败；请勿重试，快照 #' + data.snapshot_id);
+        const actual = await readResponse.json();
+        const remaining = actual.sections.find(x =>
+            x.part_index === state.first.part_index &&
+            x.section_index === state.first.section_index);
+        if (!remaining || !remaining.text.startsWith(replacement)) {
+            msg.textContent = '服务器确认写入，但回读内容未通过核对。请勿再次保存！快照 #' +
+                data.snapshot_id + '，请先检查现有摘要。';
+            return;
+        }
+        const delta = data.summary_length - data.previous_summary_length;
+        _summaryRangeOriginal = replacement;
+        msg.textContent = '范围替换成功，已重新读取并核对首节。旧文 ' +
+            data.old_chars + ' 字 → 新稿 ' + data.new_chars +
+            ' 字；整份摘要总字数 ' + data.previous_summary_length +
+            ' → ' + data.summary_length + '（' + (delta >= 0 ? '+' : '') + delta +
+            '）。游标 ' + data.a_start_round + '，自动快照 #' + data.snapshot_id + '。';
+        document.getElementById('summaryWholeSaveBtn').disabled = true;
+        // Reload source data only after success; keep the message visible.
+        _summarySectionState = null;
+        _summarySelectedKey = '';
+        await refreshSummarySections();
+        document.getElementById('summaryRangeMessage').textContent =
+            '范围替换成功，已自动备份至快照 #' + data.snapshot_id +
+            '。总字数 ' + data.previous_summary_length + ' → ' +
+            data.summary_length + '，游标 ' + data.a_start_round + '。';
+        await loadThreads();
+    } catch (err) {
+        msg.textContent = '尚未确认保存：' + err.message +
+            '。草稿仍在编辑框中；不要重复提交，请先核对摘要和快照。';
+    } finally {
+        _summaryRangeSaving = false;
+        updateSummaryRangePreview();
     }
 }
 
