@@ -27,6 +27,19 @@ def _digest(parts, cursor):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def splice_section(part, start, end, replacement):
+    """Replace a section without swallowing the following date heading.
+
+    A textarea commonly has no final newline. If the old section is followed
+    immediately by the next dated heading, add a separator so it remains a
+    stand-alone line and a distinct section on the next read.
+    """
+    prefix, suffix = part[:start], part[end:]
+    if suffix and DATE_HEADING.match(suffix) and not replacement.endswith("\n"):
+        replacement += "\n\n"
+    return prefix + replacement + suffix
+
+
 def split_sections(parts):
     result = []
     for part_no, part in enumerate(parts):
@@ -140,10 +153,24 @@ async def replace(session_id, part_index, section_index, expected_token, origina
                 if next_original_text != next_section["text"]:
                     raise HTTPException(409, "next_section_changed_refresh_editor")
                 end_offset = next_section["end"]
-            next_part = (
-                parts[part_index][:section["start"]] + replacement +
-                parts[part_index][end_offset:]
+            next_part = splice_section(
+                parts[part_index], section["start"], end_offset, replacement,
             )
+            # Validate the complete dated-section structure before writing.
+            trailing = parts[part_index][end_offset:]
+            if original_heading != "整段（无日期标题）":
+                expected_count = len(DATE_HEADING.findall(parts[part_index])) - (1 if merge_next else 0)
+                if len(DATE_HEADING.findall(next_part)) != expected_count:
+                    raise HTTPException(409, "date_boundary_integrity_check_failed")
+                expected_text = replacement + (
+                    "\n\n" if trailing and DATE_HEADING.match(trailing)
+                    and not replacement.endswith("\n") else ""
+                )
+                after_sections = split_sections([next_part])
+                actual = next((item for item in after_sections
+                               if item["section_index"] == section_index), None)
+                if actual is None or actual["text"] != expected_text:
+                    raise HTTPException(409, "saved_section_integrity_check_failed")
             updated_parts = list(parts)
             updated_parts[part_index] = next_part
             snapshot = json.dumps({
@@ -172,6 +199,7 @@ async def replace(session_id, part_index, section_index, expected_token, origina
         "part_count": len(updated_parts),
         "a_start_round": cursor,
         "summary_length": sum(map(len, updated_parts)),
+        "previous_summary_length": sum(map(len, parts)),
         "old_section_chars": len(original_text),
         "new_section_chars": len(replacement),
         "merged_next": merge_next,
