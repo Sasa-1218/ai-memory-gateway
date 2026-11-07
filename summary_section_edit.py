@@ -27,6 +27,19 @@ def _digest(parts, cursor):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def splice_section(part, start, end, replacement):
+    """Replace a section without swallowing the following date heading.
+
+    A textarea commonly has no final newline. If the old section is followed
+    immediately by the next dated heading, add a separator so it remains a
+    stand-alone line and a distinct section on the next read.
+    """
+    prefix, suffix = part[:start], part[end:]
+    if suffix and DATE_HEADING.match(suffix) and not replacement.endswith("\n"):
+        replacement += "\n\n"
+    return prefix + replacement + suffix
+
+
 def split_sections(parts):
     result = []
     for part_no, part in enumerate(parts):
@@ -140,10 +153,17 @@ async def replace(session_id, part_index, section_index, expected_token, origina
                 if next_original_text != next_section["text"]:
                     raise HTTPException(409, "next_section_changed_refresh_editor")
                 end_offset = next_section["end"]
-            next_part = (
-                parts[part_index][:section["start"]] + replacement +
-                parts[part_index][end_offset:]
+            next_part = splice_section(
+                parts[part_index], section["start"], end_offset, replacement,
             )
+            # Ensure the subsequent dated section remains independently
+            # discoverable after the splice. Prevent future silent swallowing.
+            trailing = parts[part_index][end_offset:]
+            if trailing and DATE_HEADING.match(trailing):
+                expected = sum(1 for _ in DATE_HEADING.finditer(parts[part_index]))
+                expected -= 1 if merge_next else 0
+                if sum(1 for _ in DATE_HEADING.finditer(next_part)) != expected:
+                    raise HTTPException(409, "date_boundary_integrity_check_failed")
             updated_parts = list(parts)
             updated_parts[part_index] = next_part
             snapshot = json.dumps({
