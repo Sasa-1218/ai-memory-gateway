@@ -349,6 +349,22 @@ async def init_tables():
             );
         """)
 
+        # 历史摘要归档：保存用户手动备份/自动归档的旧摘要，不默认注入聊天
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS historical_summaries (
+                id              BIGSERIAL PRIMARY KEY,
+                session_id      TEXT NOT NULL DEFAULT '',
+                period_label    TEXT NOT NULL DEFAULT '',
+                content         TEXT NOT NULL,
+                source          TEXT NOT NULL DEFAULT 'manual_backup',
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_historical_summaries_session_created
+            ON historical_summaries (session_id, created_at DESC);
+        """)
+
         # 摘要流水线健康状态：只保存脱敏状态，不保存摘要或聊天正文
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS summary_health_status (
@@ -1523,7 +1539,7 @@ async def compute_embedding(text: str) -> list:
         if EMBEDDING_DIM > 0:
             body["dimensions"] = EMBEDDING_DIM
         
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:
             resp = await client.post(
                 f"{EMBEDDING_BASE_URL}/embeddings",
                 headers={
@@ -2204,12 +2220,15 @@ async def get_all_memories_count():
 
 
 async def get_all_memories():
-    """导出所有记忆（用于备份）"""
+    """导出所有记忆（完整字段，用于备份、迁移和离线检查）"""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT content, importance, source_session, created_at FROM memories ORDER BY id"
-        )
+        rows = await conn.fetch("""
+            SELECT id, content, importance, source_session, created_at, last_accessed,
+                   layer, title, is_active, merged_from, event_date
+            FROM memories
+            ORDER BY id
+        """)
         return [dict(r) for r in rows]
 
 
@@ -2876,6 +2895,59 @@ async def save_session_cache_state(session_id: str, summary_parts: list, a_start
         """, session_id, summary_json, a_start_round)
 
 
+async def save_historical_summary(
+    content: str,
+    period_label: str = "",
+    session_id: str = "",
+    source: str = "manual_backup",
+) -> int:
+    """保存历史摘要归档。历史摘要默认不参与聊天注入。"""
+    clean_content = str(content or "").strip()
+    if not clean_content:
+        raise ValueError("historical_summary_content_required")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO historical_summaries (session_id, period_label, content, source)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id
+        """, str(session_id or ""), str(period_label or "")[:200], clean_content, str(source or "manual_backup")[:50])
+        return int(row["id"])
+
+
+async def list_historical_summaries(session_id: str = "", limit: int = 100) -> list:
+    """列出历史摘要归档；仅管理用途，不自动注入聊天。"""
+    pool = await get_pool()
+    limit = max(1, min(int(limit or 100), 500))
+    async with pool.acquire() as conn:
+        if session_id:
+            rows = await conn.fetch("""
+                SELECT id, session_id, period_label, content, source, created_at
+                FROM historical_summaries
+                WHERE session_id = $1
+                ORDER BY created_at DESC, id DESC
+                LIMIT $2
+            """, session_id, limit)
+        else:
+            rows = await conn.fetch("""
+                SELECT id, session_id, period_label, content, source, created_at
+                FROM historical_summaries
+                ORDER BY created_at DESC, id DESC
+                LIMIT $1
+            """, limit)
+        return [dict(row) for row in rows]
+
+
+async def delete_historical_summary(summary_id: int) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM historical_summaries WHERE id = $1",
+            int(summary_id),
+        )
+        return result.endswith("1")
+
+
 async def record_summary_attempt(
     session_id: str,
     message_count: int,
@@ -3325,7 +3397,12 @@ def db_row_to_message(row: dict) -> dict:
     meta_str = row.get("metadata")
     if meta_str:
         try:
-            meta = _json.loads(meta_str)
+            meta = _json.loads(meta_str) if isinstance(meta_str, str) else meta_str
+            if not isinstance(meta, dict):
+                meta = {}
+            # user原始多模态content优先于纯文字content列
+            if row["role"] == "user" and isinstance(meta.get("multimodal_content"), list):
+                msg["content"] = meta["multimodal_content"]
             # assistant 带 tool_calls
             if "tool_calls" in meta:
                 msg["tool_calls"] = meta["tool_calls"]
@@ -3351,7 +3428,7 @@ async def export_all_conversations():
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT session_id, role, content, model, created_at
+            SELECT session_id, role, content, model, metadata, created_at
             FROM conversations
             ORDER BY session_id, created_at
         """)
@@ -3361,6 +3438,7 @@ async def export_all_conversations():
                 'role': r['role'],
                 'content': r['content'],
                 'model': r['model'] or '',
+                'metadata': r['metadata'],
                 'created_at': r['created_at'].isoformat() if r['created_at'] else None,
             }
             for r in rows
@@ -3371,7 +3449,7 @@ async def import_conversations(records: list):
     """
     导入对话记录（自动去重）
     
-    records: [{ session_id, role, content, model?, created_at? }, ...]
+    records: [{ session_id, role, content, model?, metadata?, created_at? }, ...]
     按 session_id + role + created_at 三元组去重，已存在的跳过。
     返回 (导入数量, 跳过数量)
     """
@@ -3387,7 +3465,18 @@ async def import_conversations(records: list):
             role = r.get('role')
             content = r.get('content')
             
-            if not all([session_id, role, content]):
+            if not session_id or not role:
+                continue
+            metadata = r.get('metadata')
+            # 允许图片-only消息：content可以为空，只要metadata中带有多模态content。
+            has_multimodal = False
+            if metadata:
+                try:
+                    parsed_metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+                    has_multimodal = isinstance(parsed_metadata, dict) and isinstance(parsed_metadata.get('multimodal_content'), list)
+                except Exception:
+                    has_multimodal = False
+            if not content and not has_multimodal:
                 continue
             
             model = r.get('model', '')
@@ -3414,14 +3503,14 @@ async def import_conversations(records: list):
                     continue
                 
                 await conn.execute("""
-                    INSERT INTO conversations (session_id, role, content, model, created_at)
-                    VALUES ($1, $2, $3, $4, $5)
-                """, session_id, role, content, model, created_at)
+                    INSERT INTO conversations (session_id, role, content, model, metadata, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                """, session_id, role, content, model, metadata, created_at)
             else:
                 await conn.execute("""
-                    INSERT INTO conversations (session_id, role, content, model)
-                    VALUES ($1, $2, $3, $4)
-                """, session_id, role, content, model)
+                    INSERT INTO conversations (session_id, role, content, model, metadata)
+                    VALUES ($1, $2, $3, $4, $5)
+                """, session_id, role, content, model, metadata)
             
             imported += 1
         

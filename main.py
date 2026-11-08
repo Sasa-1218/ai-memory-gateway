@@ -14,11 +14,13 @@ AI Memory Gateway — 带记忆系统的 LLM 转发网关
 
 import os
 import json
+import copy
 import uuid
 import asyncio
 import secrets
 import re
 import hashlib
+import base64
 import logging
 import time
 import httpx
@@ -40,7 +42,7 @@ except Exception:
     jwt = None
     RSAAlgorithm = None
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_recent_memories_detail, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, settle_shadow_mind_rules, get_shadow_mind_a2_events, get_shadow_mind_history, get_latest_normal_turn_message_ids, get_shadow_mind_event_source_messages, save_io_context_events, get_recent_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch, get_memories_by_ids_readonly, record_summary_attempt, record_summary_failure, mark_summary_alert_delivered, record_summary_success, get_summary_health_status, record_operational_health_failure, record_operational_health_success, mark_operational_health_alert_delivered, list_operational_health_status, get_latest_io_received_at
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_recent_memories_detail, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_recent_conversation_messages, get_last_conversation_message_time, get_push_metadata_since, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, save_shadow_push_decision, save_shadow_mind_state, get_shadow_mind_state, get_recent_drive_events, settle_shadow_mind_rules, get_shadow_mind_a2_events, get_shadow_mind_history, get_latest_normal_turn_message_ids, get_shadow_mind_event_source_messages, save_io_context_events, get_recent_io_context_events, list_experience_cards, get_experience_card, get_experience_card_source_messages, update_experience_card, get_experience_source_messages, begin_experience_generation_job, fail_experience_generation_job, complete_experience_generation_job, approve_experience_replacement, get_experience_generation_job, claim_experience_auto_batch, finish_experience_auto_batch, get_memories_by_ids_readonly, record_summary_attempt, record_summary_failure, mark_summary_alert_delivered, record_summary_success, get_summary_health_status, record_operational_health_failure, record_operational_health_success, mark_operational_health_alert_delivered, list_operational_health_status, get_latest_io_received_at, save_historical_summary, list_historical_summaries, delete_historical_summary
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from experience_cards import (
     REVIEW_STATUSES,
@@ -71,6 +73,25 @@ API_KEY = os.getenv("API_KEY", "")
 # OpenAI:     https://api.openai.com/v1/chat/completions
 # 本地 Ollama: http://localhost:11434/v1/chat/completions
 API_BASE_URL = os.getenv("API_BASE_URL", "https://openrouter.ai/api/v1/chat/completions")
+
+# 模型上游代理：仅 OpenRouter 使用。兼容旧的全局代理变量，便于平滑迁移。
+# 其他 HTTP 请求显式 trust_env=False，避免 Dashboard/Bark/摘要等被全局代理连带影响。
+def _configured_upstream_proxy() -> str:
+    return (
+        os.getenv("UPSTREAM_PROXY_URL", "").strip()
+        or os.getenv("HTTPS_PROXY", "").strip()
+        or os.getenv("ALL_PROXY", "").strip()
+        or os.getenv("HTTP_PROXY", "").strip()
+    )
+
+
+def _httpx_client_for_url(url: str, timeout):
+    kwargs = {"timeout": timeout, "trust_env": False}
+    if "openrouter.ai" in str(url or "").lower():
+        proxy_url = _configured_upstream_proxy()
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+    return httpx.AsyncClient(**kwargs)
 
 # 默认模型（如果客户端没指定就用这个）
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "anthropic/claude-sonnet-4")
@@ -162,6 +183,9 @@ SUMMARY_API_KEY = os.getenv("SUMMARY_API_KEY", "")
 SUMMARY_ALERTS_ENABLED = os.getenv("SUMMARY_ALERTS_ENABLED", "true").lower() == "true"
 SUMMARY_ALERT_AFTER_FAILURES = max(1, int(os.getenv("SUMMARY_ALERT_AFTER_FAILURES", "2")))
 SUMMARY_ALERT_COOLDOWN_HOURS = max(1, int(os.getenv("SUMMARY_ALERT_COOLDOWN_HOURS", "6")))
+# 近期摘要总字符预算。超过后只折叠最旧部分，最近摘要保持原样；0=禁用自动折叠。
+CACHE_SUMMARY_BUDGET_CHARS = max(0, int(os.getenv("CACHE_SUMMARY_BUDGET_CHARS", "0")))
+SUMMARY_KEEP_RECENT = max(1, int(os.getenv("SUMMARY_KEEP_RECENT", "2")))
 
 
 def get_summary_api_base_url() -> str:
@@ -471,6 +495,7 @@ async def lifespan(app: FastAPI):
                         "CACHE_PARTITION_X": int, "CACHE_PARTITION_TRIGGER": str,
                         "CACHE_PARTITION_WINDOW": int, "CACHE_SUMMARY_MODEL": str,
                         "SUMMARY_API_BASE_URL": str, "SUMMARY_API_KEY": str,
+                        "CACHE_SUMMARY_BUDGET_CHARS": int, "SUMMARY_KEEP_RECENT": int,
                         "FORCE_STREAM": lambda v: _parse_bool(v),
                         "REASONING_EFFORT": str,
                     }
@@ -564,7 +589,7 @@ templates = Jinja2Templates(directory="templates")
 # ============================================================
 
 # 不需要应用层鉴权的路径（根路径精确匹配，其余按前缀匹配）
-PUBLIC_PATHS = ("/", "/static/", "/health", "/favicon.ico", "/api/push/trigger")
+PUBLIC_PATHS = ("/", "/static/", "/health", "/favicon.ico", "/apple-touch-icon.png", "/api/push/trigger")
 
 # Dashboard 页面和网页私有接口由 Cloudflare Access 保护。
 DASHBOARD_ACCESS_PATHS = ("/dashboard",)
@@ -652,10 +677,19 @@ async def gateway_auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     header_key = request.headers.get("X-Gateway-Key", "")
+    authorization = request.headers.get("Authorization", "")
+    bearer_key = ""
+    if authorization.lower().startswith("bearer "):
+        bearer_key = authorization[7:].strip()
+
+    # 兼容两种客户端鉴权方式：
+    # 1) Kelivo 等支持自定义请求头的客户端：X-Gateway-Key
+    # 2) 仅支持标准 API Key 的 OpenAI 兼容客户端：Authorization: Bearer <key>
+    provided_key = header_key or bearer_key
 
     # compare_digest 防时序侧信道攻击
-    auth_success = bool(header_key) and secrets.compare_digest(header_key, GATEWAY_SECRET)
-    _log_auth_diag(request, header_key, auth_success)
+    auth_success = bool(provided_key) and secrets.compare_digest(provided_key, GATEWAY_SECRET)
+    _log_auth_diag(request, provided_key, auth_success)
     if not auth_success:
         return JSONResponse(
             status_code=401,
@@ -889,7 +923,10 @@ async def _get_cf_access_jwks() -> list:
     if not certs_url:
         return []
 
-    async with httpx.AsyncClient(timeout=5) as client:
+    # Cloudflare Access 公钥校验属于入口鉴权基础设施，
+    # 不应依赖用于上游模型访问的 HTTP(S)_PROXY / ALL_PROXY。
+    # 否则美国代理抖动时会同时造成聊天失败和 Dashboard 403。
+    async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
         response = await client.get(certs_url)
         response.raise_for_status()
         payload = response.json()
@@ -1097,6 +1134,77 @@ def build_time_injection() -> str:
     return f"【当前时间】{time_str} {weekday}"
 
 
+def _extract_text_content(content) -> str:
+    """Extract text for search, summaries, embeddings, and conversation.content."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return " ".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text", ""), str)
+    )
+
+
+def _has_non_text_content(content) -> bool:
+    """Return True when a content array contains an image or another non-text block."""
+    return isinstance(content, list) and any(
+        not isinstance(block, dict) or block.get("type") != "text"
+        for block in content
+    )
+
+
+def _build_injected_user_content(content, injection_parts: list[str]):
+    """Add time/memory text while preserving the original multimodal blocks."""
+    injection_text = "\n\n".join(part for part in injection_parts if part)
+    if isinstance(content, list):
+        blocks = copy.deepcopy(content)
+        if injection_text:
+            blocks.insert(0, {"type": "text", "text": injection_text})
+        return blocks
+
+    original_text = content if isinstance(content, str) else ""
+    parts = [part for part in (injection_text, original_text) if part]
+    return "\n\n".join(parts)
+
+
+def _multimodal_user_metadata(content) -> str | None:
+    """Serialize an original content array into existing metadata storage."""
+    if not isinstance(content, list):
+        return None
+    return json.dumps({"multimodal_content": content}, ensure_ascii=False)
+
+
+def _multimodal_diag(content) -> dict:
+    """Return a payload-safe summary of multimodal content for diagnostics."""
+    if isinstance(content, str):
+        return {"kind": "str", "chars": len(content), "blocks": []}
+    if not isinstance(content, list):
+        return {"kind": type(content).__name__, "blocks": []}
+    blocks = []
+    for block in content:
+        if not isinstance(block, dict):
+            blocks.append({"type": type(block).__name__})
+            continue
+        item = {"type": str(block.get("type", ""))}
+        if block.get("type") in ("image_url", "input_image"):
+            raw = block.get("image_url")
+            url = raw.get("url") if isinstance(raw, dict) else raw
+            if isinstance(url, str):
+                if url.startswith("data:"):
+                    scheme = "data"
+                elif url.startswith(("http://", "https://")):
+                    scheme = "http"
+                else:
+                    scheme = "other"
+                item.update({"image_scheme": scheme, "image_chars": len(url)})
+        blocks.append(item)
+    return {"kind": "list", "blocks": blocks}
+
+
 def _format_summary_message_time(msg: dict) -> str:
     raw = msg.get("created_at")
     if not raw:
@@ -1131,7 +1239,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     conversation_text = ""
     for msg in messages:
         role_label = "用户" if msg['role'] == 'user' else "AI"
-        content = msg['content'] if isinstance(msg['content'], str) else str(msg['content'])
+        content = _extract_text_content(msg.get('content'))
         msg_time = _format_summary_message_time(msg)
         conversation_text += f"[{msg_time}] {role_label}: {content}\n\n"
     
@@ -1194,7 +1302,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
 ---
 
 近期连续性记录："""
-    
+
     try:
         headers = {
             "Authorization": f"Bearer {get_summary_api_key()}",
@@ -1205,7 +1313,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
             headers["HTTP-Referer"] = EXTRA_REFERER
             headers["X-Title"] = EXTRA_TITLE
 
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with _httpx_client_for_url(summary_url, 60) as client:
             response = await client.post(summary_url, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
                 "max_tokens": 3000,
@@ -1257,107 +1365,52 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
 
 
 # ============================================================
-# 摘要自动压缩（summary_parts 段数/字数超过阈值时，把多段摘要再压成一段）
+# 近期摘要有界折叠：只压最旧部分，最近段保持原样
 # ============================================================
 
-def _get_int_env(key: str, default: int) -> int:
+async def fold_summary_parts(summary_parts: list, protected_tail: int = 0, session_id: str = ""):
     """
-    读取整数型环境变量。
-    - 在 Coolify 里留空（空字符串）→ 视为 0（禁用该项判断）
-    - 完全不设置这个变量 → 用 default
-    - 填了非法值 → 打印警告，用 default
+    当近期摘要总字符超过预算时，只把最旧的若干段折叠成一段基础摘要。
+    最近 SUMMARY_KEEP_RECENT 段旧摘要，以及本轮刚生成的 protected_tail 段保持原文。
+    折叠失败返回 None，由调用方回滚本轮摘要游标，避免丢上下文。
     """
-    raw = os.getenv(key)
-    if raw is None:
-        return default
-    raw = raw.strip()
-    if raw == "":
-        return 0
-    try:
-        return int(raw)
-    except ValueError:
-        print(f"⚠️ 环境变量 {key} 值无效: '{raw}'，回退默认值 {default}")
-        return default
+    # Recovery build: automatic second-stage summary folding is disabled. Keep append-only recent summaries intact.
+    return summary_parts
 
-# 超过这个段数就触发压缩（默认0=禁用，只按字数判断；如果想按段数触发可以在Coolify里设置）
-SUMMARY_CONSOLIDATE_MAX_PARTS = _get_int_env("SUMMARY_CONSOLIDATE_MAX_PARTS", 0)
-# 超过这个总字数就触发压缩（默认1万字）
-SUMMARY_CONSOLIDATE_MAX_CHARS = _get_int_env("SUMMARY_CONSOLIDATE_MAX_CHARS", 10000)
-# 压缩后目标字数（软限制，模型可以超）
-SUMMARY_CONSOLIDATE_TARGET_CHARS = _get_int_env("SUMMARY_CONSOLIDATE_TARGET_CHARS", 6000) or 6000
-
-# 注意：这里是纯文本输出，不进JSON，双引号、书名号随便用，不受碎片整理那条JSON规则限制
-SUMMARY_CONSOLIDATION_PROMPT = """请把本次新增的近期连续性记录合并进当前长期摘要，生成更新后的完整长期摘要。
-
-多段自动合并继续保持关闭；本 prompt 只作为人工或受控流程需要重建长期摘要时的备用规则。
-
-输入分为两部分：
-
-当前长期摘要：
----
-{current_canonical_summary}
----
-
-本次待合并的近期连续性记录：
----
-{new_event_cards}
----
-
-核心规则：
-1. 当前长期摘要是基底。只处理新增记录直接带来的补充、更新、纠正和去重；无关内容尽量保持原文不变。
-2. 长期摘要只维护：仍在影响当前聊天的背景、持续有效的关系设定、明确长期信息、重要关系转折、明确约定和未完成事项。普通每日事件的完整经过留在原始消息和共同经历卡片层，不机械复制进长期摘要。
-3. 新增内容若只是一次性情绪、当天状态、临时选择或普通闲聊，不得升级成长期偏好、人格特征或关系结论。
-4. 保留事实所需的人物、第三方身份、直接因果和必要细节。不得总结教训、成长感悟、人生意义，不写“体现了”“说明了双方关系更加”等评价。
-5. 后续明确纠正旧事实时替换错误内容，不同时保留冲突版本；证据不足时标记不确定，不擅自覆盖。
-6. 使用绝对日期或日期范围，不保留“今天、昨天、此前周末、最近”等相对时间，也不强制精确到小时和分钟。实际发生日期不明时，区分事件日期未知与对话提及日期。
-7. 保持遥遥第一人称视角。“我”只指遥遥，“你”只指 Sasa；第三方每次明确身份，不改变人物关系和对象。
-8. 不再强制八大主题归类。按内容使用下列固定功能区；没有内容的区块保留标题即可，不为填满结构而编造。
-9. 不得为了达到 {target_chars} 删除重要关系背景、明确约定、事实纠正、未完成事项或辨认关键经历所必需的细节。事实完整性优先于目标字数。
-10. 不要输出格式外解释。
-
-请从下一行开始，只输出更新后的完整长期摘要，不要输出解释、分析或变更说明：
-
-# 对话摘要
-
-## 当前连续背景
-
-## 已确认的长期信息与关系设定
-
-## 重要经历与关系转折
-
-## 明确约定与未完成事项
-
-## 事实纠正
-
-"""
-
-
-async def consolidate_summary_parts(summary_parts: list) -> list:
-    """
-    如果 summary_parts 段数或总字数超过阈值，调用模型把它们整理压缩成一份结构化摘要。
-    压缩失败时原样返回，不影响主流程。
-    """
-    if SUMMARY_CONSOLIDATE_MAX_PARTS <= 0 and SUMMARY_CONSOLIDATE_MAX_CHARS <= 0:
-        return summary_parts  # 功能关闭（两个阈值都留空/设0）
-
-    if not summary_parts or len(summary_parts) <= 1:
+    budget = CACHE_SUMMARY_BUDGET_CHARS
+    if budget <= 0 or not summary_parts:
         return summary_parts
 
-    total_chars = sum(len(p) for p in summary_parts)
-    should_consolidate = (
-        (SUMMARY_CONSOLIDATE_MAX_PARTS > 0 and len(summary_parts) >= SUMMARY_CONSOLIDATE_MAX_PARTS)
-        or (SUMMARY_CONSOLIDATE_MAX_CHARS > 0 and total_chars >= SUMMARY_CONSOLIDATE_MAX_CHARS)
-    )
-    if not should_consolidate:
+    total_chars = sum(len(str(p)) for p in summary_parts)
+    if total_chars <= budget:
         return summary_parts
 
-    current_canonical_summary = "\n\n".join(str(p) for p in summary_parts[:-1]).strip()
-    new_event_cards = str(summary_parts[-1]).strip()
-    prompt = SUMMARY_CONSOLIDATION_PROMPT.format(
-        current_canonical_summary=current_canonical_summary or "（暂无当前长期摘要）",
-        new_event_cards=new_event_cards,
-        target_chars=SUMMARY_CONSOLIDATE_TARGET_CHARS,
+    keep = SUMMARY_KEEP_RECENT + max(0, int(protected_tail or 0))
+    if len(summary_parts) <= keep:
+        print(f"📝 摘要区{total_chars}字超预算{budget}，但当前{len(summary_parts)}段都受保护，暂不折叠")
+        return summary_parts
+
+    old_parts = [str(p) for p in summary_parts[:-keep]]
+    recent_parts = list(summary_parts[-keep:])
+    old_total = sum(len(p) for p in old_parts)
+    target_chars = max(600, budget // 3)
+
+    old_text = "\n\n".join(
+        f"【旧摘要{i + 1}】\n{part}" for i, part in enumerate(old_parts)
     )
+    prompt = f"""下面是同一段长期对话里按时间从早到晚排列的旧摘要。请把它们压缩成一段“基础摘要”。
+
+要求：
+- 使用遥遥第一人称，“我”=遥遥，“你”=Sasa。
+- 只保留仍会影响后续聊天理解的背景、关系节点、稳定习惯/偏好、重要经历、明确约定与未完成事项、事实纠正。
+- 重复内容只留一次；普通日常经过、重复安慰、场景铺陈尽量删除。
+- 保留重要绝对日期；不得把相对时间按本次折叠日期重新解释。
+- 不新增事实，不做人格分析或关系升华。
+- 控制在 {target_chars} 字以内，只输出摘要正文。
+
+{old_text}
+
+基础摘要："""
 
     try:
         headers = {
@@ -1368,28 +1421,51 @@ async def consolidate_summary_parts(summary_parts: list) -> list:
         if "openrouter" in summary_url:
             headers["HTTP-Referer"] = EXTRA_REFERER
             headers["X-Title"] = EXTRA_TITLE
-            
-        # ★ 这里把超时时间改长，给足 Token，防止长文被截断 ★
-        async with httpx.AsyncClient(timeout=180.0) as client:
+
+        async with _httpx_client_for_url(summary_url, 120.0) as client:
             response = await client.post(summary_url, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
-                "max_tokens": 20000,
+                "max_tokens": 4000,
                 "thinking": {"type": "disabled"},
                 "messages": [{"role": "user", "content": prompt}],
             })
-            if response.status_code == 200:
-                data = response.json()
-                if "choices" in data:
-                    merged = data["choices"][0]["message"]["content"].strip()
-                    if merged:
-                        print(f"🗜️ 摘要压缩完成: {len(summary_parts)}段/{total_chars}字 → 1段/{len(merged)}字")
-                        return [merged]
+        if response.status_code != 200:
+            print(f"⚠️ 摘要折叠失败: HTTP {response.status_code}")
+            return None
 
-        print(f"⚠️ 摘要压缩失败: HTTP {response.status_code}，保留原有{len(summary_parts)}段")
-        return summary_parts
-    except Exception as e:
-        print(f"⚠️ 摘要压缩异常: {e}，保留原有{len(summary_parts)}段")
-        return summary_parts
+        data = response.json()
+        merged = _extract_chat_completion_text(data).strip()
+        if not merged:
+            print("⚠️ 摘要折叠失败: 模型返回空内容")
+            return None
+        if len(merged) > target_chars or len(merged) >= old_total:
+            print(
+                f"⚠️ 摘要折叠结果无效: 新{len(merged)}字 / 目标{target_chars}字 / 原{old_total}字"
+            )
+            return None
+
+        # 折叠前的旧摘要原文自动归档，之后不默认注入聊天；这样压缩并不等于丢失。
+        try:
+            local_now = datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)
+            await save_historical_summary(
+                content=old_text,
+                period_label=f"自动折叠归档 {local_now.strftime('%Y-%m-%d')}",
+                session_id=session_id,
+                source="auto_fold",
+            )
+        except Exception as archive_exc:
+            print(f"⚠️ 旧摘要自动归档失败: {type(archive_exc).__name__}；本次折叠不继续")
+            return None
+
+        folded = [merged] + recent_parts
+        print(
+            f"📝 摘要折叠完成: {len(old_parts)}段/{old_total}字 → 1段/{len(merged)}字；"
+            f"总摘要 {len(summary_parts)}段/{total_chars}字 → {len(folded)}段/{sum(len(str(p)) for p in folded)}字"
+        )
+        return folded
+    except Exception as exc:
+        print(f"⚠️ 摘要折叠异常: {type(exc).__name__}")
+        return None
 
 
 def group_by_rounds(history: list) -> list:
@@ -1407,6 +1483,96 @@ def group_by_rounds(history: list) -> list:
     if current_round:
         rounds.append(current_round)
     return rounds
+
+
+def _compact_historical_tool_round(round_msgs: list) -> list:
+    """压缩已经结束的历史工具轮：丢掉原始tool结果和tool_calls，仅保留可读对话文本。
+
+    搜索/工具结果可能非常大；历史轮已经有最终assistant回答时，无需把原始工具载荷
+    继续重复发送给上游。若一轮最后仍是tool，说明这是当前正在继续的工具流程，原样保留。
+    """
+    cleaned = [{k: v for k, v in msg.items() if k != "created_at"} for msg in round_msgs]
+    if cleaned and cleaned[-1].get("role") == "tool":
+        return cleaned
+
+    has_tool_artifact = any(
+        msg.get("role") == "tool" or (msg.get("role") == "assistant" and msg.get("tool_calls"))
+        for msg in cleaned
+    )
+    if not has_tool_artifact:
+        return cleaned
+
+    compacted = []
+    for msg in cleaned:
+        if msg.get("role") == "tool":
+            continue
+        m = {k: v for k, v in msg.items() if k != "tool_calls"}
+        if m.get("role") == "assistant" and not str(m.get("content") or "").strip():
+            continue
+        compacted.append(m)
+    print(
+        f"🧹 历史工具轮压缩: {len(cleaned)}条 → {len(compacted)}条 "
+        f"(移除原始tool结果/tool_calls)",
+        flush=True,
+    )
+    return compacted
+
+
+def _sanitize_tool_call_sequences(messages: list) -> list:
+    """发送上游前兜底清洗不完整tool链，避免 OpenAI 400。
+
+    assistant(tool_calls) 后必须紧跟对应 tool_call_id 的 tool 消息。
+    对历史中已损坏/残缺的链条：保留assistant可读文本、去掉tool_calls；
+    空assistant则整条丢弃，并丢弃其后已成孤立状态的tool消息。
+    """
+    result = []
+    i = 0
+    repaired = 0
+    orphan_tools = 0
+
+    while i < len(messages):
+        msg = messages[i]
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            required = {
+                tc.get("id") for tc in (msg.get("tool_calls") or [])
+                if isinstance(tc, dict) and tc.get("id")
+            }
+            j = i + 1
+            following_tools = []
+            while j < len(messages) and messages[j].get("role") == "tool":
+                following_tools.append(messages[j])
+                j += 1
+            present = {m.get("tool_call_id") for m in following_tools if m.get("tool_call_id")}
+
+            if required and required.issubset(present):
+                result.append(msg)
+                result.extend(following_tools)
+                i = j
+                continue
+
+            repaired += 1
+            readable = {k: v for k, v in msg.items() if k != "tool_calls"}
+            if str(readable.get("content") or "").strip():
+                result.append(readable)
+            orphan_tools += len(following_tools)
+            i = j
+            continue
+
+        if msg.get("role") == "tool":
+            orphan_tools += 1
+            i += 1
+            continue
+
+        result.append(msg)
+        i += 1
+
+    if repaired or orphan_tools:
+        print(
+            f"🧯 上游tool链修复: dangling_assistant={repaired} "
+            f"orphan_tool={orphan_tools}",
+            flush=True,
+        )
+    return result
 
 
 def _should_rotate(b_rounds_count: int, X: int, a_msgs: list) -> bool:
@@ -1576,9 +1742,23 @@ async def build_partitioned_messages(
     b_msgs = [msg for rnd in b_round_groups for msg in rnd]
     b_rounds_count = len(b_round_groups)
     
+    # 保存本轮轮转前状态；摘要折叠失败时整轮回滚，避免游标前进但摘要没保存。
+    original_summary_parts = list(summary_parts)
+    original_a_start_round = a_start_round
+
     rotation_count = 0
     rotation_failed = False
     max_rotations = CACHE_MAX_ROTATIONS if CACHE_PARTITION_TRIGGER == "time" else 999
+    # Keep Rora chatting while an explicit repair runs, but do not let normal
+    # X=8 rotation write to the same active summary during repair generation.
+    from summary_repair_job import is_active as _summary_repair_active
+    if _summary_repair_active(session_id):
+        max_rotations = 0
+        print(
+            "[summary-repair] normal_partition_rotation_paused "
+            f"session={_short_hash_text(session_id)}",
+            flush=True,
+        )
     while _should_rotate(b_rounds_count, X, a_msgs) and rotation_count < max_rotations:
         trigger_info = f"B区{b_rounds_count}轮 >= X={X}" if CACHE_PARTITION_TRIGGER != "time" else f"A区首条消息超出{CACHE_PARTITION_WINDOW}分钟窗口"
         print(f"🔄 轮转尝试#{rotation_count + 1}: session={session_id}, {trigger_info}")
@@ -1601,8 +1781,24 @@ async def build_partitioned_messages(
         b_rounds_count = len(b_round_groups)
     
     if rotation_count > 0:
-        # 每次轮转完成后检查一下摘要是否需要压缩（段数/字数超阈值才会真正触发）
-        summary_parts = await consolidate_summary_parts(summary_parts)
+        folded_parts = await fold_summary_parts(summary_parts, protected_tail=rotation_count, session_id=session_id)
+        if folded_parts is None:
+            summary_parts = original_summary_parts
+            a_start_round = original_a_start_round
+            rotation_count = 0
+            rotation_failed = True
+            a_end_round = a_start_round + X
+            a_round_groups = rounds[a_start_round : a_end_round]
+            b_round_groups = rounds[a_end_round :]
+            a_msgs = [msg for rnd in a_round_groups for msg in rnd]
+            b_msgs = [msg for rnd in b_round_groups for msg in rnd]
+            b_rounds_count = len(b_round_groups)
+            await _record_summary_failure_safe(session_id, "summary_fold_failed")
+            print("⚠️ 摘要折叠失败，本轮轮转已回滚，等待后续请求重试")
+        else:
+            summary_parts = folded_parts
+
+    if rotation_count > 0:
         try:
             await save_session_cache_state(session_id, summary_parts, a_start_round)
         except Exception as state_error:
@@ -1662,8 +1858,11 @@ async def build_partitioned_messages(
     for m in cleaned_a:
         result.append(m)
     
-    # B区：先构建去掉created_at的副本，再从末尾往前打BP
-    b_cleaned = [{k: v for k, v in msg.items() if k not in ('created_at',)} for msg in b_msgs]
+    # B区：已完成的历史工具轮压缩掉原始tool结果/tool_calls，避免搜索后上下文暴涨。
+    # 当前仍以tool结尾的活跃工具轮保持原样，确保工具调用可以继续完成。
+    b_cleaned = []
+    for rnd in b_round_groups:
+        b_cleaned.extend(_compact_historical_tool_round(rnd))
     
     for j in range(len(b_cleaned) - 1, -1, -1):
         if b_cleaned[j].get('role') != 'tool' and _apply_breakpoint(b_cleaned[j]):
@@ -1680,15 +1879,10 @@ async def build_partitioned_messages(
             if mem_text:
                 parts.append(mem_text)
         
-        current_text = current_user_msg['content']
-        if isinstance(current_text, list):
-            current_text = " ".join(
-                item.get("text", "") for item in current_text
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
-        
-        parts.append(current_text)
-        result.append({"role": "user", "content": "\n\n".join(parts)})
+        result.append({
+            "role": "user",
+            "content": _build_injected_user_content(current_user_msg.get('content'), parts),
+        })
     
     bp_count = 1 + (1 if summary_parts else 0) + (1 if cleaned_a else 0) + (1 if b_msgs else 0)
     summary_total = sum(len(p) for p in summary_parts)
@@ -1742,15 +1936,10 @@ async def _build_basic_cached(
             if mem_text:
                 parts.append(mem_text)
         
-        current_text = current_user_msg['content']
-        if isinstance(current_text, list):
-            current_text = " ".join(
-                item.get("text", "") for item in current_text
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
-        
-        parts.append(current_text)
-        result.append({"role": "user", "content": "\n\n".join(parts)})
+        result.append({
+            "role": "user",
+            "content": _build_injected_user_content(current_user_msg.get('content'), parts),
+        })
     
     bp_count = 1 + (1 if history else 0)
     print(f"🔒 基础缓存(降级): BP×{bp_count} | 历史{len(history)}条 | 总{len(result)}条messages")
@@ -2991,7 +3180,7 @@ async def deliver_bark_push(message: str) -> dict:
         payload["badge"] = badge
 
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with _httpx_client_for_url(BARK_API_URL, 20) as client:
             response = await client.post(
                 BARK_API_URL,
                 headers={"Content-Type": "application/json"},
@@ -3043,7 +3232,7 @@ async def deliver_gateway_system_alert(title: str, message: str) -> dict:
     if BARK_OPEN_URL:
         payload["url"] = BARK_OPEN_URL
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with _httpx_client_for_url(BARK_API_URL, 20) as client:
             response = await client.post(
                 BARK_API_URL,
                 headers={"Content-Type": "application/json"},
@@ -3737,7 +3926,7 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
     }
 
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with _httpx_client_for_url(API_BASE_URL, 120) as client:
             response = await client.post(API_BASE_URL, headers=headers, json=body)
     except Exception as e:
         print(f"⚠️ 主动推送决策异常: {type(e).__name__}")
@@ -3916,7 +4105,7 @@ async def generate_shadow_push(session_id: str, timing_state: dict | None = None
 # 后台记忆处理
 # ============================================================
 
-async def process_memories_background(session_id: str, user_msg: str, assistant_msg: str, model: str, context_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, assistant_tool_calls: list = None, assistant_reasoning: str = None):
+async def process_memories_background(session_id: str, user_msg: str, assistant_msg: str, model: str, context_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, assistant_tool_calls: list = None, assistant_reasoning: str = None, user_content=None):
     """
     后台异步：存储对话 + 提取记忆（不阻塞主流程）
     
@@ -3932,6 +4121,7 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
     tool_messages: 客户端发来的工具结果消息列表
     assistant_tool_calls: response中assistant的工具调用列表（如果有）
     assistant_reasoning: response中assistant的reasoning_content（deepseek thinking mode）
+    user_content: 当前用户消息的原始content；数组会原样存入metadata
     """
     global _round_counter
     health_stage = "conversation_storage"
@@ -3968,6 +4158,8 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 print(f"🔧 存储: {len(tool_messages)}条tool + 1条assistant" + (" (含tool_calls)" if assistant_tool_calls else "") + (" (含reasoning)" if assistant_reasoning else ""))
         else:
             # 普通对话或首次工具调用
+            user_metadata = _multimodal_user_metadata(user_content)
+            user_has_non_text = _has_non_text_content(user_content)
             ast_meta_dict = {}
             if assistant_tool_calls:
                 ast_meta_dict["tool_calls"] = assistant_tool_calls
@@ -3977,23 +4169,23 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
             
             if assistant_tool_calls:
                 # 首次工具调用：assistant回复包含tool_calls，存user + assistant(tool_calls)
-                await save_message(session_id, "user", user_msg, model)
+                await save_message(session_id, "user", user_msg, model, metadata=user_metadata)
                 await save_message(session_id, "assistant", assistant_msg or "", model, metadata=assistant_meta)
                 print(f"🔧 存储: user + assistant (含{len(assistant_tool_calls)}个tool_calls)" + (" (含reasoning)" if assistant_reasoning else ""))
             else:
-                # 纯文字对话：re-roll检测 + 存user + assistant
+                # 图片等非文字block不能仅按caption判成re-roll。
                 last_user = await get_last_user_content(session_id)
-                if last_user and last_user.strip() == user_msg.strip():
+                if not user_has_non_text and last_user and last_user.strip() == user_msg.strip():
                     updated = await update_last_assistant_message(session_id, assistant_msg, model)
                     if updated:
                         print(f"🔄 检测到re-roll，已覆盖最后一条assistant回复")
                         shadow_mind_normal_turn_saved = True
                     else:
-                        await save_message(session_id, "user", user_msg, model)
+                        await save_message(session_id, "user", user_msg, model, metadata=user_metadata)
                         await save_message(session_id, "assistant", assistant_msg, model, metadata=assistant_meta)
                         shadow_mind_normal_turn_saved = True
                 else:
-                    await save_message(session_id, "user", user_msg, model)
+                    await save_message(session_id, "user", user_msg, model, metadata=user_metadata)
                     await save_message(session_id, "assistant", assistant_msg, model, metadata=assistant_meta)
                     shadow_mind_normal_turn_saved = True
         if not skip_conversation_log:
@@ -4028,6 +4220,11 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         if MEMORY_EXTRACT_INTERVAL == 0:
             print(f"⏭️  记忆自动提取已禁用，跳过")
             return
+
+        # 图片原文保存在metadata；没有用户文字时不让纯文本记忆流程猜测图片内容。
+        if not user_msg.strip() and not tool_messages:
+            print("⏭️  用户消息无文字，已保存图片历史并跳过文字记忆提取")
+            return
         
         _round_counter += 1
         
@@ -4048,7 +4245,11 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         if context_messages:
             # 截取最近N轮（interval×2条），加上最新的assistant回复
             tail_count = MEMORY_EXTRACT_INTERVAL * 2
-            recent_msgs = list(context_messages)[-tail_count:] if len(context_messages) > tail_count else list(context_messages)
+            raw_recent_msgs = list(context_messages)[-tail_count:] if len(context_messages) > tail_count else list(context_messages)
+            recent_msgs = [
+                {**msg, "content": _extract_text_content(msg.get("content"))}
+                for msg in raw_recent_msgs
+            ]
             messages_for_extraction = recent_msgs + [
                 {"role": "assistant", "content": assistant_msg}
             ]
@@ -4231,6 +4432,7 @@ async def api_push_trigger(request: Request):
         _push_lock.release()
 
 
+@app.head("/")
 @app.get("/")
 async def health_check():
     """健康检查"""
@@ -4259,7 +4461,7 @@ async def list_models():
     models_url = API_BASE_URL.replace("/chat/completions", "/models")
     try:
         headers = {"Authorization": f"Bearer {API_KEY}"}
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with _httpx_client_for_url(models_url, 30) as client:
             response = await client.get(models_url, headers=headers)
         if response.status_code == 200:
             return response.json()
@@ -4377,20 +4579,21 @@ async def chat_completions(request: Request):
     
     # ---------- 检测是否应跳过对话存储 ----------
     # 客户端通过header显式声明（如标题生成等辅助请求）
-    skip_conversation_log = request.headers.get("X-Skip-Conversation-Log", "").lower() == "true"
+    debug_fresh_session = request.headers.get("X-Debug-Fresh-Session", "").lower() == "true"
+    skip_conversation_log = (
+        request.headers.get("X-Skip-Conversation-Log", "").lower() == "true"
+        or debug_fresh_session
+    )
     
     # ---------- 提取用户最新消息 ----------
     user_message = ""
+    user_content = None
     for msg in reversed(messages):
         if msg.get("role") == "user":
             content = msg.get("content", "")
-            if isinstance(content, str):
-                user_message = content
-            elif isinstance(content, list):
-                user_message = " ".join(
-                    item.get("text", "") for item in content
-                    if isinstance(item, dict) and item.get("type") == "text"
-                )
+            user_content = copy.deepcopy(content)
+            user_message = _extract_text_content(content)
+            print(f"🖼️ inbound_user_multimodal={_multimodal_diag(content)}", flush=True)
             break
     
     # ---------- 构建 system prompt ----------
@@ -4411,8 +4614,22 @@ async def chat_completions(request: Request):
         "session_hash": _short_hash_text(session_id),
     }
     
+    # ---------- 临时干净测试模式 ----------
+    # 仅使用客户端本次请求，不读取正式 DB 历史、不注入网关记忆、不写回对话。
+    if debug_fresh_session:
+        body["messages"] = copy.deepcopy(messages)
+        cache_diag.update({
+            "mode": "debug_fresh",
+            "session_hash": _short_hash_text(session_id),
+        })
+        print(
+            f"🧪 临时干净会话: client_messages={len(messages)} | "
+            "db_history=off | memory_injection=off | conversation_log=off",
+            flush=True,
+        )
+
     # ---------- 分区缓存模式 ----------
-    if CACHE_PARTITION_ENABLED:
+    elif CACHE_PARTITION_ENABLED:
         active_sid = get_active_session_id()
         if active_sid:
             session_id = active_sid
@@ -4538,11 +4755,20 @@ async def chat_completions(request: Request):
     cache_diag["api_provider"] = _api_provider_label(API_BASE_URL)
     cache_diag.setdefault("constructed_breakpoints", _count_cache_breakpoints(body.get("messages", [])))
     
+    # ---------- 上游消息结构兜底 ----------
+    # DB/客户端若遗留不完整的 assistant(tool_calls) → tool 链，OpenAI 会直接 400。
+    # 在真正发出请求前做最后一次结构校验与修复。
+    body["messages"] = _sanitize_tool_call_sequences(body.get("messages", []))
+
     # ---------- cache_control 兼容性处理 ----------
     if CACHE_PARTITION_ENABLED and not _is_anthropic_model(model):
         _strip_cache_control(body.get("messages", []))
     cache_diag["sent_breakpoints"] = _count_cache_breakpoints(body.get("messages", []))
     _log_cache_build_diag(cache_diag)
+    for _diag_msg in reversed(body.get("messages", [])):
+        if _diag_msg.get("role") == "user":
+            print(f"🖼️ outbound_user_multimodal={_multimodal_diag(_diag_msg.get('content'))}", flush=True)
+            break
     
     # ---------- 转发请求 ----------
     headers = {
@@ -4580,13 +4806,17 @@ async def chat_completions(request: Request):
     
     if is_stream:
         return StreamingResponse(
-            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages, cache_diag=cache_diag),
+            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages, cache_diag=cache_diag, user_content=user_content),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
     else:
         try:
-            async with httpx.AsyncClient(timeout=300) as client:
+            async with _httpx_client_for_url(API_BASE_URL, 300) as client:
                 response = await client.post(API_BASE_URL, headers=headers, json=body)
         except Exception as upstream_error:
             await _record_operational_failure_safe(
@@ -4614,12 +4844,12 @@ async def chat_completions(request: Request):
             except (KeyError, IndexError):
                 pass
 
-            if MEMORY_ENABLED and (user_message or tool_messages):
+            if MEMORY_ENABLED and (user_message or tool_messages or user_content is not None):
                 asyncio.create_task(
                     process_memories_background(session_id, user_message, assistant_msg, model,
                                                 context_messages=original_messages, skip_conversation_log=skip_conversation_log,
                                                 tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
-                                                assistant_reasoning=assistant_reasoning)
+                                                assistant_reasoning=assistant_reasoning, user_content=user_content)
                 )
 
             return JSONResponse(status_code=200, content=resp_data)
@@ -4630,29 +4860,80 @@ async def chat_completions(request: Request):
         return JSONResponse(status_code=response.status_code, content=response.json())
 
 
-async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None):
-    try:
-        async for chunk in _stream_and_capture_impl(
-            headers,
-            body,
-            session_id,
-            user_message,
-            model,
-            original_messages,
-            skip_conversation_log,
-            tool_messages,
-            cache_diag,
-        ):
-            yield chunk
-    except Exception as upstream_error:
-        await _record_operational_failure_safe(
-            "upstream_chat",
-            f"exception_{type(upstream_error).__name__}",
-        )
-        raise
+async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None, user_content=None):
+    """流式转发入口：代理/网络在首包前失败时自动重试，避免 200 后异常断流变成 Cloudflare 520。"""
+    retryable_errors = (
+        httpx.ProxyError,
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.ReadError,
+        httpx.RemoteProtocolError,
+    )
+    max_attempts = 3
 
+    for attempt in range(1, max_attempts + 1):
+        yielded_any = False
+        try:
+            async for chunk in _stream_and_capture_impl(
+                headers,
+                body,
+                session_id,
+                user_message,
+                model,
+                original_messages,
+                skip_conversation_log,
+                tool_messages,
+                cache_diag,
+                user_content,
+            ):
+                yielded_any = True
+                yield chunk
+            return
+        except retryable_errors as upstream_error:
+            await _record_operational_failure_safe(
+                "upstream_chat",
+                f"exception_{type(upstream_error).__name__}",
+            )
+            print(
+                f"⚠️ 上游网络异常: model={model} "
+                f"attempt={attempt}/{max_attempts} "
+                f"error_type={type(upstream_error).__name__} "
+                f"yielded_any={yielded_any}",
+                flush=True,
+            )
 
-async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None):
+            # 还没向客户端发任何模型数据时，可以安全地重新建立上游连接。
+            if not yielded_any and attempt < max_attempts:
+                await asyncio.sleep(0.8 * attempt)
+                continue
+
+            # 已经开始向 Kelivo 输出，或重试耗尽：用合法 SSE 结束，
+            # 避免 ASGI 异常把连接硬掐断，导致 Cloudflare 520 / 客户端永久转圈。
+            error_payload = {
+                "error": {
+                    "message": "upstream connection interrupted",
+                    "type": "upstream_connection_error",
+                    "retryable": True,
+                }
+            }
+            yield ("data: " + json.dumps(error_payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+            yield b"data: [DONE]\n\n"
+            return
+        except Exception as upstream_error:
+            await _record_operational_failure_safe(
+                "upstream_chat",
+                f"exception_{type(upstream_error).__name__}",
+            )
+            print(
+                f"❌ 流式转发异常: model={model} "
+                f"error_type={type(upstream_error).__name__} "
+                f"yielded_any={yielded_any}",
+                flush=True,
+            )
+            raise
+
+async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, cache_diag: dict | None = None, user_content=None):
     """流式响应 + 捕获完整回复（原始字节透传，确保SSE格式和thinking数据完整）"""
     full_response = []
     full_reasoning = []
@@ -4660,7 +4941,7 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
     line_buffer = ""
     accumulated_tool_calls = {}  # index -> {id, type, function: {name, arguments}}
     
-    async with httpx.AsyncClient(timeout=300) as client:
+    async with _httpx_client_for_url(API_BASE_URL, 300) as client:
         async with client.stream("POST", API_BASE_URL, headers=headers, json=body) as response:
             # 打印上游响应头（排查thinking问题用）
             upstream_ct = response.headers.get("content-type", "")
@@ -4679,58 +4960,198 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
                     f"upstream_http_{response.status_code}",
                 )
             
-            async for chunk in response.aiter_bytes():
-                # 原始字节直接透传给客户端
-                yield chunk
-                
+            # 独立读取上游，并通过队列转发。这样上游短暂无 token 时，
+            # 仍可定期给客户端发送 SSE comment，避免 Cloudflare / 反代误判长连接已闲置。
+            stream_queue = asyncio.Queue()
+            stream_started = time.monotonic()
+            first_chunk_seen = False
+            done_seen = False
+            conversation_persist_scheduled = False
+
+            def schedule_conversation_persist_once(trigger: str):
+                """终止信号出现后立即安排持久化；重复调用只会生效一次。"""
+                nonlocal conversation_persist_scheduled
+                if conversation_persist_scheduled:
+                    return
+                # 上游HTTP错误/空错误流不能作为一轮正常聊天写进conversations。
                 if is_error:
-                    error_body_parts.append(chunk)
-                    continue
-                
-                # 旁路解析：从字节流中提取assistant回复内容，用于后续记忆提取
-                text = chunk.decode("utf-8", errors="ignore")
-                line_buffer += text
-                while "\n" in line_buffer:
-                    line, line_buffer = line_buffer.split("\n", 1)
-                    line = line.strip()
-                    if line.startswith("data: ") and line != "data: [DONE]":
-                        try:
-                            data = json.loads(line[6:])
-                            
-                            if "usage" in data:
-                                stream_usage = data["usage"]
-                            
-                            delta = data.get("choices", [{}])[0].get("delta", {})
-                            content = delta.get("content", "")
-                            if content:
-                                full_response.append(content)
-                            
-                            # 收集reasoning_content（deepseek thinking mode）
-                            reasoning = delta.get("reasoning_content", "")
-                            if reasoning:
-                                full_reasoning.append(reasoning)
-                            
-                            # 累积tool_calls
-                            if "tool_calls" in delta:
-                                for tc in delta["tool_calls"]:
-                                    idx = tc.get("index", 0)
-                                    if idx not in accumulated_tool_calls:
-                                        accumulated_tool_calls[idx] = {
-                                            "index": idx,
-                                            "id": tc.get("id", ""),
-                                            "type": tc.get("type", "function"),
-                                            "function": {"name": "", "arguments": ""}
-                                        }
-                                    if tc.get("id"):
-                                        accumulated_tool_calls[idx]["id"] = tc["id"]
-                                    if "function" in tc:
-                                        fn = tc["function"]
-                                        if fn.get("name"):
-                                            accumulated_tool_calls[idx]["function"]["name"] = fn["name"]
-                                        if "arguments" in fn:
-                                            accumulated_tool_calls[idx]["function"]["arguments"] += fn["arguments"]
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            pass
+                    return
+                if not MEMORY_ENABLED or not (user_message or tool_messages or user_content is not None):
+                    return
+
+                conversation_persist_scheduled = True
+                assistant_msg_snapshot = "".join(full_response)
+                assistant_reasoning_snapshot = "".join(full_reasoning) if full_reasoning else None
+                assistant_tool_calls_snapshot = list(accumulated_tool_calls.values()) if accumulated_tool_calls else None
+                asyncio.create_task(
+                    process_memories_background(
+                        session_id,
+                        user_message,
+                        assistant_msg_snapshot,
+                        model,
+                        context_messages=original_messages,
+                        skip_conversation_log=skip_conversation_log,
+                        tool_messages=tool_messages,
+                        assistant_tool_calls=assistant_tool_calls_snapshot,
+                        assistant_reasoning=assistant_reasoning_snapshot,
+                        user_content=user_content,
+                    )
+                )
+                print(
+                    f"💾 conversation_persist_scheduled trigger={trigger} "
+                    f"assistant_chars={len(assistant_msg_snapshot)} skip={skip_conversation_log}",
+                    flush=True,
+                )
+
+            async def pump_upstream():
+                try:
+                    async for upstream_chunk in response.aiter_bytes():
+                        await stream_queue.put(("chunk", upstream_chunk))
+                except Exception as exc:
+                    await stream_queue.put(("error", exc))
+                finally:
+                    await stream_queue.put(("done", None))
+
+            pump_task = asyncio.create_task(pump_upstream())
+            try:
+                while True:
+                    try:
+                        event_type, payload = await asyncio.wait_for(
+                            stream_queue.get(),
+                            timeout=15.0,
+                        )
+                    except asyncio.TimeoutError:
+                        # 发送一个合法的 OpenAI-compatible 空 chunk。
+                        # 相比 SSE comment，这也能重置会在解析后计时的客户端 idle timeout。
+                        heartbeat = {
+                            "choices": [{
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": None,
+                            }]
+                        }
+                        yield ("data: " + json.dumps(heartbeat, ensure_ascii=False) + "\n\n").encode("utf-8")
+                        print(
+                            f"💓 SSE heartbeat: model={model} "
+                            f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                            flush=True,
+                        )
+                        continue
+
+                    if event_type == "error":
+                        print(
+                            f"❌ 上游流读取异常: model={model} "
+                            f"error_type={type(payload).__name__} "
+                            f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                            flush=True,
+                        )
+                        raise payload
+
+                    if event_type == "done":
+                        break
+
+                    chunk = payload
+                    if not first_chunk_seen:
+                        first_chunk_seen = True
+                        print(
+                            f"📦 SSE首包: model={model} "
+                            f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                            flush=True,
+                        )
+
+                    if is_error:
+                        error_body_parts.append(chunk)
+                        # 错误响应原样透传；不安排正常对话持久化。
+                        yield chunk
+                        continue
+
+                    # 先解析再透传。客户端收到 [DONE] 后可能立刻断开，
+                    # 因此终止信号必须在 yield 之前登记，并提前安排持久化。
+                    terminal_in_chunk = False
+                    text = chunk.decode("utf-8", errors="ignore")
+                    line_buffer += text
+                    while "\n" in line_buffer:
+                        line, line_buffer = line_buffer.split("\n", 1)
+                        line = line.strip()
+                        if line == "data: [DONE]":
+                            done_seen = True
+                            terminal_in_chunk = True
+                        elif line.startswith("data: "):
+                            try:
+                                data = json.loads(line[6:])
+
+                                if "usage" in data:
+                                    stream_usage = data["usage"]
+
+                                first_choice = data.get("choices", [{}])[0] if data.get("choices") else {}
+                                if first_choice.get("finish_reason"):
+                                    done_seen = True
+                                    terminal_in_chunk = True
+
+                                delta = first_choice.get("delta", {})
+                                content = delta.get("content", "")
+                                if content:
+                                    full_response.append(content)
+
+                                # 收集reasoning_content（deepseek thinking mode）
+                                reasoning = delta.get("reasoning_content", "")
+                                if reasoning:
+                                    full_reasoning.append(reasoning)
+
+                                # 累积tool_calls
+                                if "tool_calls" in delta:
+                                    for tc in delta["tool_calls"]:
+                                        idx = tc.get("index", 0)
+                                        if idx not in accumulated_tool_calls:
+                                            accumulated_tool_calls[idx] = {
+                                                "index": idx,
+                                                "id": tc.get("id", ""),
+                                                "type": tc.get("type", "function"),
+                                                "function": {"name": "", "arguments": ""}
+                                            }
+                                        if tc.get("id"):
+                                            accumulated_tool_calls[idx]["id"] = tc["id"]
+                                        if "function" in tc:
+                                            fn = tc["function"]
+                                            if fn.get("name"):
+                                                accumulated_tool_calls[idx]["function"]["name"] = fn["name"]
+                                            if "arguments" in fn:
+                                                accumulated_tool_calls[idx]["function"]["arguments"] += fn["arguments"]
+                            except (json.JSONDecodeError, KeyError, IndexError):
+                                pass
+
+                    if terminal_in_chunk:
+                        schedule_conversation_persist_once("terminal_before_yield")
+
+                    # 原始字节直接透传给客户端
+                    yield chunk
+            except asyncio.CancelledError:
+                print(
+                    f"⚠️ 下游流被取消: model={model} "
+                    f"first_chunk={first_chunk_seen} done_seen={done_seen} "
+                    f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                    flush=True,
+                )
+                raise
+            finally:
+                if not pump_task.done():
+                    pump_task.cancel()
+                    try:
+                        await pump_task
+                    except asyncio.CancelledError:
+                        pass
+
+            print(
+                f"✅ SSE结束: model={model} first_chunk={first_chunk_seen} "
+                f"done_seen={done_seen} assistant_chars={sum(len(x) for x in full_response)} "
+                f"elapsed_ms={int((time.monotonic() - stream_started) * 1000)}",
+                flush=True,
+            )
+
+            # 某些上游以 EOF 结束而没有显式 [DONE]/finish_reason；
+            # 正常读完整个 200 流后仍兜底安排一次持久化。
+            if not is_error:
+                schedule_conversation_persist_once("normal_stream_end")
     
     assistant_msg = "".join(full_response)
     if not is_error:
@@ -4760,13 +5181,9 @@ async def _stream_and_capture_impl(headers: dict, body: dict, session_id: str, u
     else:
         _log_usage_diag("Stream", None)
     
-    if MEMORY_ENABLED and (user_message or tool_messages):
-        asyncio.create_task(
-            process_memories_background(session_id, user_message, assistant_msg, model, 
-                                        context_messages=original_messages, skip_conversation_log=skip_conversation_log,
-                                        tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
-                                        assistant_reasoning=assistant_reasoning)
-        )
+    # 对话持久化已在终止信号出现时或正常流结束时提前安排；
+    # 这里保留幂等兜底，避免未来改动出现无终止信号的遗漏。
+    schedule_conversation_persist_once("post_stream_fallback")
 
 
 # ============================================================
@@ -4798,16 +5215,20 @@ async def export_memories():
 
     try:
         memories = await get_all_memories()
-        for mem in memories:
-            if mem.get("created_at"):
-                mem["created_at"] = str(mem["created_at"])
 
         payload = {
             "total": len(memories),
             "exported_at": str(__import__("datetime").datetime.now()),
+            "schema_version": 2,
+            "fields": [
+                "id", "content", "importance", "source_session", "created_at",
+                "last_accessed", "layer", "title", "is_active", "merged_from",
+                "event_date",
+            ],
             "memories": memories,
         }
-        body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        # datetime/date 等数据库类型统一序列化成字符串，避免完整字段导出时报错。
+        body = json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode("utf-8")
         export_filename = f"memories_export_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
         return Response(
@@ -4821,13 +5242,65 @@ async def export_memories():
         return {"error": str(e)}
 
 
+@app.get("/apple-touch-icon.png")
+@app.get("/favicon.ico")
+async def app_touch_icon():
+    """Use the owner's original uploaded image, falling back to the built-in icon."""
+    from app_icon import APPLE_TOUCH_ICON
+    icon = APPLE_TOUCH_ICON
+    if MEMORY_ENABLED:
+        try:
+            saved = await get_gateway_config("dashboard_home_icon_png", "")
+            if saved:
+                decoded = base64.b64decode(saved, validate=True)
+                if decoded.startswith(b"\x89PNG\r\n\x1a\n") and len(decoded) <= 400000:
+                    icon = decoded
+        except Exception as icon_error:
+            print(f"[app-icon] fallback error_type={type(icon_error).__name__}", flush=True)
+    return Response(content=icon, media_type="image/png",
+                    headers={"Cache-Control": "no-cache, must-revalidate"})
+
+
+@app.post("/api/dashboard/icon")
+async def api_upload_dashboard_icon(request: Request):
+    """Dashboard Access protected. Only square PNG files; never change chat memory."""
+    raw = await request.body()
+    if request.headers.get("content-type", "").split(";")[0].strip().lower() != "image/png":
+        raise HTTPException(status_code=415, detail="png_required")
+    if len(raw) < 33 or len(raw) > 400000 or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise HTTPException(status_code=400, detail="invalid_png_or_too_large")
+    if raw[12:16] != b"IHDR":
+        raise HTTPException(status_code=400, detail="invalid_png_header")
+    import struct
+    width, height = struct.unpack(">II", raw[16:24])
+    if width != height or width < 128 or width > 1024:
+        raise HTTPException(status_code=400, detail="square_png_128_to_1024_required")
+    if not MEMORY_ENABLED:
+        raise HTTPException(status_code=503, detail="memory_database_disabled")
+    await set_gateway_config("dashboard_home_icon_png", base64.b64encode(raw).decode("ascii"))
+    return {"status": "ok", "size": len(raw), "width": width, "height": height,
+            "note": "Remove then add the iPhone Home Screen shortcut again if iOS cached its old icon."}
+
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_page(request: Request):
     """Dashboard - 整合的记忆管理界面"""
     if not MEMORY_ENABLED:
         return HTMLResponse("<h3>记忆系统未启用（设置 MEMORY_ENABLED=true 开启）</h3>")
     
-    return templates.TemplateResponse(request, "dashboard.html")
+    # A new image creates a new URL, avoiding Safari's persistent touch-icon cache.
+    icon_version = "default"
+    try:
+        saved_icon = await get_gateway_config("dashboard_home_icon_png", "")
+        if saved_icon:
+            icon_version = hashlib.sha256(saved_icon.encode("ascii")).hexdigest()[:16]
+    except Exception as icon_error:
+        print(f"[app-icon] version_lookup_failed error_type={type(icon_error).__name__}", flush=True)
+    return templates.TemplateResponse(
+        request, "dashboard.html", {"icon_version": icon_version},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/push/status")
@@ -5102,6 +5575,129 @@ async def add_message_to_conversation(session_id: str, request: Request):
 
 
 # ============================================================
+# 历史摘要归档 API（只管理/检索，不默认注入聊天）
+# ============================================================
+
+@app.get("/api/historical-summaries")
+async def api_list_historical_summaries(session_id: str = "", limit: int = 100):
+    items = await list_historical_summaries(session_id=session_id, limit=limit)
+    out = []
+    for item in items:
+        row = dict(item)
+        if row.get("created_at"):
+            row["created_at"] = row["created_at"].isoformat()
+        out.append(row)
+    return {"items": out, "count": len(out), "chat_injection": False}
+
+
+@app.post("/api/historical-summaries")
+async def api_save_historical_summary(request: Request):
+    data = await request.json()
+    content = str(data.get("content") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content_required")
+    summary_id = await save_historical_summary(
+        content=content,
+        period_label=str(data.get("period_label") or "").strip(),
+        session_id=str(data.get("session_id") or get_active_session_id() or "").strip(),
+        source=str(data.get("source") or "manual_backup").strip(),
+    )
+    return {"status": "ok", "id": summary_id, "chat_injection": False}
+
+
+@app.delete("/api/historical-summaries/{summary_id}")
+async def api_delete_historical_summary(summary_id: int):
+    deleted = await delete_historical_summary(summary_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="historical_summary_not_found")
+    return {"status": "ok", "id": summary_id}
+
+
+# ============================================================
+# 显式摘要恢复（只有用户在 Dashboard 确认后才执行）
+# ============================================================
+
+@app.post("/api/summary-repair/preview")
+async def api_summary_repair_preview(request: Request):
+    from summary_repair import preview
+    body = await request.json()
+    sid = get_active_session_id()
+    if not sid or body.get("session_id") != sid:
+        raise HTTPException(status_code=400, detail="active_session_id_required")
+    return await preview(
+        sid, int(body["archive_id"]), int(body["start_round"]),
+        int(body.get("preserved_parts", 2)), CACHE_PARTITION_X
+    )
+
+
+@app.post("/api/summary-repair/execute")
+async def api_summary_repair_execute(request: Request):
+    from summary_repair import execute
+    body = await request.json()
+    sid = get_active_session_id()
+    if not sid or body.get("session_id") != sid:
+        raise HTTPException(status_code=400, detail="active_session_id_required")
+    return await execute(
+        sid, int(body["archive_id"]), int(body["start_round"]),
+        int(body.get("preserved_parts", 2)), CACHE_PARTITION_X,
+        str(body.get("preview_token") or ""),
+        str(body.get("confirmation") or ""), generate_summary,
+    )
+
+
+@app.post("/api/summary-repair/start")
+async def api_summary_repair_start(request: Request):
+    """Start a manually confirmed job and return immediately; poll /job/{id}."""
+    from summary_repair import CONFIRM, _source
+    from summary_repair_job import start
+    body = await request.json()
+    sid = get_active_session_id()
+    if not sid or body.get("session_id") != sid:
+        raise HTTPException(status_code=400, detail="active_session_id_required")
+    if str(body.get("confirmation") or "") != CONFIRM:
+        raise HTTPException(status_code=400, detail="confirmation_phrase_required")
+    archive_id = int(body["archive_id"])
+    start_round = int(body["start_round"])
+    preserved_parts = int(body.get("preserved_parts", 0))
+    # Validate snapshot and source before scheduling, so malformed requests do
+    # not enter the background coordinator.
+    source = await _source(sid, archive_id, start_round, preserved_parts, CACHE_PARTITION_X)
+    if str(body.get("preview_token") or "") != source["signature"]:
+        raise HTTPException(status_code=409, detail="preview_stale_refresh_before_execute")
+    return await start({
+        "session_id": sid, "archive_id": archive_id,
+        "start_round": start_round, "preserved_parts": preserved_parts,
+        "x": CACHE_PARTITION_X,
+        "preview_token": str(body["preview_token"]),
+        "confirmation": CONFIRM,
+    }, generate_summary)
+
+
+@app.get("/api/summary-repair/job/{job_id}")
+async def api_summary_repair_job(job_id: str):
+    from summary_repair_job import status
+    sid = get_active_session_id()
+    if not sid:
+        raise HTTPException(status_code=400, detail="active_session_id_required")
+    result = status(sid, job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="job_not_found_or_server_restarted")
+    return result
+
+
+@app.post("/api/summary-repair/rollback")
+async def api_summary_repair_rollback(request: Request):
+    from summary_repair import rollback
+    body = await request.json()
+    sid = get_active_session_id()
+    if not sid or body.get("session_id") != sid:
+        raise HTTPException(status_code=400, detail="active_session_id_required")
+    return await rollback(
+        sid, int(body["snapshot_id"]), str(body.get("confirmation") or "")
+    )
+
+
+# ============================================================
 # 管理 API
 # ============================================================
 
@@ -5367,8 +5963,12 @@ async def _run_experience_generation(operation: str, job_id: str, session_id: st
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not created:
-        return {"status": job["status"], "job_id": job_id,
-                "card_ids": list(job.get("result_card_ids") or [])}
+        return {
+            "status": job["status"],
+            "job_id": job_id,
+            "card_ids": list(job.get("result_card_ids") or []),
+            "error_message": str(job.get("error_message") or ""),
+        }
     try:
         if not MEMORY_API_BASE_URL or not MEMORY_API_KEY or not MEMORY_MODEL:
             raise ValueError("memory_config_missing")
@@ -5376,7 +5976,7 @@ async def _run_experience_generation(operation: str, job_id: str, session_id: st
                 "messages": [{"role": "user", "content": build_generation_prompt(messages, operation)}],
                 "temperature": 0.3, "top_p": 0.9, "stream": False}
         _apply_memory_thinking_option(body)
-        async with httpx.AsyncClient(timeout=240.0) as client:
+        async with _httpx_client_for_url(MEMORY_API_BASE_URL, 240.0) as client:
             response = await client.post(MEMORY_API_BASE_URL,
                 headers={"Authorization": f"Bearer {MEMORY_API_KEY}", "Content-Type": "application/json"},
                 json=body)
@@ -5401,8 +6001,23 @@ async def _run_experience_generation(operation: str, job_id: str, session_id: st
                     "[experience-generation] token_log_failed "
                     f"error_type={type(usage_exc).__name__}"
                 )
-        content = ((response_data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
-        cards = validate_generated_cards(_clean_experience_json(content), set(message_ids))
+        choice = (response_data.get("choices") or [{}])[0] or {}
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
+        parsed = _clean_experience_json(content)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("cards"), list) or not parsed.get("cards"):
+            print(
+                "[experience-generation] invalid_card_envelope "
+                f"operation={operation} finish_reason={str(choice.get('finish_reason') or '')[:60]} "
+                f"content_chars={len(content) if isinstance(content, str) else 0} "
+                f"parsed_type={type(parsed).__name__} "
+                f"parsed_keys={list(parsed.keys())[:12] if isinstance(parsed, dict) else []} "
+                f"cards_type={type(parsed.get('cards')).__name__ if isinstance(parsed, dict) else 'none'} "
+                f"cards_count={len(parsed.get('cards')) if isinstance(parsed, dict) and isinstance(parsed.get('cards'), list) else 'n/a'} "
+                f"reasoning_present={bool(message.get('reasoning_content') or message.get('reasoning'))}",
+                flush=True,
+            )
+        cards = validate_generated_cards(parsed, set(message_ids))
         card_ids = await complete_experience_generation_job(job_id, cards, MEMORY_MODEL)
         print(
             "[experience-generation] succeeded "
@@ -5416,14 +6031,17 @@ async def _run_experience_generation(operation: str, job_id: str, session_id: st
         )
         return {"status": "succeeded", "job_id": job_id, "card_ids": card_ids}
     except Exception as exc:
-        reason = type(exc).__name__
+        error_type = type(exc).__name__
+        error_detail = str(exc).strip()
+        reason = f"{error_type}: {error_detail}" if error_detail else error_type
         await fail_experience_generation_job(job_id, reason)
         print(
             "[experience-generation] failed "
             f"operation={operation} message_id_start={min(message_ids)} "
             f"message_id_end={max(message_ids)} message_count={len(message_ids)} "
             f"model={MEMORY_MODEL or 'not_configured'} "
-            f"elapsed_ms={int((time.monotonic() - started) * 1000)} error_type={reason}"
+            f"elapsed_ms={int((time.monotonic() - started) * 1000)} "
+            f"error_type={error_type} error_detail={error_detail[:160]}"
         )
         raise HTTPException(status_code=502, detail=reason) from exc
 
@@ -5457,6 +6075,20 @@ async def _experience_card_auto_tick() -> dict:
         result = await _run_experience_generation(
             "auto_generate", job_id, session_id, messages
         )
+        if result.get("status") == "failed":
+            # A deterministic auto job id means a previously failed job cannot
+            # genuinely retry: begin_experience_generation_job() will just
+            # return the same failed row. Advance this auto batch so the
+            # background poller does not hammer the same failure forever.
+            # Source messages remain in conversations and can still be
+            # regenerated manually with a fresh manual job id.
+            await finish_experience_auto_batch(session_id, until_id, True)
+            reason = str(result.get("error_message") or "previous_auto_job_failed")
+            print(
+                "[experience-auto] skipped_failed_job "
+                f"message_count={len(messages)} until_id={until_id} reason={reason}"
+            )
+            return {"status": "skipped", "reason": reason}
         if result.get("status") != "succeeded":
             raise RuntimeError("auto_generation_not_succeeded")
         await finish_experience_auto_batch(session_id, until_id, True)
@@ -5467,13 +6099,27 @@ async def _experience_card_auto_tick() -> dict:
         )
         return result
     except Exception as exc:
-        await finish_experience_auto_batch(session_id, until_id, False)
+        # The generation job itself records the original failure reason.
+        # Do not leave a deterministic failed auto job eligible forever:
+        # that would only re-read the same failed row every poll interval.
+        job = await get_experience_generation_job(job_id)
+        terminal_failed = bool(job and job.get("status") == "failed")
+        await finish_experience_auto_batch(session_id, until_id, terminal_failed)
+        original_reason = str(
+            (job or {}).get("error_message")
+            or getattr(exc, "detail", "")
+            or type(exc).__name__
+        )
         await _record_operational_failure_safe(
             "experience_cards",
-            f"exception_{type(exc).__name__}",
+            f"generation_{original_reason}",
         )
-        print(f"[experience-auto] failed error_type={type(exc).__name__}")
-        return {"status": "failed", "reason": type(exc).__name__}
+        print(
+            "[experience-auto] failed "
+            f"error_type={type(exc).__name__} reason={original_reason} "
+            f"auto_batch_advanced={terminal_failed}"
+        )
+        return {"status": "failed", "reason": original_reason}
 
 
 async def _experience_card_auto_loop():
@@ -5696,7 +6342,7 @@ async def consolidate_memories_for_date_range(start_date, end_date):
     memory_key = memory_config["api_key"]
     
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with _httpx_client_for_url(memory_url, 120.0) as client:
             # 最多重试2次（应对429限流）
             last_error = None
             for attempt in range(3):
@@ -6285,6 +6931,47 @@ async def api_partition_threads():
     return {"threads": threads, "active_session_id": active_sid}
 
 
+@app.get("/api/partition/summary-sections")
+async def api_get_summary_sections(session_id: str):
+    """Read a summary as individually editable dated diary sections."""
+    from summary_section_edit import read
+    if not session_id.strip():
+        raise HTTPException(status_code=400, detail="session_id_required")
+    return await read(session_id)
+
+
+@app.post("/api/partition/summary-sections/replace")
+async def api_replace_summary_section(request: Request):
+    """Atomic one-section edit with full pre-edit snapshot and stale-state guard."""
+    from summary_section_edit import replace
+    body = await request.json()
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id_required")
+    return await replace(
+        sid, body.get("part_index"), body.get("section_index"),
+        body.get("state_token"), body.get("original_text"),
+        body.get("replacement"), body.get("merge_next", False),
+        body.get("next_original_text"),
+    )
+
+
+@app.post("/api/partition/summary-sections/replace-range")
+async def api_replace_summary_date_range(request: Request):
+    """Atomic multi-section replacement, preserving nonselected text and cursor."""
+    from summary_section_edit import replace_range
+    body = await request.json()
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id_required")
+    return await replace_range(
+        sid, body.get("start_part"), body.get("start_section"),
+        body.get("end_part"), body.get("end_section"),
+        body.get("state_token"), body.get("original_text"),
+        body.get("replacement"),
+    )
+
+
 @app.put("/api/partition/summary")
 async def api_update_summary(request: Request):
     try:
@@ -6476,7 +7163,7 @@ async def get_models():
 
     try:
         if is_openrouter:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with _httpx_client_for_url("https://openrouter.ai/api/v1/models", 30) as client:
                 response = await client.get(
                     "https://openrouter.ai/api/v1/models",
                     headers={"Authorization": f"Bearer {API_KEY}"}
@@ -6489,7 +7176,7 @@ async def get_models():
                     return {"models": simplified, "total": len(simplified), "provider": "openrouter"}
 
         elif is_google:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with _httpx_client_for_url("https://generativelanguage.googleapis.com", 30) as client:
                 response = await client.get(
                     f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
                 )
@@ -6517,7 +7204,7 @@ async def get_models():
                     return {"error": f"Google API 返回 {response.status_code}", "models": [], "provider": "google"}
 
         elif is_openai:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with _httpx_client_for_url("https://api.openai.com/v1/models", 30) as client:
                 response = await client.get(
                     "https://api.openai.com/v1/models",
                     headers={"Authorization": f"Bearer {API_KEY}"}
@@ -6610,6 +7297,8 @@ async def get_settings():
             "CACHE_SUMMARY_MODEL":     db.get("CACHE_SUMMARY_MODEL") or str(CACHE_SUMMARY_MODEL),
             "SUMMARY_API_BASE_URL":    db.get("SUMMARY_API_BASE_URL") or str(SUMMARY_API_BASE_URL),
             "SUMMARY_API_KEY":         _mask_key(summary_key_raw),
+            "CACHE_SUMMARY_BUDGET_CHARS": int(db.get("CACHE_SUMMARY_BUDGET_CHARS") or CACHE_SUMMARY_BUDGET_CHARS),
+            "SUMMARY_KEEP_RECENT":        int(db.get("SUMMARY_KEEP_RECENT") or SUMMARY_KEEP_RECENT),
 
             # 向量搜索（开源版用 EMBEDDING_API_KEY + EMBEDDING_BASE_URL）
             "MEMORY_VECTOR_ENABLED":   _parse_bool(db.get("MEMORY_VECTOR_ENABLED"), _db_module.MEMORY_VECTOR_ENABLED),
@@ -6668,6 +7357,8 @@ async def save_settings(request: Request):
             "CACHE_SUMMARY_MODEL":   str,
             "SUMMARY_API_BASE_URL":  str,
             "SUMMARY_API_KEY":       str,
+            "CACHE_SUMMARY_BUDGET_CHARS": int,
+            "SUMMARY_KEEP_RECENT":      int,
             "FORCE_STREAM":          lambda v: _parse_bool(v),
             "REASONING_EFFORT":      str,
         }
