@@ -203,7 +203,7 @@ async def replace_range(session_id, start_part, start_section, end_part, end_sec
     async with pool.acquire() as conn:
         async with conn.transaction():
             current = await conn.fetchrow(
-                "SELECT summary, a_start_round FROM session_cache_state "
+                "SELECT summary, a_start_round, summary_checkpoint_user_id FROM session_cache_state "
                 "WHERE session_id=$1 FOR UPDATE", session_id)
             if not current:
                 raise HTTPException(404, "session_summary_not_found")
@@ -220,7 +220,9 @@ async def replace_range(session_id, start_part, start_section, end_part, end_sec
                 parts, start_part, start_section, end_part, end_section, original_text, replacement)
             snapshot = json.dumps({
                 "format": SNAPSHOT_FORMAT, "summary_parts": parts,
-                "a_start_round": cursor, "saved_at": datetime.now(timezone.utc).isoformat(),
+                "a_start_round": cursor,
+                "summary_checkpoint_user_id": current["summary_checkpoint_user_id"],
+                "saved_at": datetime.now(timezone.utc).isoformat(),
                 "reason": "manual_date_range_replace",
                 "first_heading": audit["first_heading"],
                 "last_heading": audit["last_heading"],
@@ -259,7 +261,7 @@ async def replace(session_id, part_index, section_index, expected_token, origina
     async with pool.acquire() as conn:
         async with conn.transaction():
             current = await conn.fetchrow(
-                "SELECT summary, a_start_round FROM session_cache_state "
+                "SELECT summary, a_start_round, summary_checkpoint_user_id FROM session_cache_state "
                 "WHERE session_id=$1 FOR UPDATE", session_id,
             )
             if not current:
@@ -327,6 +329,7 @@ async def replace(session_id, part_index, section_index, expected_token, origina
                 "format": SNAPSHOT_FORMAT,
                 "summary_parts": parts,
                 "a_start_round": cursor,
+                "summary_checkpoint_user_id": current["summary_checkpoint_user_id"],
                 "saved_at": datetime.now(timezone.utc).isoformat(),
                 "reason": "manual_date_section_edit",
                 "part_index": part_index,
