@@ -1744,50 +1744,18 @@ async def build_partitioned_messages(
     unresolved_legacy_boundary = False
     if checkpoint_user_id is not None:
         a_start_round = first_unsummarized_round(rounds, checkpoint_user_id)
-    elif a_start_round > total_rounds:
-        # 旧摘要没有逐条消息ID，绝不能猜一个旧轮次当作准确覆盖边界。
-        # 保留旧摘要和完整数据库历史，并在事务快照后为未来新消息建立ID边界。
-        # 无法核实的旧内容只保留原文/原始记录，不擅自重复生成摘要。
-        newest_persisted_user_id = last_user_message_id(
-            [msg for rnd in rounds for msg in rnd]
+    elif summary_parts and checkpoint_user_id is None and a_start_round > total_rounds:
+        # Legacy cursor shifted after deletions; no trustworthy message-ID anchor exists.
+        # Never silently mark historical messages as summarized or move the cursor.
+        # Keep the old summary untouched and expose the newest raw conversation
+        # for continuity while an explicit archive-based recovery is performed.
+        unresolved_legacy_boundary = True
+        a_start_round = max(0, total_rounds - X)
+        print(
+            f"⚠️ 旧摘要检查点未知：历史游标{loaded_a_start_round}已超出{total_rounds}轮；"
+            "停用自动摘要，保留旧摘要和原始聊天，等待可核实的恢复",
+            flush=True,
         )
-        if newest_persisted_user_id is not None:
-            from database import bootstrap_legacy_partition_checkpoint
-            bootstrapped = await bootstrap_legacy_partition_checkpoint(
-                session_id, loaded_summary_parts, loaded_a_start_round,
-                newest_persisted_user_id,
-            )
-            if bootstrapped:
-                checkpoint_user_id = newest_persisted_user_id
-                loaded_checkpoint_user_id = newest_persisted_user_id
-                a_start_round = first_unsummarized_round(rounds, checkpoint_user_id)
-                print(
-                    f"🧭 旧摘要边界无法验证：已快照，保留原摘要，"
-                    f"从消息ID {checkpoint_user_id}之后安全开始新摘要；"
-                    "历史未核实内容不自动覆盖",
-                    flush=True,
-                )
-            else:
-                # Concurrent editor/rotation may have changed the source state.
-                # Never write a guessed cursor. Reload before composing context.
-                state = await get_session_cache_state(session_id)
-                loaded_summary_parts = list(state["summary_parts"])
-                loaded_a_start_round = int(state["a_start_round"])
-                loaded_checkpoint_user_id = state.get("summary_checkpoint_user_id")
-                summary_parts = list(loaded_summary_parts)
-                checkpoint_user_id = loaded_checkpoint_user_id
-                a_start_round = (
-                    first_unsummarized_round(rounds, checkpoint_user_id)
-                    if checkpoint_user_id is not None
-                    else max(0, total_rounds - X)
-                )
-                unresolved_legacy_boundary = checkpoint_user_id is None
-                print("⚠️ 旧游标迁移冲突：刷新状态并保留聊天上下文", flush=True)
-        else:
-            a_start_round = max(0, total_rounds - X)
-            unresolved_legacy_boundary = True
-            print("⚠️ 旧游标无可用user ID：只保留近期聊天，不写推测摘要", flush=True)
-
     a_end_round = a_start_round + X
     a_round_groups = rounds[a_start_round : a_end_round]
     b_round_groups = rounds[a_end_round :]
