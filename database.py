@@ -2842,17 +2842,27 @@ async def get_all_gateway_config() -> dict:
 # 对话历史读取（分区缓存用）
 # ============================================================
 
-async def get_conversation_messages(session_id: str, limit: int = 100):
-    """按时间正序读取session的消息"""
+async def get_conversation_messages(session_id: str, limit: int | None = 100):
+    """按时间正序读取session的消息；完整摘要读取时limit=None。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT id, role, content, metadata, created_at
-            FROM conversations
-            WHERE session_id = $1
-            ORDER BY created_at ASC, id ASC
-            LIMIT $2
-        """, session_id, limit)
+        if limit is None:
+            rows = await conn.fetch("""
+                SELECT id, role, content, metadata, created_at
+                FROM conversations
+                WHERE session_id = $1
+                ORDER BY created_at ASC, id ASC
+            """, session_id)
+        else:
+            if int(limit) < 1:
+                raise ValueError("conversation_history_limit_must_be_positive")
+            rows = await conn.fetch("""
+                SELECT id, role, content, metadata, created_at
+                FROM conversations
+                WHERE session_id = $1
+                ORDER BY created_at ASC, id ASC
+                LIMIT $2
+            """, session_id, int(limit))
         return [dict(r) for r in rows]
 
 
