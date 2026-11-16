@@ -3101,11 +3101,16 @@ async def resume_legacy_partition_if_unchanged(
                 "VALUES($1,$2,$3,'repair_snapshot')",
                 session_id, "旧摘要恢复轮转前快照（覆盖范围待核实）", snapshot,
             )
+            # Align the positional cursor with the exact replay index as well.
+            # The old value is preserved in the snapshot for explicit rollback.
+            replay_cursor = int(resume_plan["first_replay_round_index"])
+            if replay_cursor < 0 or replay_cursor > int(resume_plan["history_rounds_at_migration"]):
+                raise ValueError("invalid_legacy_replay_cursor")
             changed = await conn.fetchval(
                 "UPDATE session_cache_state SET summary_checkpoint_user_id=$2, "
-                "updated_at=NOW() WHERE session_id=$1 "
+                "a_start_round=$3, updated_at=NOW() WHERE session_id=$1 "
                 "AND summary_checkpoint_user_id IS NULL RETURNING session_id",
-                session_id, checkpoint,
+                session_id, checkpoint, replay_cursor,
             )
             if changed is None:
                 raise RuntimeError("legacy_checkpoint_update_conflict")
