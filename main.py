@@ -1877,6 +1877,14 @@ async def build_partitioned_messages(
         result.append({"role": "user", "content": blocks})
         result.append({"role": "assistant", "content": "好的，我已了解之前的对话内容。"})
     
+    # 最近3轮仅用于聊天连续性，已处理过的内容不会再次参与摘要轮转。
+    # 当A区暂时为空时仍能承接上一轮原始对话。
+    if checkpoint_user_id is not None and a_start_round > 0:
+        recent_context = rounds[max(0, a_start_round - 3):a_start_round]
+        for context_round in recent_context:
+            for previous in _compact_historical_tool_round(context_round):
+                result.append(previous)
+
     # A区：剥离tool消息和tool_calls，只保留有文本的user/assistant（节省上下文）
     cleaned_a = []
     for msg in a_msgs:
