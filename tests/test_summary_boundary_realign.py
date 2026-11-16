@@ -156,6 +156,21 @@ class BoundaryRealignTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cm.exception.status_code, 409)
         self.assertEqual(self.conn.updates, 0)
 
+    async def test_changed_message_body_invalidates_preview(self):
+        token = (await self._preview())["state_token"]
+        self.conn.rows[0]["content"] = "edited after preview"
+        with self.assertRaises(HTTPException) as cm:
+            await self._confirm(token=token)
+        self.assertEqual(cm.exception.status_code, 409)
+        self.assertEqual(self.conn.snapshots, [])
+
+    async def test_changed_message_metadata_invalidates_preview(self):
+        token = (await self._preview())["state_token"]
+        self.conn.rows[0]["metadata"] = '{"changed":true}'
+        with self.assertRaises(HTTPException) as cm:
+            await self._confirm(token=token)
+        self.assertEqual(cm.exception.status_code, 409)
+
     async def test_stale_summary_token_blocks(self):
         token = (await self._preview())["state_token"]
         self.conn.state["summary"] = json.dumps(["new content"])
