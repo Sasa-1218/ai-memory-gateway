@@ -256,8 +256,22 @@ async def rollback(session_id, snapshot_id, confirmation):
             if not snap:
                 raise HTTPException(404, "repair_snapshot_not_found")
             data = json.loads(snap["content"])
-            if data.get("format") != "summary_repair_snapshot_v1":
+            if data.get("format") not in (
+                "summary_repair_snapshot_v1",
+                "legacy_checkpoint_bootstrap_v1",
+            ):
                 raise HTTPException(400, "snapshot_format_invalid")
+            if not isinstance(data.get("summary_parts"), list) or not all(
+                isinstance(part, str) for part in data["summary_parts"]
+            ):
+                raise HTTPException(409, "snapshot_summary_parts_invalid")
+            if type(data.get("a_start_round")) is not int or data["a_start_round"] < 0:
+                raise HTTPException(409, "snapshot_cursor_invalid")
+            restored_checkpoint = data.get("summary_checkpoint_user_id")
+            if restored_checkpoint is not None and (
+                type(restored_checkpoint) is not int or restored_checkpoint < 0
+            ):
+                raise HTTPException(409, "snapshot_checkpoint_invalid")
             current = await conn.fetchrow(
                 "SELECT summary, a_start_round, summary_checkpoint_user_id FROM session_cache_state "
                 "WHERE session_id=$1 FOR UPDATE", session_id
@@ -281,7 +295,7 @@ async def rollback(session_id, snapshot_id, confirmation):
                 "UPDATE session_cache_state SET summary=$2,a_start_round=$3,"
                 "summary_checkpoint_user_id=$4,updated_at=NOW() WHERE session_id=$1",
                 session_id, json.dumps(data["summary_parts"], ensure_ascii=False),
-                int(data["a_start_round"]), data.get("summary_checkpoint_user_id")
+                int(data["a_start_round"]), restored_checkpoint
             )
     return {"status": "rolled_back", "saved_current_as_snapshot_id": reciprocal["id"],
             "summary_parts": data["summary_parts"], "a_start_round": data["a_start_round"]}
