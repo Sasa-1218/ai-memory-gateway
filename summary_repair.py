@@ -53,6 +53,7 @@ async def _source(session_id, archive_id, start_round, preserved_parts, x):
     state = await get_session_cache_state(session_id)
     existing = state["summary_parts"]
     cursor = int(state["a_start_round"])
+    checkpoint_id = state.get("summary_checkpoint_user_id")
     if not existing or start_round < 0 or start_round > cursor:
         raise HTTPException(400, "invalid_rewind_start_round")
     if (cursor - start_round) % x:
@@ -98,7 +99,7 @@ async def _source(session_id, archive_id, start_round, preserved_parts, x):
             history_hash.update(b"\x00")
     signature = hashlib.sha256(json.dumps(
         [session_id, archive_id, start_round, preserved_parts, x,
-         _state_digest(existing, cursor), history_hash.hexdigest(),
+         _state_digest(existing, cursor), checkpoint_id, history_hash.hexdigest(),
          hashlib.sha256(archive["content"].encode("utf-8")).hexdigest()],
         ensure_ascii=False,
     ).encode("utf-8")).hexdigest()
@@ -107,6 +108,7 @@ async def _source(session_id, archive_id, start_round, preserved_parts, x):
         "archive_parts": archive_parts, "retained": retained,
         "blocks": blocks, "rounds": len(rounds), "signature": signature,
         "recovered_checkpoint_id": recovered_checkpoint_id,
+        "original_checkpoint_id": checkpoint_id,
     }
 
 
@@ -213,7 +215,11 @@ async def execute(session_id, archive_id, start_round, preserved_parts, x, token
                 old_parts = json.loads(current["summary"] or "[]")
             except ValueError:
                 old_parts = [current["summary"]]
-            if _state_digest(old_parts, current["a_start_round"]) != _state_digest(s["existing"], s["cursor"]):
+            if (
+                _state_digest(old_parts, current["a_start_round"])
+                != _state_digest(s["existing"], s["cursor"])
+                or current["summary_checkpoint_user_id"] != s["original_checkpoint_id"]
+            ):
                 raise HTTPException(409, "state_changed_during_generation_no_changes_applied")
             # Save full JSON snapshot (including cursor) transactionally before replacing state.
             snapshot = json.dumps({
