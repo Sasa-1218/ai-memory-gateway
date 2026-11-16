@@ -3048,6 +3048,70 @@ async def save_partition_summary_if_unchanged(
                 return created is not None
     return False
 
+async def resume_legacy_partition_if_unchanged(
+    session_id: str, expected_parts: list, expected_start: int,
+    expected_updated_at, resume_plan: dict,
+) -> bool:
+    """One-time audited legacy transition; leave all summary text unchanged.
+
+    Replay the last X stored rounds in the next normal rotation. A snapshot
+    preserves the old cursor and records unresolved older coverage for review.
+    A competing writer causes a no-op instead of a state overwrite.
+    """
+    import json
+    checkpoint = int(resume_plan["checkpoint_user_id"])
+    if checkpoint < 0:
+        raise ValueError("invalid_legacy_checkpoint")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT summary, a_start_round, summary_checkpoint_user_id, updated_at "
+                "FROM session_cache_state WHERE session_id=$1 FOR UPDATE",
+                session_id,
+            )
+            if not row:
+                return False
+            raw_summary = row["summary"] or ""
+            try:
+                current_parts = json.loads(raw_summary) if raw_summary else []
+                if not isinstance(current_parts, list):
+                    current_parts = [raw_summary]
+            except (TypeError, ValueError):
+                current_parts = [raw_summary]
+            if (
+                current_parts != expected_parts
+                or int(row["a_start_round"] or 0) != int(expected_start)
+                or row["summary_checkpoint_user_id"] is not None
+                or row["updated_at"] != expected_updated_at
+            ):
+                return False
+            snapshot = json.dumps({
+                "format": "summary_repair_snapshot_v1",
+                "reason": "legacy_resume_with_recent_overlap",
+                "summary_parts": current_parts,
+                "a_start_round": int(row["a_start_round"] or 0),
+                "summary_checkpoint_user_id": None,
+                "unverified_historical_coverage": True,
+                "resume_plan": resume_plan,
+            }, ensure_ascii=False)
+            await conn.execute(
+                "INSERT INTO historical_summaries "
+                "(session_id, period_label, content, source) "
+                "VALUES($1,$2,$3,'repair_snapshot')",
+                session_id, "旧摘要恢复轮转前快照（覆盖范围待核实）", snapshot,
+            )
+            changed = await conn.fetchval(
+                "UPDATE session_cache_state SET summary_checkpoint_user_id=$2, "
+                "updated_at=NOW() WHERE session_id=$1 "
+                "AND summary_checkpoint_user_id IS NULL RETURNING session_id",
+                session_id, checkpoint,
+            )
+            if changed is None:
+                raise RuntimeError("legacy_checkpoint_update_conflict")
+            return True
+
+
 async def save_historical_summary(
     content: str,
     period_label: str = "",
