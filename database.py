@@ -2978,33 +2978,57 @@ async def replace_manual_summary_if_unchanged(
 async def save_partition_summary_if_unchanged(
     session_id: str, old_parts: list, old_start: int,
     old_checkpoint_user_id, new_parts: list, new_start: int,
-    new_checkpoint_user_id: int,
+    new_checkpoint_user_id: int, expected_updated_at=None,
 ) -> bool:
-    """Atomically commit a summary only if no manual edit or parallel rotation intervened.
+    """CAS summary and watermark together; never overwrite a competing writer.
 
-    Never silently overwrite another writer's summary. A caller that loses this
-    race must reload fresh state on its next request.
+    Legacy rows can store an empty string or raw text rather than JSON. Compare
+    safely as text rather than casting legacy content to jsonb.
     """
     import json
     pool = await get_pool()
     old_json = json.dumps(old_parts, ensure_ascii=False)
+    raw_old = old_parts[0] if len(old_parts) == 1 else None
     new_json = json.dumps(new_parts, ensure_ascii=False)
     async with pool.acquire() as conn:
-        # Match JSON arrays semantically: existing rows may differ in whitespace.
-        changed = await conn.fetchval("""
-            UPDATE session_cache_state
-            SET summary=$5, a_start_round=$6,
-                summary_checkpoint_user_id=$7, updated_at=NOW()
-            WHERE session_id=$1
-              AND summary::jsonb=$2::jsonb
-              AND a_start_round=$3
-              AND summary_checkpoint_user_id IS NOT DISTINCT FROM $4
-            RETURNING session_id
-        """, session_id, old_json, int(old_start),
-            old_checkpoint_user_id, new_json, int(new_start),
-            int(new_checkpoint_user_id))
-    return changed is not None
-
+        async with conn.transaction():
+            changed = await conn.fetchval("""
+                UPDATE session_cache_state
+                SET summary=$5, a_start_round=$6,
+                    summary_checkpoint_user_id=$7, updated_at=NOW()
+                WHERE session_id=$1
+                  AND (
+                      summary=$2
+                      OR (COALESCE(summary, '')='' AND $2='[]')
+                      OR ($8::text IS NOT NULL AND summary=$8::text)
+                  )
+                  AND a_start_round=$3
+                  AND summary_checkpoint_user_id IS NOT DISTINCT FROM $4
+                  AND updated_at IS NOT DISTINCT FROM $9
+                RETURNING session_id
+            """, session_id, old_json, int(old_start),
+                old_checkpoint_user_id, new_json, int(new_start),
+                int(new_checkpoint_user_id), raw_old, expected_updated_at)
+            if changed is not None:
+                return True
+            # Some sessions have no cache row until their very first rotation.
+            # Insert only if the empty state we read was still genuinely absent.
+            if (
+                not old_parts and int(old_start) == 0
+                and old_checkpoint_user_id is None
+                and expected_updated_at is None
+            ):
+                created = await conn.fetchval("""
+                    INSERT INTO session_cache_state (
+                        session_id, summary, a_start_round,
+                        summary_checkpoint_user_id, updated_at
+                    ) VALUES ($1,$2,$3,$4,NOW())
+                    ON CONFLICT (session_id) DO NOTHING
+                    RETURNING session_id
+                """, session_id, new_json, int(new_start),
+                    int(new_checkpoint_user_id))
+                return created is not None
+    return False
 
 async def save_historical_summary(
     content: str,
