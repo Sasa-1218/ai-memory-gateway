@@ -2943,11 +2943,19 @@ async def replace_manual_summary_if_unchanged(
             if row is None:
                 if expected_parts or expected_start or expected_checkpoint_user_id is not None:
                     return False
+                has_history = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM conversations WHERE session_id=$1)",
+                    session_id,
+                )
+                starting_checkpoint = (
+                    0 if replacement_parts and not has_history else None
+                )
                 await conn.execute(
                     "INSERT INTO session_cache_state "
                     "(session_id, summary, a_start_round, summary_checkpoint_user_id, updated_at) "
-                    "VALUES($1,$2,0,NULL,NOW())",
+                    "VALUES($1,$2,0,$3,NOW())",
                     session_id, json.dumps(replacement_parts, ensure_ascii=False),
+                    starting_checkpoint,
                 )
                 return True
             try:
