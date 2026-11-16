@@ -198,7 +198,7 @@ async def execute(session_id, archive_id, start_round, preserved_parts, x, token
     async with pool.acquire() as conn:
         async with conn.transaction():
             current = await conn.fetchrow(
-                "SELECT summary, a_start_round FROM session_cache_state "
+                "SELECT summary, a_start_round, summary_checkpoint_user_id FROM session_cache_state "
                 "WHERE session_id=$1 FOR UPDATE", session_id
             )
             if not current:
@@ -214,6 +214,8 @@ async def execute(session_id, archive_id, start_round, preserved_parts, x, token
                 "format": "summary_repair_snapshot_v1",
                 "summary_parts": old_parts,
                 "a_start_round": s["cursor"],
+                "summary_checkpoint_user_id": current["summary_checkpoint_user_id"],
+                "summary_checkpoint_user_id": current["summary_checkpoint_user_id"],
                 "source_archive_id": archive_id,
                 "saved_at": datetime.now(timezone.utc).isoformat(),
             }, ensure_ascii=False)
@@ -223,8 +225,8 @@ async def execute(session_id, archive_id, start_round, preserved_parts, x, token
                 session_id, "摘要恢复前自动快照", snapshot
             )
             await conn.execute(
-                "UPDATE session_cache_state SET summary=$2, a_start_round=$3, updated_at=NOW() "
-                "WHERE session_id=$1",
+                "UPDATE session_cache_state SET summary=$2, a_start_round=$3, "
+                "summary_checkpoint_user_id=NULL, updated_at=NOW() WHERE session_id=$1",
                 session_id, json.dumps(next_parts, ensure_ascii=False), s["cursor"]
             )
     return {
@@ -251,7 +253,7 @@ async def rollback(session_id, snapshot_id, confirmation):
             if data.get("format") != "summary_repair_snapshot_v1":
                 raise HTTPException(400, "snapshot_format_invalid")
             current = await conn.fetchrow(
-                "SELECT summary, a_start_round FROM session_cache_state "
+                "SELECT summary, a_start_round, summary_checkpoint_user_id FROM session_cache_state "
                 "WHERE session_id=$1 FOR UPDATE", session_id
             )
             if not current:
@@ -261,6 +263,7 @@ async def rollback(session_id, snapshot_id, confirmation):
                 "format": "summary_repair_snapshot_v1",
                 "summary_parts": json.loads(current["summary"] or "[]"),
                 "a_start_round": current["a_start_round"],
+                "summary_checkpoint_user_id": current["summary_checkpoint_user_id"],
                 "saved_at": datetime.now(timezone.utc).isoformat(),
             }, ensure_ascii=False)
             reciprocal = await conn.fetchrow(
@@ -269,10 +272,10 @@ async def rollback(session_id, snapshot_id, confirmation):
                 session_id, "摘要回滚前自动快照", backup
             )
             await conn.execute(
-                "UPDATE session_cache_state SET summary=$2,a_start_round=$3,updated_at=NOW() "
-                "WHERE session_id=$1",
+                "UPDATE session_cache_state SET summary=$2,a_start_round=$3,"
+                "summary_checkpoint_user_id=$4,updated_at=NOW() WHERE session_id=$1",
                 session_id, json.dumps(data["summary_parts"], ensure_ascii=False),
-                int(data["a_start_round"])
+                int(data["a_start_round"]), data.get("summary_checkpoint_user_id")
             )
     return {"status": "rolled_back", "saved_current_as_snapshot_id": reciprocal["id"],
             "summary_parts": data["summary_parts"], "a_start_round": data["a_start_round"]}
