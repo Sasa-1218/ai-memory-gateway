@@ -130,7 +130,7 @@ class BoundaryRealignTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r["status"], "aligned")
         self.assertEqual(self.conn.state["summary"], original_summary)
         self.assertEqual(self.conn.rows, original_rows)
-        self.assertEqual(self.conn.state["summary_checkpoint_user_id"], 49)
+        self.assertEqual(self.conn.state["summary_checkpoint_user_id"], 40)
         self.assertEqual(self.conn.state["a_start_round"], 4)
         self.assertEqual(self.conn.snapshots[0]["a_start_round"], 999)
         self.assertEqual(self.conn.snapshots[0]["summary_checkpoint_user_id"], None)
@@ -204,7 +204,7 @@ class BoundaryRealignTests(unittest.IsolatedAsyncioTestCase):
         grouped = group_by_rounds([
             {"role": "user", "_history_id": r["id"]} for r in self.conn.rows
         ])
-        self.assertEqual(first_unsummarized_round(grouped, 49), 4)
+        self.assertEqual(first_unsummarized_round(grouped, 40), 4)
         # Eight new turns become B; the existing eight are the next A block.
         grouped.extend([[{"role": "user", "_history_id": i}] for i in range(130, 210, 10)])
         self.assertEqual(len(grouped) - (4+8), 8)
