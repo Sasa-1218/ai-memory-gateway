@@ -1736,7 +1736,8 @@ async def build_partitioned_messages(
     
     # Existing long-term summaries must still be injected after history deletion.
     # Only a short new session with no summary may use the basic-cache fallback.
-    if total_rounds < X and not summary_parts:
+    from partition_checkpoint import should_use_basic_cache
+    if should_use_basic_cache(total_rounds, X, bool(summary_parts)):
         if cache_diag is not None:
             cache_diag["mode"] = "basic"
         return await _build_basic_cached(history, base_prompt, user_message, current_user_msg, cache_diag=cache_diag)
@@ -1818,7 +1819,8 @@ async def build_partitioned_messages(
 
     rotation_count = 0
     rotation_failed = False
-    max_rotations = max(1, min(CACHE_MAX_ROTATIONS, 8))
+    from partition_checkpoint import capped_rotation_count
+    max_rotations = capped_rotation_count(CACHE_MAX_ROTATIONS)
     # Keep Rora chatting while an explicit repair runs, but do not let normal
     # X=8 rotation write to the same active summary during repair generation.
     from summary_repair_job import is_active as _summary_repair_active
