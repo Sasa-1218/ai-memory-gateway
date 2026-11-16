@@ -54,6 +54,7 @@ async def _source(session_id, archive_id, start_round, preserved_parts, x):
     existing = state["summary_parts"]
     cursor = int(state["a_start_round"])
     checkpoint_id = state.get("summary_checkpoint_user_id")
+    expected_updated_at = state.get("updated_at")
     if not existing or start_round < 0 or start_round > cursor:
         raise HTTPException(400, "invalid_rewind_start_round")
     if (cursor - start_round) % x:
@@ -99,7 +100,9 @@ async def _source(session_id, archive_id, start_round, preserved_parts, x):
             history_hash.update(b"\x00")
     signature = hashlib.sha256(json.dumps(
         [session_id, archive_id, start_round, preserved_parts, x,
-         _state_digest(existing, cursor), checkpoint_id, history_hash.hexdigest(),
+         _state_digest(existing, cursor), checkpoint_id,
+         expected_updated_at.isoformat() if expected_updated_at else None,
+         history_hash.hexdigest(),
          hashlib.sha256(archive["content"].encode("utf-8")).hexdigest()],
         ensure_ascii=False,
     ).encode("utf-8")).hexdigest()
@@ -109,6 +112,7 @@ async def _source(session_id, archive_id, start_round, preserved_parts, x):
         "blocks": blocks, "rounds": len(rounds), "signature": signature,
         "recovered_checkpoint_id": recovered_checkpoint_id,
         "original_checkpoint_id": checkpoint_id,
+        "original_updated_at": expected_updated_at,
     }
 
 
@@ -206,7 +210,7 @@ async def execute(session_id, archive_id, start_round, preserved_parts, x, token
     async with pool.acquire() as conn:
         async with conn.transaction():
             current = await conn.fetchrow(
-                "SELECT summary, a_start_round, summary_checkpoint_user_id FROM session_cache_state "
+                "SELECT summary, a_start_round, summary_checkpoint_user_id, updated_at FROM session_cache_state "
                 "WHERE session_id=$1 FOR UPDATE", session_id
             )
             if not current:
@@ -219,6 +223,7 @@ async def execute(session_id, archive_id, start_round, preserved_parts, x, token
                 _state_digest(old_parts, current["a_start_round"])
                 != _state_digest(s["existing"], s["cursor"])
                 or current["summary_checkpoint_user_id"] != s["original_checkpoint_id"]
+                or current["updated_at"] != s["original_updated_at"]
             ):
                 raise HTTPException(409, "state_changed_during_generation_no_changes_applied")
             # Save full JSON snapshot (including cursor) transactionally before replacing state.
