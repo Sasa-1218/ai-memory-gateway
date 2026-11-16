@@ -349,6 +349,12 @@ async def init_tables():
             );
         """)
 
+        # 不依赖历史行数的摘要边界；历史删除不会移动消息ID。
+        await conn.execute("""
+            ALTER TABLE session_cache_state
+            ADD COLUMN IF NOT EXISTS summary_checkpoint_user_id BIGINT;
+        """)
+
         # 历史摘要归档：保存用户手动备份/自动归档的旧摘要，不默认注入聊天
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS historical_summaries (
@@ -2841,10 +2847,10 @@ async def get_conversation_messages(session_id: str, limit: int = 100):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT role, content, metadata, created_at
+            SELECT id, role, content, metadata, created_at
             FROM conversations
             WHERE session_id = $1
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, id ASC
             LIMIT $2
         """, session_id, limit)
         return [dict(r) for r in rows]
@@ -2858,7 +2864,7 @@ async def get_session_cache_state(session_id: str) -> dict:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT summary, a_start_round, updated_at FROM session_cache_state WHERE session_id = $1",
+            "SELECT summary, a_start_round, updated_at, summary_checkpoint_user_id FROM session_cache_state WHERE session_id = $1",
             session_id
         )
         if row:
@@ -2877,22 +2883,33 @@ async def get_session_cache_state(session_id: str) -> dict:
             return {
                 'summary_parts': summary_parts,
                 'a_start_round': row['a_start_round'] or 0,
+                'summary_checkpoint_user_id': row['summary_checkpoint_user_id'],
                 'updated_at': row['updated_at'],
             }
-        return {'summary_parts': [], 'a_start_round': 0, 'updated_at': None}
+        return {'summary_parts': [], 'a_start_round': 0, 'summary_checkpoint_user_id': None, 'updated_at': None}
 
 
-async def save_session_cache_state(session_id: str, summary_parts: list, a_start_round: int):
+async def save_session_cache_state(
+    session_id: str, summary_parts: list, a_start_round: int,
+    checkpoint_user_id: int = None,
+):
     import json
     summary_json = json.dumps(summary_parts, ensure_ascii=False)
+    # Existing callers (manual edits, repair tools) retain a checkpoint,
+    # while clearing the summary also clears the checkpoint.
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO session_cache_state (session_id, summary, a_start_round, updated_at)
-            VALUES ($1, $2, $3, NOW())
-            ON CONFLICT (session_id) 
-            DO UPDATE SET summary = $2, a_start_round = $3, updated_at = NOW()
-        """, session_id, summary_json, a_start_round)
+            INSERT INTO session_cache_state
+                (session_id, summary, a_start_round, summary_checkpoint_user_id, updated_at)
+            VALUES ($1, $2, $3, $4, NOW())
+            ON CONFLICT (session_id)
+            DO UPDATE SET summary = $2, a_start_round = $3,
+                summary_checkpoint_user_id = CASE
+                    WHEN $5 THEN COALESCE($4, session_cache_state.summary_checkpoint_user_id)
+                    ELSE NULL END,
+                updated_at = NOW()
+        """, session_id, summary_json, a_start_round, checkpoint_user_id, bool(summary_parts))
 
 
 async def save_historical_summary(
