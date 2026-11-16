@@ -1741,6 +1741,7 @@ async def build_partitioned_messages(
     # 使用已总结的最后一条user消息ID作为稳定边界。
     from partition_checkpoint import first_unsummarized_round, last_user_message_id
     checkpoint_user_id = state.get("summary_checkpoint_user_id")
+    unresolved_legacy_boundary = False
     if checkpoint_user_id is not None:
         a_start_round = first_unsummarized_round(rounds, checkpoint_user_id)
     elif a_start_round > total_rounds:
@@ -1780,9 +1781,11 @@ async def build_partitioned_messages(
                     if checkpoint_user_id is not None
                     else max(0, total_rounds - X)
                 )
+                unresolved_legacy_boundary = checkpoint_user_id is None
                 print("⚠️ 旧游标迁移冲突：刷新状态并保留聊天上下文", flush=True)
         else:
             a_start_round = max(0, total_rounds - X)
+            unresolved_legacy_boundary = True
             print("⚠️ 旧游标无可用user ID：只保留近期聊天，不写推测摘要", flush=True)
 
     a_end_round = a_start_round + X
@@ -1803,6 +1806,8 @@ async def build_partitioned_messages(
     # Keep Rora chatting while an explicit repair runs, but do not let normal
     # X=8 rotation write to the same active summary during repair generation.
     from summary_repair_job import is_active as _summary_repair_active
+    if unresolved_legacy_boundary:
+        max_rotations = 0
     if _summary_repair_active(session_id):
         max_rotations = 0
         print(
