@@ -1710,6 +1710,10 @@ async def build_partitioned_messages(
     total_rounds = len(rounds)
     
     state = await get_session_cache_state(session_id)
+    # Keep the exact loaded state for an atomic compare-and-swap after generation.
+    loaded_summary_parts = list(state['summary_parts'])
+    loaded_a_start_round = int(state['a_start_round'])
+    loaded_checkpoint_user_id = state.get('summary_checkpoint_user_id')
     summary_parts = state['summary_parts']
     a_start_round = state['a_start_round']
     summary_total = sum(len(p) for p in summary_parts)
@@ -1823,9 +1827,11 @@ async def build_partitioned_messages(
 
     if rotation_count > 0:
         try:
-            await save_session_cache_state(
-                session_id, summary_parts, a_start_round,
-                checkpoint_user_id=checkpoint_user_id,
+            from database import save_partition_summary_if_unchanged
+            committed = await save_partition_summary_if_unchanged(
+                session_id, loaded_summary_parts, loaded_a_start_round,
+                loaded_checkpoint_user_id, summary_parts, a_start_round,
+                checkpoint_user_id,
             )
         except Exception as state_error:
             await _record_summary_failure_safe(
@@ -1833,7 +1839,26 @@ async def build_partitioned_messages(
                 f"state_write_{type(state_error).__name__}",
             )
             raise
-        if not rotation_failed:
+        if not committed:
+            # A manual edit/repair/other request won the race; discard generated
+            # text and use the latest saved summary without overwriting it.
+            print("⚠️ 摘要写入冲突：已放弃本次生成结果，保留最新数据库摘要", flush=True)
+            state = await get_session_cache_state(session_id)
+            summary_parts = list(state['summary_parts'])
+            checkpoint_user_id = state.get('summary_checkpoint_user_id')
+            a_start_round = (
+                first_unsummarized_round(rounds, checkpoint_user_id)
+                if checkpoint_user_id is not None
+                else min(int(state['a_start_round']), total_rounds)
+            )
+            a_end_round = a_start_round + X
+            a_round_groups = rounds[a_start_round:a_end_round]
+            b_round_groups = rounds[a_end_round:]
+            a_msgs = [msg for rnd in a_round_groups for msg in rnd]
+            b_msgs = [msg for rnd in b_round_groups for msg in rnd]
+            b_rounds_count = len(b_round_groups)
+            rotation_count = 0
+        if committed and not rotation_failed:
             await _record_summary_success_safe(session_id)
         summary_total = sum(len(p) for p in summary_parts)
         print(f"🔄 轮转完成(共{rotation_count}次): 摘要{len(summary_parts)}段/{summary_total}字, A区{len(a_msgs)}条, B区{len(b_msgs)}条")
