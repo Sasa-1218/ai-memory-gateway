@@ -7104,7 +7104,14 @@ async def api_create_thread(request: Request):
         if copy_from:
             source = await get_session_cache_state(copy_from)
             summary_parts = source.get('summary_parts', [])
-        await save_session_cache_state(new_id, summary_parts, 0)
+        # A brand-new thread has no already-summarized messages: ID=0 is a
+        # trustworthy starting watermark. Do not assume this for an existing
+        # conversation that merely lacks a partition-cache row.
+        existing_messages = await get_conversation_messages(new_id, limit=1)
+        new_thread_checkpoint = 0 if summary_parts and not existing_messages else None
+        await save_session_cache_state(
+            new_id, summary_parts, 0, checkpoint_user_id=new_thread_checkpoint,
+        )
         total_len = sum(len(p) for p in summary_parts)
         return {"status": "ok", "session_id": new_id, "summary_length": total_len}
     except Exception as e:
