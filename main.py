@@ -1738,24 +1738,22 @@ async def build_partitioned_messages(
             cache_diag["mode"] = "basic"
         return await _build_basic_cached(history, base_prompt, user_message, current_user_msg, cache_diag=cache_diag)
     
-    # 使用已总结的最后一条user消息ID作为稳定边界。
-    from partition_checkpoint import first_unsummarized_round, last_user_message_id
+    # 旧摘要没有可靠的消息ID时，即使数字游标仍在范围内也不能
+    # 证明历史删除没有改变索引。停止自动摘要并保留最近X轮原文。
+    from partition_checkpoint import (
+        first_unsummarized_round, last_user_message_id, resolve_partition_boundary,
+    )
     checkpoint_user_id = state.get("summary_checkpoint_user_id")
-    unresolved_legacy_boundary = False
-    if checkpoint_user_id is not None:
-        a_start_round = first_unsummarized_round(rounds, checkpoint_user_id)
-    elif summary_parts and checkpoint_user_id is None and a_start_round > total_rounds:
-        # Legacy cursor shifted after deletions; no trustworthy message-ID anchor exists.
-        # Never silently mark historical messages as summarized or move the cursor.
-        # Keep the old summary untouched and expose the newest raw conversation
-        # for continuity while an explicit archive-based recovery is performed.
-        unresolved_legacy_boundary = True
-        a_start_round = max(0, total_rounds - X)
+    a_start_round, unresolved_legacy_boundary = resolve_partition_boundary(
+        rounds, bool(summary_parts), a_start_round, checkpoint_user_id, X,
+    )
+    if unresolved_legacy_boundary:
         print(
-            f"⚠️ 旧摘要检查点未知：历史游标{loaded_a_start_round}已超出{total_rounds}轮；"
-            "停用自动摘要，保留旧摘要和原始聊天，等待可核实的恢复",
+            "⚠️ 旧摘要缺少可核实的消息ID边界：已暂停自动摘要，"
+            "历史摘要和原始记录原样保留；可通过明确的摘要恢复建立检查点",
             flush=True,
         )
+
     a_end_round = a_start_round + X
     a_round_groups = rounds[a_start_round : a_end_round]
     b_round_groups = rounds[a_end_round :]
