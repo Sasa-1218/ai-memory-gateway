@@ -2912,6 +2912,69 @@ async def save_session_cache_state(
         """, session_id, summary_json, a_start_round, checkpoint_user_id, bool(summary_parts))
 
 
+async def replace_manual_summary_if_unchanged(
+    session_id: str, expected_parts: list, expected_start: int,
+    expected_checkpoint_user_id, replacement_parts: list,
+) -> bool:
+    """Snapshot and replace a complete summary without losing concurrent writes.
+
+    A textual replacement preserves the old summary's coverage boundary. Clearing
+    the summary resets both the position cursor and stable ID checkpoint.
+    """
+    import json
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT summary, a_start_round, summary_checkpoint_user_id "
+                "FROM session_cache_state WHERE session_id=$1 FOR UPDATE",
+                session_id,
+            )
+            if row is None:
+                if expected_parts or expected_start or expected_checkpoint_user_id is not None:
+                    return False
+                await conn.execute(
+                    "INSERT INTO session_cache_state "
+                    "(session_id, summary, a_start_round, summary_checkpoint_user_id, updated_at) "
+                    "VALUES($1,$2,0,NULL,NOW())",
+                    session_id, json.dumps(replacement_parts, ensure_ascii=False),
+                )
+                return True
+            try:
+                previous_parts = json.loads(row["summary"] or "[]")
+                if isinstance(previous_parts, str):
+                    previous_parts = [previous_parts] if previous_parts else []
+            except (ValueError, TypeError):
+                previous_parts = [row["summary"]] if row["summary"] else []
+            if (
+                previous_parts != expected_parts
+                or int(row["a_start_round"] or 0) != int(expected_start)
+                or row["summary_checkpoint_user_id"] != expected_checkpoint_user_id
+            ):
+                return False
+            snapshot = json.dumps({
+                "format": "summary_repair_snapshot_v1",
+                "summary_parts": previous_parts,
+                "a_start_round": int(row["a_start_round"] or 0),
+                "summary_checkpoint_user_id": row["summary_checkpoint_user_id"],
+                "reason": "manual_whole_summary_replace",
+            }, ensure_ascii=False)
+            await conn.execute(
+                "INSERT INTO historical_summaries "
+                "(session_id, period_label, content, source) "
+                "VALUES($1,$2,$3,'repair_snapshot')",
+                session_id, "整体摘要替换前自动快照", snapshot,
+            )
+            await conn.execute(
+                "UPDATE session_cache_state SET summary=$2, a_start_round=$3, "
+                "summary_checkpoint_user_id=$4, updated_at=NOW() WHERE session_id=$1",
+                session_id, json.dumps(replacement_parts, ensure_ascii=False),
+                int(row["a_start_round"] or 0) if replacement_parts else 0,
+                row["summary_checkpoint_user_id"] if replacement_parts else None,
+            )
+            return True
+
+
 async def save_partition_summary_if_unchanged(
     session_id: str, old_parts: list, old_start: int,
     old_checkpoint_user_id, new_parts: list, new_start: int,
