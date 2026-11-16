@@ -37,6 +37,19 @@ class PartitionCheckpointTests(unittest.TestCase):
     def test_checkpoint_records_last_user_not_last_assistant(self):
         self.assertEqual(last_user_message_id(self.rounds[2] + self.rounds[3]), 15)
 
+    def test_randomized_deletions_preserve_id_boundary(self):
+        import random
+        rng = random.Random(1126)
+        for _ in range(2000):
+            user_ids = sorted(rng.sample(range(1, 5000), rng.randrange(0, 80)))
+            anchor = rng.randrange(0, 5001)
+            rounds = [round_for(i) for i in user_ids]
+            expected = next(
+                (index for index, message_id in enumerate(user_ids) if message_id > anchor),
+                len(user_ids),
+            )
+            self.assertEqual(first_unsummarized_round(rounds, anchor), expected)
+
     def test_no_persisted_user_id_cannot_advance(self):
         self.assertIsNone(last_user_message_id([{"role": "assistant", "content": "hi"}]))
 
