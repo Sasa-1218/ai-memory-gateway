@@ -1491,7 +1491,7 @@ def _compact_historical_tool_round(round_msgs: list) -> list:
     搜索/工具结果可能非常大；历史轮已经有最终assistant回答时，无需把原始工具载荷
     继续重复发送给上游。若一轮最后仍是tool，说明这是当前正在继续的工具流程，原样保留。
     """
-    cleaned = [{k: v for k, v in msg.items() if k != "created_at"} for msg in round_msgs]
+    cleaned = [{k: v for k, v in msg.items() if k not in ("created_at", "_history_id")} for msg in round_msgs]
     if cleaned and cleaned[-1].get("role") == "tool":
         return cleaned
 
@@ -1734,34 +1734,28 @@ async def build_partitioned_messages(
             cache_diag["mode"] = "basic"
         return await _build_basic_cached(history, base_prompt, user_message, current_user_msg, cache_diag=cache_diag)
     
-    # 历史消息被删除后，位置游标可能超出剩余逻辑轮。
-    # 用最近一个完整分区作为保守恢复起点；旧摘要全文保持原样。
-    # 新消息继续进入B区，积累X轮后照常总结A区，避免永久停写。
-    cursor_out_of_range = a_start_round > total_rounds
-    if cursor_out_of_range:
-        recovered_start = max(0, total_rounds - X)
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            # 只修改仍为旧值的游标，不覆盖摘要，避免和其他摘要写入竞争。
-            updated = await conn.fetchval(
-                "UPDATE session_cache_state SET a_start_round=$3, updated_at=NOW() "
-                "WHERE session_id=$1 AND a_start_round=$2 RETURNING a_start_round",
-                session_id, a_start_round, recovered_start,
-            )
-        if updated is not None:
-            print(
-                f"🛠️ 自动恢复分区游标: {a_start_round} → {recovered_start}; "
-                f"当前历史{total_rounds}轮，保留最近{total_rounds-recovered_start}轮，"
-                "后续每X轮正常摘要；旧摘要未改动",
-                flush=True,
-            )
-            a_start_round = recovered_start
-        else:
-            # 并发请求更新了状态，重新读取后使用最新值；不写入过期状态。
-            state = await get_session_cache_state(session_id)
-            summary_parts = state["summary_parts"]
-            a_start_round = min(int(state["a_start_round"]), total_rounds)
-            print("⚠️ 分区游标并发变化，使用刷新后的状态", flush=True)
+    # 使用已总结的最后一条user消息ID作为稳定边界。
+    checkpoint_user_id = state.get("summary_checkpoint_user_id")
+    if checkpoint_user_id is not None:
+        a_start_round = total_rounds
+        for index, rnd in enumerate(rounds):
+            if any(
+                m.get("role") == "user" and m.get("_history_id") is not None
+                and int(m["_history_id"]) > int(checkpoint_user_id)
+                for m in rnd
+            ):
+                a_start_round = index
+                break
+    elif a_start_round > total_rounds:
+        # 旧版未保存消息ID，不能准确还原旧摘要的覆盖范围。
+        previous_start = a_start_round
+        a_start_round = max(0, total_rounds - X)
+        print(
+            f"⚠️ 旧版摘要位置越界: {previous_start} > {total_rounds}; "
+            f"临时使用最近{total_rounds-a_start_round}轮；"
+            "新摘要成功后启用稳定ID边界",
+            flush=True,
+        )
 
     a_end_round = a_start_round + X
     a_round_groups = rounds[a_start_round : a_end_round]
@@ -1773,6 +1767,7 @@ async def build_partitioned_messages(
     # 保存本轮轮转前状态；摘要折叠失败时整轮回滚，避免游标前进但摘要没保存。
     original_summary_parts = list(summary_parts)
     original_a_start_round = a_start_round
+    original_checkpoint_user_id = checkpoint_user_id
 
     rotation_count = 0
     rotation_failed = False
@@ -1797,9 +1792,18 @@ async def build_partitioned_messages(
             print("⚠️ 摘要为空，停止轮转并保留当前A/B区与游标，等待后续重试")
             break
 
+        last_user_ids = [
+            int(m["_history_id"]) for rnd in a_round_groups for m in rnd
+            if m.get("role") == "user" and m.get("_history_id") is not None
+        ]
+        if not last_user_ids:
+            rotation_failed = True
+            print("⚠️ 摘要块缺少持久消息ID，停止轮转以免重复记录")
+            break
+        checkpoint_user_id = last_user_ids[-1]
         summary_parts.append(new_summary)
         rotation_count += 1
-        
+
         a_start_round += X
         a_end_round = a_start_round + X
         a_round_groups = rounds[a_start_round : a_end_round]
@@ -1813,6 +1817,7 @@ async def build_partitioned_messages(
         if folded_parts is None:
             summary_parts = original_summary_parts
             a_start_round = original_a_start_round
+            checkpoint_user_id = original_checkpoint_user_id
             rotation_count = 0
             rotation_failed = True
             a_end_round = a_start_round + X
@@ -1828,7 +1833,10 @@ async def build_partitioned_messages(
 
     if rotation_count > 0:
         try:
-            await save_session_cache_state(session_id, summary_parts, a_start_round)
+            await save_session_cache_state(
+                session_id, summary_parts, a_start_round,
+                checkpoint_user_id=checkpoint_user_id,
+            )
         except Exception as state_error:
             await _record_summary_failure_safe(
                 session_id,
@@ -1874,7 +1882,7 @@ async def build_partitioned_messages(
     for msg in a_msgs:
         if msg.get('role') == 'tool':
             continue
-        m = {k: v for k, v in msg.items() if k not in ('created_at', 'tool_calls')}
+        m = {k: v for k, v in msg.items() if k not in ('created_at', 'tool_calls', '_history_id')}
         if m.get('role') == 'assistant' and not (m.get('content') or '').strip():
             continue
         cleaned_a.append(m)
@@ -4671,6 +4679,7 @@ async def chat_completions(request: Request):
             for m in (db_history or []):
                 msg = db_row_to_message(m)
                 msg['created_at'] = m.get('created_at')  # 保留时间戳供分区时间窗口判断
+                msg['_history_id'] = m.get('id')  # 内部定位摘要边界，发送上游前剥离
                 db_msgs.append(msg)
         except Exception as e:
             print(f"[warning] 分区模式读取历史失败: {e}")
