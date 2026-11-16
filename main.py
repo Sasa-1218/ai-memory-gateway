@@ -1714,6 +1714,7 @@ async def build_partitioned_messages(
     loaded_summary_parts = list(state['summary_parts'])
     loaded_a_start_round = int(state['a_start_round'])
     loaded_checkpoint_user_id = state.get('summary_checkpoint_user_id')
+    loaded_updated_at = state.get('updated_at')
     summary_parts = state['summary_parts']
     a_start_round = state['a_start_round']
     summary_total = sum(len(p) for p in summary_parts)
@@ -1833,7 +1834,7 @@ async def build_partitioned_messages(
             committed = await save_partition_summary_if_unchanged(
                 session_id, loaded_summary_parts, loaded_a_start_round,
                 loaded_checkpoint_user_id, summary_parts, a_start_round,
-                checkpoint_user_id,
+                checkpoint_user_id, expected_updated_at=loaded_updated_at,
             )
         except Exception as state_error:
             await _record_summary_failure_safe(
