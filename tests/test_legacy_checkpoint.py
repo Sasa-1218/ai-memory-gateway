@@ -15,6 +15,22 @@ def round_for(i):
 
 class LegacyCheckpointTests(unittest.TestCase):
 
+    def test_deleted_leading_user_keeps_last_eight_usable(self):
+        orphan = [{"role": "assistant", "_history_id": 2}]
+        rounds = [orphan] + [round_for(i) for i in range(5, 69, 4)]
+        plan = plan_legacy_resume(rounds, 8)
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["leading_orphan_rounds"], 1)
+        self.assertEqual(plan["first_replay_round_index"], 9)
+        self.assertEqual(first_unsummarized_round(rounds, plan["checkpoint_user_id"]), 9)
+
+    def test_deleted_first_user_short_history(self):
+        orphan = [{"role": "assistant", "_history_id": 2}]
+        rounds = [orphan, round_for(5), round_for(9)]
+        plan = plan_legacy_resume(rounds, 8)
+        self.assertEqual(plan["checkpoint_user_id"], 0)
+        self.assertEqual(plan["first_replay_round_index"], 1)
+
     def test_legacy_resume_replays_recent_eight_and_then_rotates(self):
         rows = [round_for(i) for i in range(1, 65, 4)]
         plan = plan_legacy_resume(rows, 8)
