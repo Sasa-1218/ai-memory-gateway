@@ -27,8 +27,8 @@ def _token(session_id, state, rows):
         session_id, state["summary"], int(state["a_start_round"] or 0),
         state["summary_checkpoint_user_id"],
         state["updated_at"].isoformat() if state["updated_at"] else None,
-        [(int(row["id"]), row["role"], str(row["created_at"]))
-         for row in rows],
+        [(int(row["id"]), row["role"], str(row["created_at"]),
+          str(row["content"]), str(row["metadata"])) for row in rows],
     ]
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
