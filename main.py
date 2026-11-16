@@ -1752,58 +1752,14 @@ async def build_partitioned_messages(
         rounds, bool(summary_parts), a_start_round, checkpoint_user_id, X,
     )
     if unresolved_legacy_boundary:
-        # An old positional cursor cannot prove coverage after message deletions.
-        # Snapshot it, keep an overlap of X recent rounds for re-summarization,
-        # and resume normal rotation for new conversations. Never claim the
-        # older coverage is reconciled: it is flagged in the migration snapshot.
-        from partition_checkpoint import plan_legacy_resume
-        plan = plan_legacy_resume(rounds, X)
-        if plan is not None:
-            from database import resume_legacy_partition_if_unchanged
-            try:
-                resumed = await resume_legacy_partition_if_unchanged(
-                    session_id, loaded_summary_parts, loaded_a_start_round,
-                    loaded_updated_at, plan,
-                )
-            except Exception as legacy_error:
-                resumed = False
-                print(
-                    f"⚠️ 旧摘要安全续写失败({type(legacy_error).__name__})，"
-                    "保留旧数据，不写入猜测边界",
-                    flush=True,
-                )
-            if resumed:
-                # Reload after the transactional snapshot + checkpoint update.
-                state = await get_session_cache_state(session_id)
-                loaded_summary_parts = list(state["summary_parts"])
-                loaded_a_start_round = int(state["a_start_round"])
-                loaded_checkpoint_user_id = state["summary_checkpoint_user_id"]
-                loaded_updated_at = state["updated_at"]
-                summary_parts = list(loaded_summary_parts)
-                checkpoint_user_id = loaded_checkpoint_user_id
-                a_start_round = first_unsummarized_round(rounds, checkpoint_user_id)
-                unresolved_legacy_boundary = False
-                print(
-                    f"✅ 旧摘要保留并已建立续写边界："
-                    f"重读最近{plan['replayed_recent_rounds']}轮；"
-                    "更早摘要覆盖范围待核实，已有可回滚快照",
-                    flush=True,
-                )
-            else:
-                # Another writer may have completed the migration already.
-                state = await get_session_cache_state(session_id)
-                summary_parts = list(state["summary_parts"])
-                checkpoint_user_id = state.get("summary_checkpoint_user_id")
-                a_start_round, unresolved_legacy_boundary = resolve_partition_boundary(
-                    rounds, bool(summary_parts), state["a_start_round"],
-                    checkpoint_user_id, X,
-                )
-        if unresolved_legacy_boundary:
-            print(
-                "⚠️ 无可靠的历史消息ID顺序或迁移冲突："
-                "暂不改摘要，当前聊天照常提供原始上下文",
-                flush=True,
-            )
+        # The existing summary was confirmed complete up to the point where
+        # deletion disrupted the old positional cursor. Never guess a recent
+        # replay range or rewrite an already-summarized block. A confirmed
+        # message-ID anchor must be applied explicitly before auto rotation.
+        print(
+            "⚠️ 已保留现有摘要；等待确认最后已摘要消息的ID后恢复8轮轮转",
+            flush=True,
+        )
 
     a_end_round = a_start_round + X
     a_round_groups = rounds[a_start_round : a_end_round]
