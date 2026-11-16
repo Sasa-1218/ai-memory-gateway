@@ -2,6 +2,7 @@
 import unittest
 from partition_checkpoint import (
     first_unsummarized_round, last_user_message_id, resolve_partition_boundary,
+    plan_legacy_resume,
 )
 
 
@@ -13,6 +14,42 @@ def round_for(i):
 
 
 class LegacyCheckpointTests(unittest.TestCase):
+
+    def test_legacy_resume_replays_recent_eight_and_then_rotates(self):
+        rows = [round_for(i) for i in range(1, 65, 4)]
+        plan = plan_legacy_resume(rows, 8)
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["replayed_recent_rounds"], 8)
+        self.assertEqual(plan["checkpoint_user_id"], 29)
+        self.assertEqual(first_unsummarized_round(rows, plan["checkpoint_user_id"]), 8)
+        rows.extend(round_for(i) for i in range(65, 97, 4))
+        self.assertEqual(len(rows)-first_unsummarized_round(rows, 29), 16)
+
+    def test_legacy_resume_rejects_out_of_order_ids(self):
+        rows = [round_for(i) for i in [1, 10, 5, 20]]
+        self.assertIsNone(plan_legacy_resume(rows, 8))
+
+    def test_legacy_resume_rejects_missing_user_ids(self):
+        rows = [round_for(1), [{"role": "assistant", "_history_id": 2}]]
+        self.assertIsNone(plan_legacy_resume(rows, 8))
+
+    def test_legacy_resume_rejects_ambiguous_multiple_users(self):
+        rows = [[{"role":"user","_history_id":1},
+                 {"role":"user","_history_id":3}]]
+        self.assertIsNone(plan_legacy_resume(rows, 8))
+
+    def test_legacy_resume_no_history_returns_none(self):
+        self.assertIsNone(plan_legacy_resume([], 8))
+
+    def test_legacy_resume_with_short_history_starts_at_zero(self):
+        rows = [round_for(i) for i in [3, 7, 11]]
+        plan = plan_legacy_resume(rows, 8)
+        self.assertEqual(plan["checkpoint_user_id"], 0)
+        self.assertEqual(plan["replayed_recent_rounds"], 3)
+
+    def test_legacy_resume_invalid_partition_size(self):
+        with self.assertRaises(ValueError):
+            plan_legacy_resume([round_for(1)], 0)
 
     def test_legacy_summary_paused_even_if_numeric_cursor_is_in_range(self):
         rows = [round_for(i) for i in range(1, 65, 4)]
