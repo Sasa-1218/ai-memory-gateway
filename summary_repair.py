@@ -47,8 +47,8 @@ async def _source(session_id, archive_id, start_round, preserved_parts, x):
         if not archive or archive["session_id"] != session_id or archive["source"] != "auto_fold":
             raise HTTPException(404, "matching_auto_fold_archive_not_found")
         rows = await conn.fetch(
-            "SELECT role, content, metadata, created_at FROM conversations "
-            "WHERE session_id=$1 ORDER BY created_at ASC", session_id
+            "SELECT id, role, content, metadata, created_at FROM conversations "
+            "WHERE session_id=$1 ORDER BY created_at ASC, id ASC", session_id
         )
     state = await get_session_cache_state(session_id)
     existing = state["summary_parts"]
@@ -68,6 +68,7 @@ async def _source(session_id, archive_id, start_round, preserved_parts, x):
     for row in rows:
         m = db_row_to_message(dict(row))
         m["created_at"] = row["created_at"]
+        m["_history_id"] = row["id"]
         if m.get("role") == "tool":
             prior = messages[-1] if messages else None
             if not prior or not (prior.get("role") == "tool" or
@@ -77,6 +78,10 @@ async def _source(session_id, archive_id, start_round, preserved_parts, x):
     rounds = group_by_rounds(messages)
     if cursor > len(rounds):
         raise HTTPException(409, "cursor_exceeds_available_history")
+    from partition_checkpoint import last_user_message_id
+    recovered_checkpoint_id = last_user_message_id(
+        [m for rnd in rounds[:cursor] for m in rnd]
+    )
     blocks = []
     for start in range(start_round, cursor, x):
         chunk = rounds[start:start + x]
@@ -101,6 +106,7 @@ async def _source(session_id, archive_id, start_round, preserved_parts, x):
         "archive": dict(archive), "existing": existing, "cursor": cursor,
         "archive_parts": archive_parts, "retained": retained,
         "blocks": blocks, "rounds": len(rounds), "signature": signature,
+        "recovered_checkpoint_id": recovered_checkpoint_id,
     }
 
 
@@ -225,8 +231,9 @@ async def execute(session_id, archive_id, start_round, preserved_parts, x, token
             )
             await conn.execute(
                 "UPDATE session_cache_state SET summary=$2, a_start_round=$3, "
-                "summary_checkpoint_user_id=NULL, updated_at=NOW() WHERE session_id=$1",
-                session_id, json.dumps(next_parts, ensure_ascii=False), s["cursor"]
+                "summary_checkpoint_user_id=$4, updated_at=NOW() WHERE session_id=$1",
+                session_id, json.dumps(next_parts, ensure_ascii=False), s["cursor"],
+                s["recovered_checkpoint_id"]
             )
     return {
         "status": "recovered", "snapshot_id": snap["id"],
