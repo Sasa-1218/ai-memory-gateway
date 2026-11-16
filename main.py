@@ -6986,6 +6986,28 @@ async def delete_message(message_id: int):
 # 对话线管理 API（分区缓存）
 # ============================================================
 
+@app.get("/api/partition/boundary/candidates")
+async def api_partition_boundary_candidates(
+    session_id: str, before_id: int | None = None, limit: int = 80,
+):
+    """Read-only candidate user messages for a manually confirmed old cutoff."""
+    from summary_boundary_realign import preview
+    return await preview(session_id.strip(), before_id, limit)
+
+
+@app.post("/api/partition/boundary/confirm")
+async def api_partition_boundary_confirm(request: Request):
+    """Explicitly confirm first UNSUMMARIZED user message; atomic snapshot+CAS."""
+    from summary_boundary_realign import confirm
+    body = await request.json()
+    return await confirm(
+        str(body.get("session_id") or "").strip(),
+        body.get("first_unsummarized_user_id"),
+        body.get("state_token"),
+        body.get("confirmation"),
+    )
+
+
 @app.get("/api/partition/status")
 async def api_partition_status():
     active_sid = get_active_session_id()
