@@ -3006,54 +3006,6 @@ async def save_partition_summary_if_unchanged(
     return changed is not None
 
 
-async def bootstrap_legacy_partition_checkpoint(
-    session_id: str, expected_parts: list, expected_start: int,
-    checkpoint_user_id: int,
-) -> bool:
-    """Safely anchor future summaries when a legacy position cursor is invalid.
-
-    Capture the entire old state before updating only its checkpoint. No legacy
-    conversation or summary content is deleted or regenerated here.
-    """
-    import json
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            state = await conn.fetchrow(
-                "SELECT summary, a_start_round, summary_checkpoint_user_id "
-                "FROM session_cache_state WHERE session_id=$1 FOR UPDATE",
-                session_id,
-            )
-            if not state:
-                return False
-            if (
-                state["summary_checkpoint_user_id"] is not None
-                or int(state["a_start_round"]) != int(expected_start)
-                or json.loads(state["summary"] or "[]") != expected_parts
-            ):
-                return False
-            snapshot = json.dumps({
-                "format": "legacy_checkpoint_bootstrap_v1",
-                "summary_parts": expected_parts,
-                "a_start_round": expected_start,
-                "summary_checkpoint_user_id": None,
-                "new_checkpoint_user_id": int(checkpoint_user_id),
-                "reason": "legacy_cursor_invalid_preserve_existing_summary",
-            }, ensure_ascii=False)
-            await conn.execute(
-                "INSERT INTO historical_summaries"
-                "(session_id, period_label, content, source) "
-                "VALUES($1,$2,$3,'repair_snapshot')",
-                session_id, "旧游标迁移前快照", snapshot,
-            )
-            await conn.execute(
-                "UPDATE session_cache_state SET summary_checkpoint_user_id=$2, "
-                "updated_at=NOW() WHERE session_id=$1",
-                session_id, int(checkpoint_user_id),
-            )
-            return True
-
-
 async def save_historical_summary(
     content: str,
     period_label: str = "",
