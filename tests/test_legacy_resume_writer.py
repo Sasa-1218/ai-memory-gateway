@@ -33,6 +33,7 @@ class Conn:
         assert "UPDATE session_cache_state" in sql
         if self.row["summary_checkpoint_user_id"] is not None: return None
         self.row["summary_checkpoint_user_id"] = args[1]
+        self.row["a_start_round"] = args[2]
         self.row["updated_at"] = 2
         return args[0]
 
@@ -47,7 +48,9 @@ class LegacyResumeTests(unittest.IsolatedAsyncioTestCase):
         self.scope = writer()
         self.row = dict(summary=json.dumps(["old"]), a_start_round=2420,
                         summary_checkpoint_user_id=None, updated_at=1)
-        self.plan = dict(checkpoint_user_id=120, replayed_recent_rounds=8)
+        self.plan = dict(checkpoint_user_id=120, replayed_recent_rounds=8,
+                         first_replay_round_index=2408,
+                         history_rounds_at_migration=2416)
     async def run_writer(self, conn, plan=None):
         async def pool(): return Pool(conn)
         self.scope["get_pool"] = pool
@@ -57,7 +60,8 @@ class LegacyResumeTests(unittest.IsolatedAsyncioTestCase):
         c = Conn(dict(self.row))
         self.assertTrue(await self.run_writer(c))
         self.assertEqual(c.row["summary"], self.row["summary"])
-        self.assertEqual(c.row["a_start_round"], 2420)
+        self.assertEqual(c.row["a_start_round"], 2408)
+        self.assertEqual(c.snapshots[0]["a_start_round"], 2420)
         self.assertEqual(c.row["summary_checkpoint_user_id"], 120)
         self.assertEqual(c.snapshots[0]["summary_parts"], ["old"])
     async def test_repeated_resume_is_noop(self):
@@ -77,6 +81,12 @@ class LegacyResumeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.run_writer(c))
     async def test_empty_state_is_noop(self):
         self.assertFalse(await self.run_writer(Conn(None)))
+    async def test_invalid_replay_cursor_rejected(self):
+        c = Conn(dict(self.row))
+        with self.assertRaises(ValueError):
+            await self.run_writer(c, dict(self.plan, first_replay_round_index=3000))
+        self.assertEqual(c.row["a_start_round"], 2420)
+
     async def test_invalid_checkpoint_rejected(self):
         c = Conn(dict(self.row))
         with self.assertRaises(ValueError):
