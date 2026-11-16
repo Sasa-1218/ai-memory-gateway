@@ -738,6 +738,16 @@
                     </div>
                     <div id="thread-status" style="color: var(--text-muted);">加载中...</div>
                 </div>
+                <div class="card" id="legacy-summary-boundary-card">
+                    <h4 style="margin-bottom:8px;">旧摘要截止位置校准（仅在删聊天后摘要停止时使用）</h4>
+                    <p class="section-desc">原有摘要已经完整时，找到摘要结束后第一条尚未摘要的用户消息，建立准确的消息ID边界。查看候选消息只读；确认时自动保存旧状态快照，不重写旧摘要，也不删除聊天。</p>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;">
+                        <button type="button" class="btn btn-sm" id="legacy-boundary-read">读取候选消息</button>
+                        <button type="button" class="btn btn-primary btn-sm" id="legacy-boundary-confirm" hidden>确认选定截止位置并恢复轮转</button>
+                    </div>
+                    <p id="legacy-boundary-note" role="status" style="margin:8px 0;color:var(--text-muted);">尚未读取，未对数据进行修改。</p>
+                    <div id="legacy-boundary-candidates" style="max-height:360px;overflow-y:auto;"></div>
+                </div>
                 <div class="card">
                     <h4 style="margin-bottom: 12px;">新建对话线</h4>
                     <div style="display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap;">
@@ -1178,5 +1188,6 @@
     </div>
 
     <script src="/static/js/dashboard.js?v=3.22-date-range-editor"></script>
+    <script src="/static/js/legacy-boundary.js?v=1"></script>
 </body>
 </html>
