@@ -5401,13 +5401,10 @@ async def api_summary_health():
     total_rounds = len(rounds)
     legacy_cursor = int(state.get("a_start_round", 0))
     checkpoint_user_id = state.get("summary_checkpoint_user_id")
-    from partition_checkpoint import first_unsummarized_round
-    if checkpoint_user_id is not None:
-        a_start_round = first_unsummarized_round(rounds, checkpoint_user_id)
-    else:
-        a_start_round = legacy_cursor
-    boundary_unverified = bool(
-        state.get("summary_parts") and checkpoint_user_id is None
+    from partition_checkpoint import resolve_partition_boundary
+    a_start_round, boundary_unverified = resolve_partition_boundary(
+        rounds, bool(state.get("summary_parts")), legacy_cursor,
+        checkpoint_user_id, CACHE_PARTITION_X,
     )
     unprocessed_rounds = max(0, total_rounds - a_start_round)
     ready_rounds = (
@@ -5429,6 +5426,7 @@ async def api_summary_health():
         "summary_parts": len(state.get("summary_parts", [])),
         "summary_chars": sum(len(part) for part in state.get("summary_parts", [])),
         "a_start_round": a_start_round,
+        "stored_a_start_round": legacy_cursor,
         "summary_checkpoint_user_id": checkpoint_user_id,
         "boundary_unverified": boundary_unverified,
         "total_rounds": total_rounds,
