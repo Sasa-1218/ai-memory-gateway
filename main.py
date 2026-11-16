@@ -4700,7 +4700,7 @@ async def chat_completions(request: Request):
         
         # 从DB读取历史
         try:
-            db_history = await get_conversation_messages(session_id, limit=10000)
+            db_history = await get_conversation_messages(session_id, limit=None)
             db_msgs = []
             for m in (db_history or []):
                 msg = db_row_to_message(m)
@@ -5383,7 +5383,7 @@ async def api_summary_health():
         return {"enabled": False, "reason": "session_not_configured"}
     health = await get_summary_health_status(session_id)
     state = await get_session_cache_state(session_id)
-    history = await get_conversation_messages(session_id, limit=10000)
+    history = await get_conversation_messages(session_id, limit=None)
     messages = []
     for row in history:
         message = db_row_to_message(row)
