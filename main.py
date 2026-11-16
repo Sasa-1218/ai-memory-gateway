@@ -1735,17 +1735,10 @@ async def build_partitioned_messages(
         return await _build_basic_cached(history, base_prompt, user_message, current_user_msg, cache_diag=cache_diag)
     
     # 使用已总结的最后一条user消息ID作为稳定边界。
+    from partition_checkpoint import first_unsummarized_round, last_user_message_id
     checkpoint_user_id = state.get("summary_checkpoint_user_id")
     if checkpoint_user_id is not None:
-        a_start_round = total_rounds
-        for index, rnd in enumerate(rounds):
-            if any(
-                m.get("role") == "user" and m.get("_history_id") is not None
-                and int(m["_history_id"]) > int(checkpoint_user_id)
-                for m in rnd
-            ):
-                a_start_round = index
-                break
+        a_start_round = first_unsummarized_round(rounds, checkpoint_user_id)
     elif a_start_round > total_rounds:
         # 旧版未保存消息ID，不能准确还原旧摘要的覆盖范围。
         previous_start = a_start_round
@@ -1792,15 +1785,12 @@ async def build_partitioned_messages(
             print("⚠️ 摘要为空，停止轮转并保留当前A/B区与游标，等待后续重试")
             break
 
-        last_user_ids = [
-            int(m["_history_id"]) for rnd in a_round_groups for m in rnd
-            if m.get("role") == "user" and m.get("_history_id") is not None
-        ]
-        if not last_user_ids:
+        next_checkpoint_user_id = last_user_message_id(a_msgs)
+        if next_checkpoint_user_id is None:
             rotation_failed = True
             print("⚠️ 摘要块缺少持久消息ID，停止轮转以免重复记录")
             break
-        checkpoint_user_id = last_user_ids[-1]
+        checkpoint_user_id = next_checkpoint_user_id
         summary_parts.append(new_summary)
         rotation_count += 1
 
