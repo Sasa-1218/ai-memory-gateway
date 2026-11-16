@@ -54,6 +54,7 @@ class _Connection:
 
     async def fetchrow(self, sql, *args):
         if "historical_summaries" in sql:
+            self.snapshots.append(json.loads(args[2]))
             return {"id": len(self.snapshots)}
         return dict(self.state)
 
@@ -190,7 +191,7 @@ class BoundaryRealignTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(first_unsummarized_round(grouped, 49), 4)
         # Eight new turns become B; the existing eight are the next A block.
-        grouped.extend([{"role": "user", "_history_id": i} for i in range(130, 210, 10)] if False else [[{"role":"user","_history_id":i}] for i in range(130,210,10)])
+        grouped.extend([[{"role": "user", "_history_id": i}] for i in range(130, 210, 10)])
         self.assertEqual(len(grouped) - (4+8), 8)
 
 
