@@ -1604,7 +1604,7 @@ def _should_rotate(b_rounds_count: int, X: int, a_msgs: list) -> bool:
     
     return b_rounds_count >= X
 
-# 时间窗口模式下单次请求最大轮转次数（防止一口气压完所有历史）
+# 单次请求最大摘要轮转次数，时间窗口和轮次模式都受限（防止突发模型调用）
 CACHE_MAX_ROTATIONS = int(os.getenv("CACHE_MAX_ROTATIONS", "2"))
 
 
@@ -1816,7 +1816,7 @@ async def build_partitioned_messages(
 
     rotation_count = 0
     rotation_failed = False
-    max_rotations = CACHE_MAX_ROTATIONS if CACHE_PARTITION_TRIGGER == "time" else 999
+    max_rotations = max(1, min(CACHE_MAX_ROTATIONS, 8))
     # Keep Rora chatting while an explicit repair runs, but do not let normal
     # X=8 rotation write to the same active summary during repair generation.
     from summary_repair_job import is_active as _summary_repair_active
