@@ -5407,7 +5407,6 @@ async def api_summary_health():
         a_start_round = legacy_cursor
     boundary_unverified = bool(
         state.get("summary_parts") and checkpoint_user_id is None
-        and legacy_cursor > total_rounds
     )
     unprocessed_rounds = max(0, total_rounds - a_start_round)
     ready_rounds = (
