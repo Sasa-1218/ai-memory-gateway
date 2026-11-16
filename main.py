@@ -7065,7 +7065,13 @@ async def api_update_summary(request: Request):
         summary_parts = [summary] if isinstance(summary, str) and summary else summary if isinstance(summary, list) else []
         # 摘要清空时 a_start_round 也归零，否则历史会被跳过
         a_start = state.get('a_start_round', 0) if summary_parts else 0
-        await save_session_cache_state(sid, summary_parts, a_start)
+        from database import replace_manual_summary_if_unchanged
+        committed = await replace_manual_summary_if_unchanged(
+            sid, state.get('summary_parts', []), state.get('a_start_round', 0),
+            state.get('summary_checkpoint_user_id'), summary_parts,
+        )
+        if not committed:
+            return {"error": "summary_changed_since_open_refresh_editor"}
         total_len = sum(len(p) for p in summary_parts)
         return {"status": "ok", "summary_parts": len(summary_parts), "summary_length": total_len}
     except Exception as e:
