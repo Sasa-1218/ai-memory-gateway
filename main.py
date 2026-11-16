@@ -1734,10 +1734,25 @@ async def build_partitioned_messages(
             cache_diag["mode"] = "basic"
         return await _build_basic_cached(history, base_prompt, user_message, current_user_msg, cache_diag=cache_diag)
     
-    # 计算A/B区（按逻辑轮切片）
+    # A/B 使用位置游标。历史消息被逐条删除后，轮次可能小于旧游标：
+    # 旧实现会把近期对话全部切空，让模型只能看到摘要和当前消息。
+    # 先以有界近期历史恢复聊天；不猜测摘要实际覆盖边界、不写回游标，
+    # 并在本次请求暂停轮转。后续需单独核对/修复持久化游标。
+    cursor_out_of_range = a_start_round > total_rounds
     a_end_round = a_start_round + X
-    a_round_groups = rounds[a_start_round : a_end_round]
-    b_round_groups = rounds[a_end_round :]
+    if cursor_out_of_range:
+        fallback_count = min(total_rounds, max(X, 15))
+        a_round_groups = []
+        b_round_groups = rounds[-fallback_count:] if fallback_count else []
+        print(
+            f"⚠️ 分区游标越界: a_start_round={a_start_round}, "
+            f"total_rounds={total_rounds}; 临时注入最近{len(b_round_groups)}轮，"
+            "暂停自动轮转，不修改摘要或持久游标",
+            flush=True,
+        )
+    else:
+        a_round_groups = rounds[a_start_round : a_end_round]
+        b_round_groups = rounds[a_end_round :]
     a_msgs = [msg for rnd in a_round_groups for msg in rnd]
     b_msgs = [msg for rnd in b_round_groups for msg in rnd]
     b_rounds_count = len(b_round_groups)
@@ -1759,6 +1774,8 @@ async def build_partitioned_messages(
             f"session={_short_hash_text(session_id)}",
             flush=True,
         )
+    if cursor_out_of_range:
+        max_rotations = 0
     while _should_rotate(b_rounds_count, X, a_msgs) and rotation_count < max_rotations:
         trigger_info = f"B区{b_rounds_count}轮 >= X={X}" if CACHE_PARTITION_TRIGGER != "time" else f"A区首条消息超出{CACHE_PARTITION_WINDOW}分钟窗口"
         print(f"🔄 轮转尝试#{rotation_count + 1}: session={session_id}, {trigger_info}")
