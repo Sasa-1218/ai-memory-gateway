@@ -215,7 +215,6 @@ async def execute(session_id, archive_id, start_round, preserved_parts, x, token
                 "summary_parts": old_parts,
                 "a_start_round": s["cursor"],
                 "summary_checkpoint_user_id": current["summary_checkpoint_user_id"],
-                "summary_checkpoint_user_id": current["summary_checkpoint_user_id"],
                 "source_archive_id": archive_id,
                 "saved_at": datetime.now(timezone.utc).isoformat(),
             }, ensure_ascii=False)
