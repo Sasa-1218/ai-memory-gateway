@@ -87,3 +87,13 @@ def plan_legacy_resume(rounds, partition_size):
         "leading_orphan_rounds": user_rounds[0][0],
         "coverage_uncertain_before_user_id": user_ids[first_replay],
     }
+
+
+def should_use_basic_cache(total_rounds, partition_size, summary_exists):
+    """Never drop an existing summary just because history was deleted."""
+    return total_rounds < partition_size and not summary_exists
+
+
+def capped_rotation_count(configured_count):
+    """Bound per-request summary model calls in every trigger mode."""
+    return max(1, min(int(configured_count), 8))
