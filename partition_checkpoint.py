@@ -43,3 +43,39 @@ def resolve_partition_boundary(rounds, summary_exists, numeric_start, checkpoint
     if summary_exists:
         return max(0, len(rounds) - max(1, int(partition_size))), True
     return 0, False
+
+
+def plan_legacy_resume(rounds, partition_size):
+    """Overlap the final X persisted rounds rather than silently skip them.
+
+    The original summary remains untouched. A separate audit records that older
+    summary coverage cannot be proven from an old numeric cursor.
+    """
+    x = int(partition_size)
+    if x < 1:
+        raise ValueError("partition_size_must_be_positive")
+    if not rounds:
+        return None
+    user_ids = []
+    for round_messages in rounds:
+        ids = [
+            int(message["_history_id"])
+            for message in round_messages
+            if message.get("role") == "user" and message.get("_history_id") is not None
+        ]
+        if len(ids) != 1:
+            return None
+        user_ids.append(ids[0])
+    if any(left >= right for left, right in zip(user_ids, user_ids[1:])):
+        # Imported or reordered rows: ID comparison is not a safe boundary.
+        return None
+    first_replay = max(0, len(rounds) - x)
+    checkpoint = user_ids[first_replay - 1] if first_replay else 0
+    return {
+        "checkpoint_user_id": checkpoint,
+        "replayed_recent_rounds": len(rounds) - first_replay,
+        "first_replay_user_id": user_ids[first_replay],
+        "latest_user_id_at_migration": user_ids[-1],
+        "history_rounds_at_migration": len(rounds),
+        "coverage_uncertain_before_user_id": user_ids[first_replay],
+    }
