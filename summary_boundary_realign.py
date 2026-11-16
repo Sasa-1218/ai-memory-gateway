@@ -154,7 +154,16 @@ async def confirm(session_id, first_unsummarized_user_id, state_token, confirmat
                 raise HTTPException(409, "history_or_summary_changed_refresh_preview")
             rounds = _rounds(rows)
             cursor = _find_start(rounds, first_unsummarized_user_id)
-            checkpoint = first_unsummarized_user_id - 1
+            # Prefer the last real persisted user ID over a fabricated ID-1.
+            # Deleted earlier messages do not change the first eligible round.
+            prior_user_ids = [
+                int(message["_history_id"])
+                for completed_round in rounds[:cursor]
+                for message in completed_round
+                if message.get("role") == "user"
+                and message.get("_history_id") is not None
+            ]
+            checkpoint = prior_user_ids[-1] if prior_user_ids else 0
             snapshot = json.dumps({
                 "format": "summary_repair_snapshot_v1",
                 "reason": "confirmed_legacy_summary_boundary",
