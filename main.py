@@ -5389,6 +5389,7 @@ async def api_summary_health():
     for row in history:
         message = db_row_to_message(row)
         message["created_at"] = row.get("created_at")
+        message["_history_id"] = row.get("id")
         if message.get("role") == "tool":
             previous = messages[-1] if messages else None
             if not previous or not (
@@ -5397,14 +5398,27 @@ async def api_summary_health():
             ):
                 continue
         messages.append(message)
-    total_rounds = len(group_by_rounds(messages))
-    a_start_round = int(state.get("a_start_round", 0))
+    rounds = group_by_rounds(messages)
+    total_rounds = len(rounds)
+    legacy_cursor = int(state.get("a_start_round", 0))
+    checkpoint_user_id = state.get("summary_checkpoint_user_id")
+    from partition_checkpoint import first_unsummarized_round
+    if checkpoint_user_id is not None:
+        a_start_round = first_unsummarized_round(rounds, checkpoint_user_id)
+    else:
+        a_start_round = legacy_cursor
+    boundary_unverified = bool(
+        state.get("summary_parts") and checkpoint_user_id is None
+        and legacy_cursor > total_rounds
+    )
     unprocessed_rounds = max(0, total_rounds - a_start_round)
-    ready_rounds = max(0, unprocessed_rounds - CACHE_PARTITION_X)
+    ready_rounds = (
+        0 if boundary_unverified else max(0, unprocessed_rounds - CACHE_PARTITION_X)
+    )
     failures = int(health.get("consecutive_failures", 0) or 0)
     return {
         "enabled": True,
-        "status": "warning" if failures > 0 else "healthy",
+        "status": "warning" if failures > 0 or boundary_unverified else "healthy",
         "consecutive_failures": failures,
         "last_error_code": health.get("last_error_code") or "",
         "last_attempt_at": _format_dashboard_time(health.get("last_attempt_at")),
@@ -5417,6 +5431,8 @@ async def api_summary_health():
         "summary_parts": len(state.get("summary_parts", [])),
         "summary_chars": sum(len(part) for part in state.get("summary_parts", [])),
         "a_start_round": a_start_round,
+        "summary_checkpoint_user_id": checkpoint_user_id,
+        "boundary_unverified": boundary_unverified,
         "total_rounds": total_rounds,
         "unprocessed_rounds": unprocessed_rounds,
         "ready_rounds": ready_rounds,
