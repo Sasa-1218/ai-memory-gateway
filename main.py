@@ -1734,7 +1734,9 @@ async def build_partitioned_messages(
             "rotation_count": 0,
         })
     
-    if total_rounds < X:
+    # Existing long-term summaries must still be injected after history deletion.
+    # Only a short new session with no summary may use the basic-cache fallback.
+    if total_rounds < X and not summary_parts:
         if cache_diag is not None:
             cache_diag["mode"] = "basic"
         return await _build_basic_cached(history, base_prompt, user_message, current_user_msg, cache_diag=cache_diag)
