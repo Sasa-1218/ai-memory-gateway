@@ -6697,6 +6697,32 @@ async def api_revert_merge(memory_id: int):
         return {"error": str(e)}
 
 
+@app.post("/api/memories/batch-restore/preview")
+async def api_memories_bulk_restore_preview(request: Request):
+    """Preview archived fragment IDs and their merged-event associations."""
+    if not MEMORY_ENABLED:
+        raise HTTPException(status_code=503, detail="memory_system_disabled")
+    from memory_bulk_restore import preview
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="object_body_required")
+    return await preview(body.get("ids"))
+
+
+@app.post("/api/memories/batch-restore/confirm")
+async def api_memories_bulk_restore_confirm(request: Request):
+    """Explicit atomic restoration; no deletion or event mutation."""
+    if not MEMORY_ENABLED:
+        raise HTTPException(status_code=503, detail="memory_system_disabled")
+    from memory_bulk_restore import restore
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="object_body_required")
+    return await restore(
+        body.get("ids"), body.get("state_token"), body.get("confirmation"),
+    )
+
+
 @app.post("/api/memories/{memory_id}/restore")
 async def api_restore_memory(memory_id: int):
     """恢复已归档的记忆（将 is_active 设为 TRUE）"""
