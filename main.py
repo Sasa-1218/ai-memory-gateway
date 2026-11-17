@@ -6396,6 +6396,32 @@ async def consolidate_memories_for_date(event_date):
     return await consolidate_memories_for_date_range(event_date, event_date)
 
 
+def _validate_consolidation_events(events, allowed_fragment_ids):
+    """Refuse model output that references missing or unrelated memory fragments.
+
+    Only IDs explicitly merged into a successfully created event may be archived.
+    """
+    if not isinstance(events, list):
+        raise ValueError("consolidation_events_must_be_list")
+    eligible = set(allowed_fragment_ids)
+    validated = []
+    for event in events:
+        if not isinstance(event, dict):
+            raise ValueError("consolidation_event_must_be_object")
+        raw_ids = event.get("merged_ids", [])
+        if not isinstance(raw_ids, list):
+            raise ValueError("consolidation_ids_must_be_list")
+        if not raw_ids:
+            continue
+        if any(type(value) is not int or value not in eligible for value in raw_ids):
+            raise ValueError("consolidation_unknown_fragment_id")
+        ids = list(dict.fromkeys(raw_ids))
+        if not str(event.get("content") or "").strip():
+            raise ValueError("consolidation_event_content_missing")
+        validated.append({**event, "merged_ids": ids})
+    return validated
+
+
 async def consolidate_memories_for_date_range(start_date, end_date):
     """整理指定时间段的碎片记忆"""
     from datetime import date
@@ -6525,30 +6551,48 @@ async def consolidate_memories_for_date_range(start_date, end_date):
             else:
                 return {"status": "error", "error": "无法解析 AI 返回的 JSON", "raw": content}
             
-            # 创建事件记忆并停用碎片
+            # Only archive fragments actually covered by successfully saved events.
+            # An old implementation archived *every* fragment in the date range,
+            # including records the model never included in merged_ids.
+            validated = _validate_consolidation_events(
+                events, [f["id"] for f in fragments]
+            )
+            if not validated:
+                return {
+                    "status": "error",
+                    "error": "consolidation_generated_no_valid_events",
+                    "fragments_preserved": len(fragments),
+                }
             created_count = 0
-            for event in events:
-                merged_ids = event.get("merged_ids", [])
-                if merged_ids:
-                    await create_event_memory(
-                        title=event.get("title", ""),
-                        content=event.get("content", ""),
-                        importance=event.get("importance", 5),
-                        event_date=start_date,
-                        merged_from=merged_ids
-                    )
-                    created_count += 1
-            
-            # 停用所有已处理的碎片
-            all_fragment_ids = [f['id'] for f in fragments]
-            await deactivate_memories(all_fragment_ids)
-            
+            covered_ids = set()
+            for event in validated:
+                merged_ids = event["merged_ids"]
+                new_id = await create_event_memory(
+                    title=event.get("title", ""),
+                    content=event["content"],
+                    importance=event.get("importance", 5),
+                    event_date=start_date,
+                    merged_from=merged_ids,
+                )
+                if not new_id:
+                    # Leave the fragments active rather than hiding memory with
+                    # no corresponding persisted event.
+                    return {"status": "error", "error": "event_creation_failed",
+                            "events_created": created_count,
+                            "fragments_preserved": len(fragments)}
+                covered_ids.update(merged_ids)
+                created_count += 1
+
+            # Originals excluded by the model stay active/searchable.
+            await deactivate_memories(sorted(covered_ids))
             return {
                 "status": "ok",
                 "start_date": str(start_date),
                 "end_date": str(end_date),
                 "fragments_processed": len(fragments),
-                "events_created": created_count
+                "events_created": created_count,
+                "fragments_archived": len(covered_ids),
+                "fragments_preserved": len(fragments) - len(covered_ids),
             }
             
     except Exception as e:
