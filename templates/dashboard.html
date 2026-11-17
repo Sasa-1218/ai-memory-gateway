@@ -543,7 +543,22 @@
                     <button class="btn btn-primary" onclick="batchSave()">保存选中</button>
                     <button class="btn btn-secondary" onclick="openMergeModal()">合并选中</button>
                     <button class="btn btn-warning" onclick="batchDelete()">归档选中</button>
+                    <button class="btn btn-secondary" type="button" onclick="openBulkRestorePreview()">批量恢复选中</button>
                     <button class="btn btn-icon" onclick="clearSelection()" title="取消选择">✕</button>
+                </div>
+            </div>
+
+            <!-- 批量恢复归档碎片：仅预览不写入；确认后在事务内恢复 -->
+            <div id="bulkRestoreModal" class="modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="bulkRestoreTitle">
+                <div class="modal-content modal-wide">
+                    <h3 id="bulkRestoreTitle">批量恢复归档碎片</h3>
+                    <p class="section-desc">恢复原始碎片为 AI 可检索状态；已有合并事件继续保留，可能产生重复召回。已永久删除的碎片无法从此功能恢复。</p>
+                    <div id="bulkRestoreOverview" style="margin:12px 0;"></div>
+                    <div id="bulkRestoreItems" style="max-height:320px;overflow-y:auto;white-space:pre-wrap;"></div>
+                    <div class="modal-actions">
+                        <button class="btn btn-secondary" type="button" onclick="closeBulkRestoreModal()">取消</button>
+                        <button class="btn btn-primary" type="button" id="bulkRestoreSubmit" onclick="confirmBulkRestore()" disabled>确认批量恢复</button>
+                    </div>
                 </div>
             </div>
 
@@ -1189,5 +1204,6 @@
 
     <script src="/static/js/dashboard.js?v=3.22-date-range-editor"></script>
     <script src="/static/js/legacy-boundary.js?v=1"></script>
+    <script src="/static/js/memory-bulk-restore.js?v=1"></script>
 </body>
 </html>
