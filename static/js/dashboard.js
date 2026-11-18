@@ -3679,9 +3679,9 @@ const _SETTINGS_FIELDS = {
     str: ['API_BASE_URL', 'API_KEY', 'DEFAULT_MODEL', 'MEMORY_API_BASE_URL', 'MEMORY_API_KEY', 'MEMORY_MODEL', 'MEMORY_API_THINKING',
           'CACHE_SUMMARY_MODEL', 'SUMMARY_API_BASE_URL', 'SUMMARY_API_KEY', 'CACHE_PARTITION_TRIGGER', 'EMBEDDING_API_KEY', 'EMBEDDING_BASE_URL', 'EMBEDDING_MODEL', 'REASONING_EFFORT',
          'role_display_user', 'role_display_assistant'],
-    int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'CACHE_SUMMARY_BUDGET_CHARS', 'SUMMARY_KEEP_RECENT', 'EMBEDDING_DIM'],
+    int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'EXPERIENCE_RECALL_EVERY_ROUNDS', 'EXPERIENCE_RECALL_MAX_CARDS', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'CACHE_SUMMARY_BUDGET_CHARS', 'SUMMARY_KEEP_RECENT', 'EMBEDDING_DIM'],
     float: ['MIN_SCORE_THRESHOLD'],
-    bool: ['MEMORY_ENABLED', 'CACHE_PARTITION_ENABLED', 'MEMORY_VECTOR_ENABLED', 'FORCE_STREAM'],
+    bool: ['MEMORY_ENABLED', 'EXPERIENCE_RECALL_ENABLED', 'CACHE_PARTITION_ENABLED', 'MEMORY_VECTOR_ENABLED', 'FORCE_STREAM'],
     range: ['MEMORY_HW_KEYWORD', 'MEMORY_HW_SEMANTIC', 'MEMORY_HW_IMPORTANCE',
             'MEMORY_HW_RECENCY', 'MEMORY_SEMANTIC_THRESHOLD'],
     text: ['systemPrompt'],
@@ -3693,6 +3693,33 @@ const _MODEL_COMBOS = ['DEFAULT_MODEL', 'MEMORY_MODEL', 'CACHE_SUMMARY_MODEL'];
 function _togglePartitionWindow(trigger) {
     const el = document.getElementById('field-CACHE_PARTITION_WINDOW');
     if (el) el.style.display = trigger === 'time' ? '' : 'none';
+}
+
+async function previewExperienceRecall() {
+    const query = document.getElementById('experienceRecallTestQuery')?.value.trim();
+    const output = document.getElementById('experienceRecallTestResult');
+    if (!output) return;
+    if (!query) { output.textContent = '先输入一个具体线索。'; return; }
+    output.textContent = '正在只读查询已批准的经历卡…';
+    try {
+        const response = await fetch('/api/experience-cards/recall-preview', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({query}),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'HTTP ' + response.status);
+        if (!data.matches) {
+            output.textContent = '没有匹配的已批准、AI可见经历卡。检查卡片的标题或「关键线索」是否包含这段准确文字。';
+            return;
+        }
+        output.textContent = '匹配到 ' + data.matches + ' 张（预览最多显示2张）：\n' +
+            data.cards.map(card => '· ' + card.title + '；命中：' +
+                card.matching_cues.join('、')).join('\n') +
+            '\n预览不会修改冷却状态；正式聊天仍受设置开关与轮次间隔限制。';
+    } catch (error) {
+        output.textContent = '预览失败：' + error.message;
+    }
 }
 
 async function loadSettings() {
