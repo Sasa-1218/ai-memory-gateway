@@ -5,7 +5,7 @@ is conservative: close source overlap OR identical normalized text.
 """
 
 import re
-from typing import Iterable
+from collections.abc import Iterable, Mapping
 
 
 def _source_ids(item):
@@ -23,7 +23,7 @@ def _duplicate(a, b):
     if _normal_text(a['text']) == _normal_text(b['text']):
         return True
     if a['session_id'] and a['session_id'] == b['session_id']:
-        left, right = a['source_ids'], b['source_ids']
+        left, right = set(a['source_message_ids']), set(b['source_message_ids'])
         if left and right and len(left & right) / len(left | right) >= 0.7:
             return True
     return False
@@ -44,7 +44,7 @@ def select_recall_items(memories: Iterable[dict], cards: Iterable[dict], *,
     used = 0
     for kind, records in (('experience', cards), ('memory', memories)):
         for item in records:
-            if not isinstance(item, dict):
+            if not isinstance(item, Mapping):
                 continue
             if kind == 'experience' and (item.get('review_status') != 'approved' or item.get('ai_visible') is not True):
                 continue
@@ -57,7 +57,7 @@ def select_recall_items(memories: Iterable[dict], cards: Iterable[dict], *,
                 'kind': kind, 'text': content.strip(),
                 'id': item.get('id'),
                 'session_id': str(item.get('source_session_id') or item.get('source_session') or ''),
-                'source_ids': _source_ids(item),
+                'source_message_ids': sorted(_source_ids(item)),
             }
             if any(_duplicate(normalized, old) for old in selected):
                 continue
