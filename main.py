@@ -5987,6 +5987,20 @@ async def api_list_experience_cards(status: str = None, limit: int = 500):
     return {"cards": cards, "total": len(cards), "retrieval_enabled": False}
 
 
+@app.post("/api/experience-cards/bulk-review")
+async def api_bulk_review_experience_cards(request: Request):
+    """Approve or archive only explicitly selected, still-pending experiences."""
+    from database import bulk_review_experience_cards
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid_body")
+    try:
+        result = await bulk_review_experience_cards(body.get("card_ids"), body.get("operation"))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "ok", **result}
+
+
 @app.get("/api/experience-cards/{card_id}")
 async def api_get_experience_card(card_id: int):
     card = await get_experience_card(card_id)
