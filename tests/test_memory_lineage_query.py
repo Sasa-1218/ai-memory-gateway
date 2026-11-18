@@ -34,12 +34,14 @@ class LineageQueryTests(unittest.IsolatedAsyncioTestCase):
         async def fetch(ids): return [rows[i] for i in ids]
         result = await inspect_memory_lineage(3,fetch)
         self.assertEqual(result['source_session'], '')
+        self.assertFalse(result['lineage_complete'])
 
     async def test_cycle_finishes(self):
         rows={1:{'id':1,'merged_from':[2]},2:{'id':2,'merged_from':[1]}}
         async def fetch(ids): return [rows[i] for i in ids]
         result = await inspect_memory_lineage(1,fetch)
         self.assertEqual(result['source_memory_ids'],[1,2])
+        self.assertFalse(result['lineage_complete'])
 
     async def test_node_budget_marks_truncated(self):
         rows={1:{'id':1,'merged_from':[2,3]},2:{'id':2},3:{'id':3}}
