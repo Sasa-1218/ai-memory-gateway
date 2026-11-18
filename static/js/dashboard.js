@@ -973,6 +973,19 @@ function canBulkReviewExperience(card) {
         !card.ai_visible && !card.supersedes_card_id;
 }
 
+async function changeExperienceVisibility() {
+    const status = document.getElementById('experienceCardStatus');
+    // Visibility is an independent filter across all review statuses.
+    if (status && status.value) {
+        status.value = '';
+        resetExperienceCardFilters();
+        await loadExperienceCards();
+    } else {
+        resetExperienceCardFilters();
+        renderExperienceCards();
+    }
+}
+
 function clearExperienceSelection() {
     experienceSelectedIds.clear();
     renderExperienceCards();
