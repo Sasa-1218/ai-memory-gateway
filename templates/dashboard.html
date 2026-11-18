@@ -301,7 +301,7 @@
 
                 <div class="card toolbar-card">
                     <div class="toolbar" style="flex-wrap:wrap;">
-                        <select id="experienceCardStatus" class="select-input" onchange="loadExperienceCards()">
+                        <select id="experienceCardStatus" class="select-input" onchange="resetExperienceCardFilters();loadExperienceCards()">
                             <option value="pending">待检查</option>
                             <option value="approved">AI 可见</option>
                             <option value="archived">仅归档</option>
@@ -309,15 +309,29 @@
                             <option value="deleted">回收站</option>
                             <option value="">全部</option>
                         </select>
-                        <input id="experienceCardSearch" class="search-input" placeholder="搜索标题或事件内容" oninput="renderExperienceCards()">
+                        <select id="experienceCardVisibility" class="select-input" aria-label="AI可见性筛选" onchange="resetExperienceCardFilters();renderExperienceCards()">
+                            <option value="all">全部可见性</option>
+                            <option value="visible">仅 AI 可见</option>
+                            <option value="hidden">仅 AI 不可见</option>
+                        </select>
+                        <input id="experienceCardSearch" class="search-input" placeholder="搜索标题、正文或线索" oninput="resetExperienceCardFilters();renderExperienceCards()">
                         <button class="btn btn-secondary" onclick="loadExperienceCards()">刷新</button>
                         <span id="experienceCardStats" style="color:var(--text-muted); font-size:13px;"></span>
                     </div>
                 </div>
 
+                <div class="card experience-bulk-bar">
+                    <label class="checkbox-label"><input type="checkbox" id="experienceSelectPage" onchange="selectExperiencePage(this.checked)">选中本页可批量审核的待检查卡</label>
+                    <span id="experienceSelectedCount" class="experience-muted">已选0张</span>
+                    <button class="btn btn-primary btn-sm" type="button" id="experienceBulkApprove" onclick="bulkReviewExperiences('approve')" disabled>批准所选 → AI可见</button>
+                    <button class="btn btn-secondary btn-sm" type="button" id="experienceBulkArchive" onclick="bulkReviewExperiences('archive')" disabled>所选仅归档</button>
+                    <button class="btn btn-secondary btn-sm" type="button" onclick="clearExperienceSelection()">清空选择</button>
+                </div>
+                <div id="experienceCardPagination" class="experience-pagination" aria-label="经历卡分页"></div>
                 <div id="experienceCardMsg" class="msg-container"></div>
                 <div id="experienceReviewJobStatus" style="display:none; margin-bottom:12px; color:var(--text-muted); font-size:13px;"></div>
                 <div id="experienceCardList" style="display:grid; gap:12px;"></div>
+                <div id="experienceCardPaginationBottom" class="experience-pagination" aria-label="经历卡分页（底部）"></div>
             </section>
 
             <!-- Memory Inspector：只读调试，不进入正式聊天召回 -->
@@ -1202,7 +1216,7 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.22-date-range-editor"></script>
+    <script src="/static/js/dashboard.js?v=3.30-experience-pages"></script>
     <script src="/static/js/legacy-boundary.js?v=1"></script>
     <script src="/static/js/memory-bulk-restore.js?v=1"></script>
 </body>
