@@ -47,3 +47,11 @@
 - No historical writes or schema migration; data records are not mutated. Text is never truncated inside this selector. This budget counts characters, not model tokens, and does not yet include wrappers or dates.
 - Added `tests/test_recall_selection.py` (10 targeted tests). Executed locally in an isolated Python 3.13 runtime: `python -m unittest discover -s tests -p 'test_*.py' -v` -> 10 passed; `python -m compileall -q recall_selection.py tests` -> passed. This local test environment had ONLY this module and its tests, not the whole gateway.
 - Remaining before production integration: obtain source IDs for ordinary memories with explicit migration approval, verify result types from database queries, apply one budget across all constructors, preserve citation/detail metadata, add real PostgreSQL tests, then do production-like end-to-end tests.
+
+## 2026-11-18 provenance safety checkpoint
+- Checked live schema definition: ordinary `memories` has `source_session` and merged memories have `merged_from`; existing `shared_experience_cards` already has `source_message_ids`. **No old message IDs may be inferred from text.**
+- Added `memory_provenance.py` as a pure read-only resolver: walks `merged_from` lineage with cycle/node limits, unions only explicitly recorded IDs associated with a single source session, reports `complete=false` for legacy, missing, mixed-session, or ambiguous evidence.
+- Source lineage **is not connected to production queries**, because historic ordinary memories lack verified source-message IDs. No implicit migration, reprocessing, or production writes.
+- Adjusted `recall_selection.py` to accept mapping-like database rows and return sorted JSON-safe source-message IDs, with two new boundary tests.
+- Actually executed in an isolated container using Python 3.13.5: `python -m unittest discover -s tests -p 'test_*.py' -v` -> **22 targeted tests passed** (`test_recall_selection.py` 12 + `test_memory_provenance.py` 10), and `python -m compileall -q recall_selection.py memory_provenance.py tests` -> succeeded.
+- This is a staged-module test subset; the full gateway regression suite, real PostgreSQL integration, and Kelivo end-to-end tests are **not verified** for these new commits. The official GitHub Actions result has not been retrieved.
