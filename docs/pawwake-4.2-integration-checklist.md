@@ -55,3 +55,12 @@
 - Adjusted `recall_selection.py` to accept mapping-like database rows and return sorted JSON-safe source-message IDs, with two new boundary tests.
 - Actually executed in an isolated container using Python 3.13.5: `python -m unittest discover -s tests -p 'test_*.py' -v` -> **22 targeted tests passed** (`test_recall_selection.py` 12 + `test_memory_provenance.py` 10), and `python -m compileall -q recall_selection.py memory_provenance.py tests` -> succeeded.
 - This is a staged-module test subset; the full gateway regression suite, real PostgreSQL integration, and Kelivo end-to-end tests are **not verified** for these new commits. The official GitHub Actions result has not been retrieved.
+
+## 2026-11-18 read-only lineage preview integrated (experimental branch only)
+- Added `memory_lineage_query.py`, bounded to 100 ancestry nodes and 16 levels by default. It follows `memories.merged_from` using only existing `id`, `merged_from`, `source_session`; checks missing parents, cycles, malformed references, node limits and mixed-session ambiguity.
+- Added `database.get_memory_lineage_readonly()` with SELECT-only reads, and an authenticated GET `/api/memories/{memory_id}/lineage` returning 404 for a missing root.
+- Added a `来源链` button in the existing Dashboard memory table. It reports memory ancestry only and prominently states that memory IDs are **not** source conversation IDs.
+- No schema changes, history backfill, conversation writes, runtime memory injection, summary or persona changes. The deployed branch is untouched.
+- Added `tests/test_memory_lineage_query.py` (8 isolated async tests), `tests/test_memory_lineage_db.py` (database adapter/API mocks), `tests/test_memory_lineage_wiring.py` (static integration guards).
+- Actual isolated tests executed in local Python 3.13.5 environment: 30/30 passed across `test_recall_selection.py`, `test_memory_provenance.py`, `test_memory_lineage_query.py`; `python -m compileall -q recall_selection.py memory_provenance.py memory_lineage_query.py tests` passed. **These 30 do not include full application database/route mocks or static wiring tests**; they require the full checked-out repository and dependencies.
+- Release blockers: run full GitHub Actions regression on this branch; confirm FastAPI route and Dashboard JS syntax; verify a real staged PostgreSQL with copy/synthetic data; then Kelivo end-to-end tests. GitHub Actions status for the current commit has not been independently verified.
