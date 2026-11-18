@@ -136,7 +136,7 @@ async def rerank(model: str, query: str, candidates: list, kind: str):
     label = "记忆" if kind == "memory" else "对话"
     if not candidates:
         return []  # No paid request for an empty pool.
-    if not isinstance(candidates, list) or not 1 <= len(candidates) <= POOL or kind not in TIMEOUTS or not isinstance(query, str) or not query.strip() or len(query) > QUERY_TEXT_LIMIT:
+    if not isinstance(candidates, list) or not 1 <= len(candidates) <= POOL or kind not in TIMEOUTS or not isinstance(query, str) or not query.strip() or len(query) > QUERY_TEXT_LIMIT or not all(isinstance(c, dict) for c in candidates):
         return None  # Invalid input must preserve caller fallback.
     dedicated_base = os.getenv("RERANK_BASE_URL", "").strip()
     dedicated_key = os.getenv("RERANK_API_KEY", "").strip()
