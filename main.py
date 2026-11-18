@@ -5939,6 +5939,29 @@ async def api_list_experience_cards(status: str = None, limit: int = 500):
     return {"cards": cards, "total": len(cards), "retrieval_enabled": EXPERIENCE_RECALL_ENABLED}
 
 
+@app.post("/api/experience-cards/recall-preview")
+async def api_preview_experience_recall(request: Request):
+    """Read-only exact-cue preview, independent of cooldown and enabled flag."""
+    from experience_recall import match_experience_cards, card_cues
+    body = await request.json()
+    query = str(body.get("query") or "").strip()
+    if not query or len(query) > 500:
+        raise HTTPException(status_code=400, detail="query_required_max_500")
+    approved = await list_experience_cards("approved", 1000)
+    matched = match_experience_cards(query, approved, 2)
+    return {
+        "cards": [
+            {"id": card["id"], "title": card.get("title"),
+             "matching_cues": [cue for cue in card_cues(card) if cue.casefold() in query.casefold()],
+             "event_date_start": card.get("event_date_start")}
+            for card in matched
+        ],
+        "matches": len(matched),
+        "live_enabled": EXPERIENCE_RECALL_ENABLED,
+        "note": "read_only_no_cooldown_state_modified",
+    }
+
+
 @app.get("/api/experience-cards/{card_id}")
 async def api_get_experience_card(card_id: int):
     card = await get_experience_card(card_id)
