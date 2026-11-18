@@ -1,4 +1,6 @@
 import unittest
+import json
+from types import MappingProxyType
 from recall_selection import select_recall_items
 
 
@@ -45,6 +47,17 @@ class SelectionTests(unittest.TestCase):
     def test_bad_source_type_is_ignored(self):
         a=memory(1,'a'); a['source_message_ids']='unsafe'
         self.assertEqual(len(select_recall_items([a],[])),1)
+
+    def test_mapping_row_and_json_safe_output(self):
+        source = MappingProxyType(card(20, 'visible card', [2, 1, 2]))
+        got = select_recall_items([], [source])
+        self.assertEqual(got[0]['source_message_ids'], [1, 2])
+        self.assertEqual(json.loads(json.dumps(got))[0]['id'], 20)
+
+    def test_partial_overlap_does_not_drop_distinct_detail(self):
+        got = select_recall_items([memory(1, 'different detail', [10, 13, 14])],
+                                  [card(2, 'whole event', [10, 11, 12])])
+        self.assertEqual(len(got), 2)
 
     def test_no_mutation(self):
         a=memory(1,'a',[1]); b=card(2,'b',[2])
