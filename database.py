@@ -2111,6 +2111,21 @@ async def search_memories_hybrid(query: str, limit: int = 10,
         return [dict(r) for r in results]
 
 
+async def get_memory_lineage_readonly(memory_id: int) -> dict:
+    """Inspect existing merge lineage; no schema migration, writes or inferred message IDs."""
+    from memory_lineage_query import inspect_memory_lineage
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async def fetch_rows(ids: list[int]) -> list[dict]:
+            rows = await conn.fetch("""
+                SELECT id, merged_from, source_session
+                FROM memories WHERE id = ANY($1::int[])
+            """, ids)
+            return [dict(row) for row in rows]
+
+        return await inspect_memory_lineage(memory_id, fetch_rows)
+
+
 async def get_memories_by_ids_readonly(memory_ids: list[int]) -> list[dict]:
     """Read memory metadata without changing access timestamps or state."""
     if not memory_ids:
