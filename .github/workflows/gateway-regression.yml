@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/multimodal-images
+      - feature/pawwake-4.2-synced
   pull_request:
     branches:
       - main
