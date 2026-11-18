@@ -1459,12 +1459,36 @@ function renderTable(mems, startIndex) {
             '<td class="col-time">' + fmtTime(m.created_at) + '</td>' +
             '<td class="col-actions"><div class="row-actions">' +
                 '<button class="btn btn-primary btn-sm" onclick="saveMem(' + m.id + ')">保存</button>' +
+                '<button class="btn btn-secondary btn-sm" onclick="previewMemoryLineage(' + m.id + ')">来源链</button>' +
                 revertBtn +
                 restoreBtn +
                 deleteBtn +
             '</div></td>' +
             '</tr>';
     }).join('');
+}
+
+async function previewMemoryLineage(memoryId) {
+    // This is a read-only preview; ancestry IDs are memories, not conversation messages.
+    try {
+        const response = await fetch('/api/memories/' + encodeURIComponent(memoryId) + '/lineage', {cache: 'no-store'});
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const result = await response.json();
+        const ancestors = Array.isArray(result.source_memory_ids) ? result.source_memory_ids : [];
+        const missing = Array.isArray(result.missing_memory_ids) ? result.missing_memory_ids : [];
+        const lines = [
+            '记忆 #' + memoryId + ' 的来源链（只读）',
+            '找到的记忆编号：' + (ancestors.join(', ') || '无'),
+            '来源会话：' + (result.source_session || '尚无法确定'),
+            '合并关系是否完整：' + (result.lineage_complete ? '是' : '否'),
+            '缺失记忆编号：' + (missing.join(', ') || '无'),
+            result.truncated ? '来源链超过查询限制，结果已截断。' : '',
+            '原始对话消息：尚未建立可核实的关联。记忆编号不能当作消息编号。',
+        ].filter(Boolean);
+        alert(lines.join('\\n'));
+    } catch (error) {
+        alert('读取记忆来源失败：' + error.message);
+    }
 }
 
 function escHtml(s) {
