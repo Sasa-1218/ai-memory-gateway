@@ -43,6 +43,15 @@ class ExperienceRecallTests(unittest.TestCase):
         self.assertEqual(card_cues(cards[0]), [])
         self.assertEqual(match_experience_cards("猫在花边", cards), [])
 
+    def test_short_personal_cue_can_match_without_generic_one_character_terms(self):
+        card = make_card(8, title="初初的小字", details=["初初"])
+        self.assertEqual([c["id"] for c in match_experience_cards("你还记得初初吗？", [card])], [8])
+        self.assertNotEqual(card_cues(card), [])
+
+    def test_title_objects_are_individual_cues(self):
+        card = make_card(9, title="樱花照、汉服与猫耳簪", details=[])
+        self.assertEqual([c["id"] for c in match_experience_cards("那支猫耳簪呢？", [card])], [9])
+
     def test_nonmatching_query_does_not_inject(self):
         cards = [make_card(1)]
         self.assertEqual(match_experience_cards("明天吃什么？", cards), [])
