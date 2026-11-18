@@ -1948,7 +1948,7 @@ async def _build_basic_cached(
             if mem_text:
                 parts.append(mem_text)
         if EXPERIENCE_RECALL_ENABLED and user_message:
-            experience_text = await build_experience_recall(user_message, session_id)
+            experience_text = await build_experience_recall(user_message, get_active_session_id())
             if experience_text:
                 parts.append(experience_text)
         
