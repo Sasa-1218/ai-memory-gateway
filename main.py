@@ -338,6 +338,11 @@ EXPERIENCE_CARD_AUTO_BATCH_LIMIT = _env_int(
     "EXPERIENCE_CARD_AUTO_BATCH_LIMIT", 100
 )
 
+# Opt-in experience recall. Does not alter card generation or summary rotation.
+EXPERIENCE_RECALL_ENABLED = os.getenv("EXPERIENCE_RECALL_ENABLED", "false").lower() == "true"
+EXPERIENCE_RECALL_EVERY_ROUNDS = _env_int("EXPERIENCE_RECALL_EVERY_ROUNDS", 4)
+EXPERIENCE_RECALL_MAX_CARDS = _env_int("EXPERIENCE_RECALL_MAX_CARDS", 1)
+
 # 主动推送配置
 PUSH_SECRET = os.getenv("PUSH_SECRET", "")
 PUSH_MAX_PER_DAY = _env_int("PUSH_MAX_PER_DAY", 7)
@@ -491,6 +496,9 @@ async def lifespan(app: FastAPI):
                         "MEMORY_API_THINKING": str,
                         "MEMORY_ENABLED": lambda v: _parse_bool(v),
                         "MAX_MEMORIES_INJECT": int, "MEMORY_EXTRACT_INTERVAL": int,
+                        "EXPERIENCE_RECALL_ENABLED": lambda v: _parse_bool(v),
+                        "EXPERIENCE_RECALL_EVERY_ROUNDS": int,
+                        "EXPERIENCE_RECALL_MAX_CARDS": int,
                         "CACHE_PARTITION_ENABLED": lambda v: _parse_bool(v),
                         "CACHE_PARTITION_X": int, "CACHE_PARTITION_TRIGGER": str,
                         "CACHE_PARTITION_WINDOW": int, "CACHE_SUMMARY_MODEL": str,
@@ -1878,6 +1886,10 @@ async def build_partitioned_messages(
             mem_text = await build_memory_text(user_message)
             if mem_text:
                 parts.append(mem_text)
+        if EXPERIENCE_RECALL_ENABLED and user_message:
+            experience_text = await build_experience_recall(user_message, session_id)
+            if experience_text:
+                parts.append(experience_text)
         
         result.append({
             "role": "user",
@@ -1935,6 +1947,10 @@ async def _build_basic_cached(
             mem_text = await build_memory_text(user_message)
             if mem_text:
                 parts.append(mem_text)
+        if EXPERIENCE_RECALL_ENABLED and user_message:
+            experience_text = await build_experience_recall(user_message, session_id)
+            if experience_text:
+                parts.append(experience_text)
         
         result.append({
             "role": "user",
@@ -1957,6 +1973,21 @@ async def _build_basic_cached(
             "history_hash": _short_hash_value([{k: v for k, v in msg.items() if k != 'created_at'} for msg in history]),
         })
     return result
+
+
+async def build_experience_recall(user_message: str, session_id: str) -> str:
+    """Optional reviewed experience cues. Fail open for uninterrupted chat."""
+    if not EXPERIENCE_RECALL_ENABLED or not user_message or not session_id:
+        return ""
+    try:
+        from database import retrieve_experience_recall
+        return await retrieve_experience_recall(
+            session_id, user_message,
+            EXPERIENCE_RECALL_EVERY_ROUNDS, EXPERIENCE_RECALL_MAX_CARDS,
+        )
+    except Exception as exc:
+        print(f"[experience-recall] skipped: {type(exc).__name__}", flush=True)
+        return ""
 
 
 async def build_memory_text(user_message: str) -> str:
@@ -4724,6 +4755,11 @@ async def chat_completions(request: Request):
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
             memory_block = await build_system_prompt_with_memories(user_message)
 
+        if EXPERIENCE_RECALL_ENABLED and user_message:
+            experience_text = await build_experience_recall(user_message, get_active_session_id())
+            if experience_text:
+                memory_block = (memory_block + "\n\n" + experience_text) if memory_block else experience_text
+
         has_system = any(msg.get("role") == "system" for msg in messages)
 
         if has_system:
@@ -5900,7 +5936,7 @@ async def api_list_experience_cards(status: str = None, limit: int = 500):
     if status and status not in REVIEW_STATUSES:
         raise HTTPException(status_code=400, detail="invalid_review_status")
     cards = await list_experience_cards(status, max(1, min(limit, 1000)))
-    return {"cards": cards, "total": len(cards), "retrieval_enabled": False}
+    return {"cards": cards, "total": len(cards), "retrieval_enabled": EXPERIENCE_RECALL_ENABLED}
 
 
 @app.get("/api/experience-cards/{card_id}")
@@ -5909,7 +5945,7 @@ async def api_get_experience_card(card_id: int):
     if not card:
         raise HTTPException(status_code=404, detail="experience_card_not_found")
     source_messages = await get_experience_card_source_messages(card_id)
-    return {"card": card, "source_messages": source_messages, "retrieval_enabled": False}
+    return {"card": card, "source_messages": source_messages, "retrieval_enabled": EXPERIENCE_RECALL_ENABLED}
 
 
 @app.put("/api/experience-cards/{card_id}")
@@ -7288,6 +7324,9 @@ async def get_settings():
             "MAX_MEMORIES_INJECT":     int(db.get("MAX_MEMORIES_INJECT") or MAX_MEMORIES_INJECT),
             "MIN_SCORE_THRESHOLD":     float(db.get("MIN_SCORE_THRESHOLD") or _db_module.MIN_SCORE_THRESHOLD),
             "MEMORY_EXTRACT_INTERVAL": int(db.get("MEMORY_EXTRACT_INTERVAL") or MEMORY_EXTRACT_INTERVAL),
+            "EXPERIENCE_RECALL_ENABLED": _parse_bool(db.get("EXPERIENCE_RECALL_ENABLED"), EXPERIENCE_RECALL_ENABLED),
+            "EXPERIENCE_RECALL_EVERY_ROUNDS": int(db.get("EXPERIENCE_RECALL_EVERY_ROUNDS") or EXPERIENCE_RECALL_EVERY_ROUNDS),
+            "EXPERIENCE_RECALL_MAX_CARDS": int(db.get("EXPERIENCE_RECALL_MAX_CARDS") or EXPERIENCE_RECALL_MAX_CARDS),
 
             # 缓存分区
             "CACHE_PARTITION_ENABLED": _parse_bool(db.get("CACHE_PARTITION_ENABLED"), CACHE_PARTITION_ENABLED),
@@ -7350,6 +7389,9 @@ async def save_settings(request: Request):
             "MEMORY_ENABLED":        lambda v: _parse_bool(v),
             "MAX_MEMORIES_INJECT":   int,
             "MEMORY_EXTRACT_INTERVAL": int,
+            "EXPERIENCE_RECALL_ENABLED": lambda v: _parse_bool(v),
+            "EXPERIENCE_RECALL_EVERY_ROUNDS": lambda v: max(1, min(int(v), 100)),
+            "EXPERIENCE_RECALL_MAX_CARDS": lambda v: max(1, min(int(v), 2)),
             "CACHE_PARTITION_ENABLED": lambda v: _parse_bool(v),
             "CACHE_PARTITION_X":     int,
             "CACHE_PARTITION_TRIGGER": str,
