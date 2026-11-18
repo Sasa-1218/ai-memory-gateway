@@ -2826,10 +2826,18 @@ async def retrieve_experience_recall(session_id: str, user_message: str,
             previous_raw = await conn.fetchval(
                 "SELECT value FROM gateway_config WHERE key=$1", key)
             try:
-                previous_round = int(previous_raw or 0)
-            except ValueError:
-                previous_round = 0
-            if previous_round and round_no - previous_round < min_round_gap:
+                recent = json.loads(previous_raw) if previous_raw else {}
+                if not isinstance(recent, dict):
+                    recent = {"round": int(previous_raw)}
+            except (TypeError, ValueError):
+                try:
+                    recent = {"round": int(previous_raw or 0)}
+                except (TypeError, ValueError):
+                    recent = {}
+            previous_round = int(recent.get("round") or 0)
+            delta_rounds = round_no - previous_round
+            # If history was reset, do not block recall indefinitely.
+            if previous_round and 0 <= delta_rounds < min_round_gap:
                 return ""
             rows = await conn.fetch("""
                 SELECT id, review_status, ai_visible, title, key_details,
@@ -2849,15 +2857,21 @@ async def retrieve_experience_recall(session_id: str, user_message: str,
                     except (ValueError, TypeError):
                         item["key_details"] = []
                 candidates.append(item)
-            selected = match_experience_cards(user_message, candidates, limit)
+            selected = match_experience_cards(user_message, candidates, 2)
             if not selected:
                 return ""
-            # Record only a positive match. The matching card's own review state
-            # remains unchanged. Repeated prompts in quick succession are gated.
+            # Prevent the same card being offered repeatedly across a short chat.
+            # If the most relevant card was offered recently, try the next match.
+            previous_card = int(recent.get("card_id") or 0)
+            if previous_card and delta_rounds >= 0 and delta_rounds < max(20, min_round_gap):
+                selected = [card for card in selected if int(card["id"]) != previous_card]
+            selected = selected[:limit]
+            if not selected:
+                return ""
             await conn.execute("""
                 INSERT INTO gateway_config (key,value) VALUES ($1,$2)
                 ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
-            """, key, str(round_no))
+            """, key, json.dumps({"round": round_no, "card_id": int(selected[0]["id"])}))
             return format_experience_recall(selected)
 
 
