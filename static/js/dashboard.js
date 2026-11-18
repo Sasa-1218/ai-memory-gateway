@@ -952,93 +952,226 @@ async function loadMemories() {
 // ============================================
 const EXPERIENCE_STATUS_LABELS = {
     pending: '待检查',
-    approved: 'AI 可见',
+    approved: '已批准',
     archived: '仅归档',
     deleted: '回收站',
     superseded: '已被纠正'
 };
+const EXPERIENCE_PAGE_SIZE = 12;
+let experiencePage = 1;
+let experienceSelectedIds = new Set();
+let experienceVisiblePage = [];
 
-async function loadExperienceCards() {
+function resetExperienceCardFilters() {
+    experiencePage = 1;
+    experienceSelectedIds.clear();
+    updateExperienceBulkToolbar();
+}
+
+function canBulkReviewExperience(card) {
+    return card.review_status === 'pending' &&
+        !card.ai_visible && !card.supersedes_card_id;
+}
+
+function clearExperienceSelection() {
+    experienceSelectedIds.clear();
+    renderExperienceCards();
+}
+
+function selectExperienceCard(id, checked) {
+    const card = experienceCards.find(c => c.id === id);
+    if (!card || !canBulkReviewExperience(card)) return;
+    if (checked) experienceSelectedIds.add(id);
+    else experienceSelectedIds.delete(id);
+    updateExperienceBulkToolbar();
+}
+
+function selectExperiencePage(checked) {
+    for (const card of experienceVisiblePage) {
+        if (canBulkReviewExperience(card)) {
+            if (checked) experienceSelectedIds.add(card.id);
+            else experienceSelectedIds.delete(card.id);
+        }
+    }
+    renderExperienceCards();
+}
+
+function updateExperienceBulkToolbar() {
+    const valid = new Set(experienceCards.filter(canBulkReviewExperience).map(c => c.id));
+    experienceSelectedIds = new Set([...experienceSelectedIds].filter(id => valid.has(id)));
+    const count = experienceSelectedIds.size;
+    const status = document.getElementById('experienceSelectedCount');
+    if (status) status.textContent = '已选 ' + count + ' 张（每批最多30张）';
+    for (const id of ['experienceBulkApprove', 'experienceBulkArchive']) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = count === 0 || count > 30;
+    }
+    const selectPage = document.getElementById('experienceSelectPage');
+    const eligible = experienceVisiblePage.filter(canBulkReviewExperience);
+    if (selectPage) {
+        selectPage.disabled = eligible.length === 0;
+        selectPage.checked = eligible.length > 0 &&
+            eligible.every(c => experienceSelectedIds.has(c.id));
+        selectPage.indeterminate = !selectPage.checked &&
+            eligible.some(c => experienceSelectedIds.has(c.id));
+    }
+}
+
+async function bulkReviewExperiences(operation) {
+    if (!['approve', 'archive'].includes(operation)) return;
+    const cards = experienceCards.filter(c => experienceSelectedIds.has(c.id));
+    if (!cards.length || cards.length > 30 || cards.some(c => !canBulkReviewExperience(c))) {
+        alert('请选择1至30张普通待检查经历卡，替代旧卡的候选需要单独审核。');
+        return;
+    }
+    const action = operation === 'approve' ? '批准并设为 AI 可见' : '仅归档';
+    const examples = cards.slice(0, 8).map(c => '· ' + c.title).join('\n');
+    if (!confirm('确定将 ' + cards.length + ' 张经历卡' + action +
+        '吗？\n\n' + examples + (cards.length > 8 ? '\n……' : '') +
+        '\n\n批量审核仅修改所选经历卡，不更改对话或摘要。')) return;
+    const approve = document.getElementById('experienceBulkApprove');
+    const archive = document.getElementById('experienceBulkArchive');
+    approve.disabled = archive.disabled = true;
+    try {
+        const resp = await fetch('/api/experience-cards/bulk-review', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({operation,card_ids:cards.map(c=>c.id)})
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'HTTP ' + resp.status);
+        experienceSelectedIds.clear();
+        await loadExperienceCards(true);
+        const msg = document.getElementById('experienceCardMsg');
+        if (msg) msg.textContent = '已' + action + ' ' + data.updated + ' 张经历卡。';
+    } catch(error) {
+        alert('没有确认批量审核成功：' + error.message +
+              '\n请刷新列表核对状态后再操作，不要重复提交。');
+    } finally {
+        updateExperienceBulkToolbar();
+    }
+}
+
+async function loadExperienceCards(keepPage = false) {
     const list = document.getElementById('experienceCardList');
     if (!list) return;
     const status = document.getElementById('experienceCardStatus')?.value || '';
-    list.innerHTML = '<div class="card" style="padding:20px; color:var(--text-muted);">正在加载...</div>';
+    list.innerHTML = '<div class="card" style="padding:20px;">正在读取经历卡…</div>';
     try {
-        const query = status ? `?status=${encodeURIComponent(status)}` : '';
-        const resp = await fetch('/api/experience-cards' + query);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const query = status ? '?status=' + encodeURIComponent(status) + '&limit=1000' : '?limit=1000';
+        const resp = await fetch('/api/experience-cards' + query, {cache:'no-store'});
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
         experienceCards = data.cards || [];
-        const stats = document.getElementById('experienceCardStats');
-        if (stats) stats.textContent = `${experienceCards.length} 张；当前召回未接入`;
+        experienceSelectedIds.clear();
+        if (!keepPage) experiencePage = 1;
         renderExperienceCards();
-    } catch (e) {
-        list.innerHTML = `<div class="card" style="padding:20px; color:var(--danger);">加载失败：${escapeHtml(e.message)}</div>`;
+    } catch (error) {
+        list.textContent = '读取经历卡失败：' + error.message;
+    }
+}
+
+function filteredExperienceCards() {
+    const query = (document.getElementById('experienceCardSearch')?.value || '').trim().toLowerCase();
+    const visibility = document.getElementById('experienceCardVisibility')?.value || 'all';
+    return experienceCards.filter(card => {
+        const visible = card.review_status === 'approved' && card.ai_visible === true;
+        if (visibility === 'visible' && !visible) return false;
+        if (visibility === 'hidden' && visible) return false;
+        if (!query) return true;
+        const haystack = [card.title, card.event_summary, card.interaction_trace,
+            ...(Array.isArray(card.key_details) ? card.key_details : [])].join('\n').toLowerCase();
+        return haystack.includes(query);
+    });
+}
+
+function setExperiencePage(next) {
+    const pages = Math.max(1, Math.ceil(filteredExperienceCards().length / EXPERIENCE_PAGE_SIZE));
+    experiencePage = Math.max(1, Math.min(next, pages));
+    renderExperienceCards();
+    document.getElementById('section-experience-cards')?.scrollIntoView({block:'start',behavior:'instant'});
+}
+
+function renderExperiencePagination(pageCount, count) {
+    const text = '第 ' + experiencePage + ' / ' + pageCount + ' 页 · 共 ' + count + ' 张';
+    const previous = experiencePage === 1 ? 'disabled' : '';
+    const next = experiencePage >= pageCount ? 'disabled' : '';
+    const html = '<span>' + text + '</span>' +
+        '<button type="button" class="btn btn-sm" onclick="setExperiencePage(' +
+        (experiencePage - 1) + ')" ' + previous + '>上一页</button>' +
+        '<button type="button" class="btn btn-sm" onclick="setExperiencePage(' +
+        (experiencePage + 1) + ')" ' + next + '>下一页</button>';
+    for (const id of ['experienceCardPagination', 'experienceCardPaginationBottom']) {
+        const node = document.getElementById(id);
+        if (node) node.innerHTML = html;
     }
 }
 
 function renderExperienceCards() {
     const list = document.getElementById('experienceCardList');
     if (!list) return;
-    const query = (document.getElementById('experienceCardSearch')?.value || '').trim().toLowerCase();
-    const cards = experienceCards.filter(card => {
-        if (!query) return true;
-        return `${card.title || ''}\n${card.event_summary || ''}`.toLowerCase().includes(query);
-    });
+    const cards = filteredExperienceCards();
+    const pageCount = Math.max(1, Math.ceil(cards.length / EXPERIENCE_PAGE_SIZE));
+    experiencePage = Math.min(experiencePage, pageCount);
+    const offset = (experiencePage - 1) * EXPERIENCE_PAGE_SIZE;
+    experienceVisiblePage = cards.slice(offset, offset + EXPERIENCE_PAGE_SIZE);
+    const stats = document.getElementById('experienceCardStats');
+    if (stats) stats.textContent = '符合条件 ' + cards.length + ' / 已加载 ' + experienceCards.length + ' 张';
+    renderExperiencePagination(pageCount, cards.length);
     if (!cards.length) {
-        list.innerHTML = '<div class="card" style="padding:24px; color:var(--text-muted);">共同经历卡片自动生成当前默认关闭；页面为空是正常的。之后生成的卡片会先进入待检查，人工批准后才可能 AI 可见。</div>';
+        list.innerHTML = '<div class="card" style="padding:20px;">当前条件下没有经历卡，试试修改状态或可见性筛选。</div>';
+        updateExperienceBulkToolbar();
         return;
     }
-    list.innerHTML = cards.map(card => {
+    list.innerHTML = experienceVisiblePage.map(card => {
         const status = EXPERIENCE_STATUS_LABELS[card.review_status] || card.review_status;
         const visible = card.review_status === 'approved' && card.ai_visible;
         const dateLabel = card.event_date_start
             ? (card.event_date_end && card.event_date_end !== card.event_date_start
-                ? `${card.event_date_start} 至 ${card.event_date_end}` : card.event_date_start)
+                ? card.event_date_start + ' 至 ' + card.event_date_end : card.event_date_start)
             : '事件日期未明确';
         const details = Array.isArray(card.key_details) ? card.key_details : [];
-        const operationLabel = card.generation_operation === 'split' ? '拆分'
-            : card.generation_operation === 'regenerate' ? '重新生成'
-            : card.generation_operation === 'auto_generate' ? '静默后自动生成'
-            : card.generation_operation === 'manual_generate' ? '手动生成' : '';
+        const eligible = canBulkReviewExperience(card);
+        const checkbox = eligible ?
+            '<input type="checkbox" aria-label="选中这张待检查经历卡" ' +
+            (experienceSelectedIds.has(card.id) ? 'checked ' : '') +
+            'onchange="selectExperienceCard(' + card.id + ', this.checked)">' : '';
         const sourceRelation = card.supersedes_card_id
-            ? `<div style="margin-top:8px; color:var(--text-muted); font-size:12px;">来源：${escapeHtml(operationLabel || '替代候选')} · 旧卡 #${card.supersedes_card_id}${card.replacement_group_size > 1 ? ` · 同组 ${card.replacement_group_size} 张` : ''} · 任务 ${escapeHtml(card.generation_job_status || '-')}</div>`
-            : (operationLabel ? `<div style="margin-top:8px; color:var(--text-muted); font-size:12px;">来源：${escapeHtml(operationLabel)} · 任务 ${escapeHtml(card.generation_job_status || '-')}</div>` : '');
-        const comparison = card.replacement_requires_approval
-            ? `<details style="margin-top:10px; padding:10px; border:1px solid var(--border);"><summary style="cursor:pointer; color:var(--text-muted);">对比当前 AI 可见旧卡 #${card.supersedes_card_id}</summary><strong style="display:block; margin-top:8px;">${escapeHtml(card.source_card_title || '未命名经历')}</strong><div style="white-space:pre-wrap; margin-top:6px; color:var(--text-light);">${escapeHtml(card.source_card_summary || '')}</div></details>`
-            : '';
-        let actions = `<button class="btn btn-sm btn-secondary" onclick="openExperienceCard(${card.id})">查看与编辑</button>`;
+            ? '<p class="experience-muted">替代候选 · 旧卡 #' + card.supersedes_card_id +
+              '（请使用整组替代审核）</p>' : '';
+        let actions = '<button class="btn btn-sm btn-secondary" onclick="openExperienceCard(' +
+            card.id + ')">查看与编辑</button>';
         if (card.review_status === 'pending' && card.replacement_requires_approval) {
-            const groupText = card.replacement_group_size > 1 ? `整组 ${card.replacement_group_size} 张替代旧卡` : '用新卡替代旧卡';
-            actions += ` <button class="btn btn-sm btn-primary" onclick="approveExperienceReplacement(${card.id}, ${card.replacement_group_size || 1})">${groupText}</button>`;
+            actions += '<button class="btn btn-sm btn-primary" onclick="approveExperienceReplacement(' +
+                card.id + ', ' + (card.replacement_group_size || 1) + ')">审核整组替代</button>';
         }
         if (card.review_status === 'deleted') {
-            actions += ` <button class="btn btn-sm btn-primary" onclick="restoreExperienceCard(${card.id})">恢复到待检查</button>`;
+            actions += '<button class="btn btn-sm" onclick="restoreExperienceCard(' + card.id + ')">恢复到待检查</button>';
         } else if (card.review_status !== 'superseded') {
-            actions += ` <button class="btn btn-sm btn-secondary" onclick="reprocessExperienceCard(${card.id}, 'regenerate')">重新生成</button>`;
-            actions += ` <button class="btn btn-sm btn-secondary" onclick="reprocessExperienceCard(${card.id}, 'split')">拆成多张</button>`;
-            actions += ` <button class="btn btn-sm btn-warning" onclick="setExperienceCardStatus(${card.id}, 'archived', false)">仅归档</button>`;
-            actions += ` <button class="btn btn-sm btn-danger" onclick="deleteExperienceCard(${card.id})">删除</button>`;
+            actions += '<details class="experience-actions-more"><summary>更多操作</summary><div class="experience-actions">' +
+                '<button class="btn btn-sm" onclick="reprocessExperienceCard(' + card.id + ', \'regenerate\')">重新生成</button>' +
+                '<button class="btn btn-sm" onclick="reprocessExperienceCard(' + card.id + ', \'split\')">拆分多张</button>' +
+                '<button class="btn btn-sm btn-warning" onclick="setExperienceCardStatus(' + card.id + ', \'archived\', false)">仅归档</button>' +
+                '<button class="btn btn-sm btn-danger" onclick="deleteExperienceCard(' + card.id + ')">删除</button>' +
+                '</div></details>';
         }
-        return `<article class="card" style="padding:16px;">
-            <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start; flex-wrap:wrap;">
-                <div style="min-width:0; flex:1;">
-                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
-                        <strong>${escapeHtml(card.title || '未命名经历')}</strong>
-                        <span style="font-size:12px; color:var(--text-muted);">${escapeHtml(dateLabel)}</span>
-                        <span style="font-size:12px; color:var(--text-muted);">${escapeHtml(status)}</span>
-                        <span style="font-size:12px; color:${visible ? 'var(--success)' : 'var(--text-muted)'};">${visible ? 'AI 可见' : '隔离中'}</span>
-                    </div>
-                    <div style="white-space:pre-wrap; line-height:1.65; color:var(--text-light);">${escapeHtml(card.event_summary || '')}</div>
-                    ${details.length ? `<div style="margin-top:10px; color:var(--text-muted); font-size:13px;">线索：${details.map(escapeHtml).join(' · ')}</div>` : ''}
-                    ${sourceRelation}
-                    ${comparison}
-                    <div style="margin-top:8px; color:var(--text-muted); font-size:12px;">Session：${escapeHtml(card.source_session_id || '-')} · 来源消息 ${Array.isArray(card.source_message_ids) ? card.source_message_ids.length : 0} 条</div>
-                </div>
-                <div style="display:flex; gap:6px; flex-wrap:wrap;">${actions}</div>
-            </div>
-        </article>`;
+        return '<article class="card experience-review-card">' +
+            '<div class="experience-card-header"><div class="experience-title-row">' + checkbox +
+            '<strong>' + escapeHtml(card.title || '未命名经历') + '</strong></div>' +
+            '<div class="experience-meta">' + escapeHtml(dateLabel) + ' · ' + escapeHtml(status) +
+            ' · <span class="' + (visible ? 'experience-visible' : '') + '">' +
+            (visible ? 'AI 可见' : 'AI 不可见') + '</span></div></div>' +
+            '<p class="experience-summary">' + escapeHtml(card.event_summary || '（尚无事件经过）') + '</p>' +
+            '<details class="experience-full-detail"><summary>展开完整内容与来源</summary>' +
+            '<div class="experience-full-body"><strong>互动经过</strong><p>' +
+            escapeHtml(card.interaction_trace || '（无）') + '</p><strong>关键线索</strong><p>' +
+            details.map(escapeHtml).join(' · ') + '</p>' + sourceRelation +
+            '<p class="experience-muted">来源 Session：' +
+            escapeHtml(card.source_session_id || '-') + ' · ' +
+            (Array.isArray(card.source_message_ids) ? card.source_message_ids.length : 0) +
+            ' 条消息</p></div></details>' +
+            '<div class="experience-card-actions">' + actions + '</div></article>';
     }).join('');
+    updateExperienceBulkToolbar();
 }
 
 function newExperienceJobId() {
