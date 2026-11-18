@@ -303,13 +303,13 @@
                     <div class="toolbar" style="flex-wrap:wrap;">
                         <select id="experienceCardStatus" class="select-input" onchange="resetExperienceCardFilters();loadExperienceCards()">
                             <option value="pending">待检查</option>
-                            <option value="approved">AI 可见</option>
+                            <option value="approved">已批准（可见或隐藏）</option>
                             <option value="archived">仅归档</option>
                             <option value="superseded">已被纠正</option>
                             <option value="deleted">回收站</option>
                             <option value="">全部</option>
                         </select>
-                        <select id="experienceCardVisibility" class="select-input" aria-label="AI可见性筛选" onchange="resetExperienceCardFilters();renderExperienceCards()">
+                        <select id="experienceCardVisibility" class="select-input" aria-label="AI可见性筛选" onchange="changeExperienceVisibility()">
                             <option value="all">全部可见性</option>
                             <option value="visible">仅 AI 可见</option>
                             <option value="hidden">仅 AI 不可见</option>
@@ -1245,7 +1245,7 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.31-active-recall"></script>
+    <script src="/static/js/dashboard.js?v=3.32-experience-filter"></script>
     <script src="/static/js/legacy-boundary.js?v=1"></script>
     <script src="/static/js/memory-bulk-restore.js?v=1"></script>
 </body>
