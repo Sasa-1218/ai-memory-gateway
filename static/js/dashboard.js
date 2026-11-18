@@ -970,7 +970,7 @@ async function loadExperienceCards() {
         const data = await resp.json();
         experienceCards = data.cards || [];
         const stats = document.getElementById('experienceCardStats');
-        if (stats) stats.textContent = `${experienceCards.length} 张；当前召回未接入`;
+        if (stats) stats.textContent = `${experienceCards.length} 张；召回是否启用请到「设置 → 共同经历」查看`;
         renderExperienceCards();
     } catch (e) {
         list.innerHTML = `<div class="card" style="padding:20px; color:var(--danger);">加载失败：${escapeHtml(e.message)}</div>`;
@@ -3546,9 +3546,9 @@ const _SETTINGS_FIELDS = {
     str: ['API_BASE_URL', 'API_KEY', 'DEFAULT_MODEL', 'MEMORY_API_BASE_URL', 'MEMORY_API_KEY', 'MEMORY_MODEL', 'MEMORY_API_THINKING',
           'CACHE_SUMMARY_MODEL', 'SUMMARY_API_BASE_URL', 'SUMMARY_API_KEY', 'CACHE_PARTITION_TRIGGER', 'EMBEDDING_API_KEY', 'EMBEDDING_BASE_URL', 'EMBEDDING_MODEL', 'REASONING_EFFORT',
          'role_display_user', 'role_display_assistant'],
-    int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'CACHE_SUMMARY_BUDGET_CHARS', 'SUMMARY_KEEP_RECENT', 'EMBEDDING_DIM'],
+    int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'EXPERIENCE_RECALL_EVERY_ROUNDS', 'EXPERIENCE_RECALL_MAX_CARDS', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'CACHE_SUMMARY_BUDGET_CHARS', 'SUMMARY_KEEP_RECENT', 'EMBEDDING_DIM'],
     float: ['MIN_SCORE_THRESHOLD'],
-    bool: ['MEMORY_ENABLED', 'CACHE_PARTITION_ENABLED', 'MEMORY_VECTOR_ENABLED', 'FORCE_STREAM'],
+    bool: ['MEMORY_ENABLED', 'EXPERIENCE_RECALL_ENABLED', 'CACHE_PARTITION_ENABLED', 'MEMORY_VECTOR_ENABLED', 'FORCE_STREAM'],
     range: ['MEMORY_HW_KEYWORD', 'MEMORY_HW_SEMANTIC', 'MEMORY_HW_IMPORTANCE',
             'MEMORY_HW_RECENCY', 'MEMORY_SEMANTIC_THRESHOLD'],
     text: ['systemPrompt'],
