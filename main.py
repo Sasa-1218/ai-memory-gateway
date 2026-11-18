@@ -5851,6 +5851,17 @@ async def api_get_memories(layer: int = None, active_only: bool = None):
     return result
 
 
+@app.get("/api/memories/{memory_id}/lineage")
+async def api_get_memory_lineage(memory_id: int):
+    """Read-only ancestry preview; message source IDs remain unverified for legacy memories."""
+    if memory_id <= 0:
+        raise HTTPException(status_code=400, detail="invalid_memory_id")
+    result = await _db_module.get_memory_lineage_readonly(memory_id)
+    if not result["exists"]:
+        raise HTTPException(status_code=404, detail="memory_not_found")
+    return result
+
+
 @app.get("/api/memories/search")
 async def api_search_memories(q: str = "", limit: int = 20):
     """语义搜索记忆（Dashboard用，走后端 search_memories）"""
