@@ -2804,6 +2804,63 @@ async def update_experience_card(card_id: int, update: dict):
         return _experience_card_dict(row)
 
 
+
+async def retrieve_experience_recall(session_id: str, user_message: str,
+                                     min_round_gap: int = 4, limit: int = 1) -> str:
+    """Read only approved cards; durable per-session cooldown for cue recall."""
+    from experience_recall import match_experience_cards, format_experience_recall
+    if not session_id or not user_message or len(user_message) > 10000:
+        return ""
+    min_round_gap = max(1, min(int(min_round_gap), 100))
+    limit = max(1, min(int(limit), 2))
+    pool = await get_pool()
+    key = "experience_recall_last_round:" + session_id
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Serialize requests for this same session, including parallel Kelivo calls.
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", key)
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM conversations WHERE session_id=$1 AND role='user'",
+                session_id)
+            round_no = int(count or 0) + 1
+            previous_raw = await conn.fetchval(
+                "SELECT value FROM gateway_config WHERE key=$1", key)
+            try:
+                previous_round = int(previous_raw or 0)
+            except ValueError:
+                previous_round = 0
+            if previous_round and round_no - previous_round < min_round_gap:
+                return ""
+            rows = await conn.fetch("""
+                SELECT id, review_status, ai_visible, title, key_details,
+                       event_summary, interaction_trace,
+                       event_date_start, event_date_end
+                FROM shared_experience_cards
+                WHERE review_status='approved' AND ai_visible=TRUE
+                ORDER BY approved_at DESC NULLS LAST, id DESC
+                LIMIT 1000
+            """)
+            candidates = []
+            for row in rows:
+                item = dict(row)
+                if isinstance(item.get("key_details"), str):
+                    try:
+                        item["key_details"] = json.loads(item["key_details"])
+                    except (ValueError, TypeError):
+                        item["key_details"] = []
+                candidates.append(item)
+            selected = match_experience_cards(user_message, candidates, limit)
+            if not selected:
+                return ""
+            # Record only a positive match. The matching card's own review state
+            # remains unchanged. Repeated prompts in quick succession are gated.
+            await conn.execute("""
+                INSERT INTO gateway_config (key,value) VALUES ($1,$2)
+                ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
+            """, key, str(round_no))
+            return format_experience_recall(selected)
+
+
 # ============================================================
 # 网关配置
 # ============================================================
