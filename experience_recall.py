@@ -6,18 +6,26 @@ AI-visible cards are eligible. No background generation or embedding calls.
 import re
 
 def card_cues(card):
-    """Use existing title and short key_details; do not infer vague synonyms."""
-    raw = [card.get("title") or ""] + list(card.get("key_details") or [])
+    """Extract distinct literal cues; avoid generic one-character triggers."""
     cues = []
-    for value in raw:
+    title = card.get("title") or ""
+    values = []
+    if isinstance(title, str):
+        values.append(title)
+        # The title often joins distinctive objects with punctuation.
+        values.extend(re.split(r"[、，,/／·及和与]+", title))
+    details = card.get("key_details") or []
+    if isinstance(details, list):
+        values.extend(details)
+    generic = {"我们", "你们", "今天", "昨天", "明天", "这个", "那个",
+               "事情", "时候", "感觉", "喜欢", "工作", "聊天", "一起", "记得"}
+    for value in values:
         if not isinstance(value, str):
             continue
-        value = value.strip()
-        # Require distinctive phrases, not generic one- or two-character words.
-        if 3 <= len(value) <= 40 and value not in cues:
+        value = value.strip(" \t\r\n。！？!?:：、，,·「」《》")
+        if 2 <= len(value) <= 40 and value not in generic and value not in cues:
             cues.append(value)
     return cues
-
 
 def match_experience_cards(query, cards, limit=1):
     """Rank by longest literal cue; never expose pending/deleted/superseded."""
