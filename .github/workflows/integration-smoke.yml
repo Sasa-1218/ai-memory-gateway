@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/pawwake-4.2-integration
+      - feature/pawwake-4.2-synced
   workflow_dispatch:
 
 permissions:
