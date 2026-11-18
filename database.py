@@ -2865,6 +2865,76 @@ async def bulk_review_experience_cards(card_ids: list[int], operation: str):
                     "ids": sorted(row["id"] for row in changed)}
 
 
+async def retrieve_experience_recall(session_id: str, user_message: str,
+                                     min_round_gap: int = 4, limit: int = 1) -> str:
+    """Read only approved cards; durable per-session cooldown for cue recall."""
+    from experience_recall import match_experience_cards, format_experience_recall
+    if not session_id or not user_message or len(user_message) > 10000:
+        return ""
+    min_round_gap = max(1, min(int(min_round_gap), 100))
+    limit = max(1, min(int(limit), 2))
+    pool = await get_pool()
+    key = "experience_recall_last_round:" + session_id
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Serialize requests for this same session, including parallel Kelivo calls.
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", key)
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM conversations WHERE session_id=$1 AND role='user'",
+                session_id)
+            round_no = int(count or 0) + 1
+            previous_raw = await conn.fetchval(
+                "SELECT value FROM gateway_config WHERE key=$1", key)
+            try:
+                recent = json.loads(previous_raw) if previous_raw else {}
+                if not isinstance(recent, dict):
+                    recent = {"round": int(previous_raw)}
+            except (TypeError, ValueError):
+                try:
+                    recent = {"round": int(previous_raw or 0)}
+                except (TypeError, ValueError):
+                    recent = {}
+            previous_round = int(recent.get("round") or 0)
+            delta_rounds = round_no - previous_round
+            # If history was reset, do not block recall indefinitely.
+            if previous_round and 0 <= delta_rounds < min_round_gap:
+                return ""
+            rows = await conn.fetch("""
+                SELECT id, review_status, ai_visible, title, key_details,
+                       event_summary, interaction_trace,
+                       event_date_start, event_date_end
+                FROM shared_experience_cards
+                WHERE review_status='approved' AND ai_visible=TRUE
+                ORDER BY approved_at DESC NULLS LAST, id DESC
+                LIMIT 1000
+            """)
+            candidates = []
+            for row in rows:
+                item = dict(row)
+                if isinstance(item.get("key_details"), str):
+                    try:
+                        item["key_details"] = json.loads(item["key_details"])
+                    except (ValueError, TypeError):
+                        item["key_details"] = []
+                candidates.append(item)
+            selected = match_experience_cards(user_message, candidates, 2)
+            if not selected:
+                return ""
+            # Prevent the same card being offered repeatedly across a short chat.
+            # If the most relevant card was offered recently, try the next match.
+            previous_card = int(recent.get("card_id") or 0)
+            if previous_card and delta_rounds >= 0 and delta_rounds < max(20, min_round_gap):
+                selected = [card for card in selected if int(card["id"]) != previous_card]
+            selected = selected[:limit]
+            if not selected:
+                return ""
+            await conn.execute("""
+                INSERT INTO gateway_config (key,value) VALUES ($1,$2)
+                ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
+            """, key, json.dumps({"round": round_no, "card_id": int(selected[0]["id"])}))
+            return format_experience_recall(selected)
+
+
 # ============================================================
 # 网关配置
 # ============================================================
