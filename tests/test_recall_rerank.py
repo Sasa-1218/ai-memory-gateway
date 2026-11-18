@@ -1,11 +1,22 @@
 """Staged Pawwake 4.2 recall-rerank tests; no network or database access."""
 import math
 import unittest
+from unittest.mock import patch
+
+from recall_rerank import rerank
 
 from recall_rerank import request_body, pick
 
 
 class RerankRulesTests(unittest.TestCase):
+    def test_empty_and_invalid_input_never_makes_provider_call(self):
+        import asyncio
+        with patch("recall_rerank.httpx.AsyncClient", side_effect=AssertionError("unexpected network")):
+            self.assertEqual(asyncio.run(rerank("m", "hello", [], "memory")), [])
+            self.assertIsNone(asyncio.run(rerank("m", "hello", ["bad candidate"], "memory")))
+            self.assertIsNone(asyncio.run(rerank("m", "", [{"content": "x"}], "memory")))
+
+
     def test_candidate_payload_and_gate(self):
         payload = request_body(
             "test-model", "番茄小花园",
