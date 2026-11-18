@@ -1690,3 +1690,33 @@ body {
 @media (max-width: 430px) {
     .shadow-mind-grid { grid-template-columns: 1fr; }
 }
+
+
+/* Compact, touch-friendly shared-experience review (mobile + desktop). */
+.experience-bulk-bar { display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:12px 14px;margin:12px 0; }
+.experience-bulk-bar label {display:flex;align-items:center;gap:7px;min-width:180px;}
+.experience-bulk-bar button {white-space:normal;}
+.experience-muted {font-size:12px;color:var(--text-muted);overflow-wrap:anywhere;}
+.experience-pagination {display:flex;gap:8px;justify-content:flex-end;align-items:center;flex-wrap:wrap;padding:12px 0;color:var(--text-muted);font-size:13px;}
+.experience-review-card {padding:14px 16px;min-width:0;max-width:100%;overflow-wrap:anywhere;}
+.experience-card-header {display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap;}
+.experience-title-row {display:flex;align-items:flex-start;gap:9px;min-width:0;flex:1 1 220px;overflow-wrap:anywhere;}
+.experience-title-row strong {line-height:1.5;overflow-wrap:anywhere;}
+.experience-title-row input {margin-top:5px;flex-shrink:0;}
+.experience-meta {color:var(--text-muted);font-size:12px;white-space:normal;}
+.experience-visible {color:var(--success);}
+.experience-summary {margin:10px 0;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;line-clamp:4;overflow:hidden;}
+.experience-full-detail {margin:8px 0;font-size:13px;}
+.experience-full-detail summary,.experience-actions-more summary {cursor:pointer;color:var(--primary);padding:5px 0;}
+.experience-full-body {white-space:pre-wrap;line-height:1.7;overflow-wrap:anywhere;}
+.experience-full-body p {margin:6px 0 12px;}
+.experience-card-actions {display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding-top:10px;border-top:1px solid var(--border);}
+.experience-actions-more {display:inline-block;}
+.experience-actions {display:flex;flex-wrap:wrap;gap:7px;margin-top:8px;}
+@media(max-width:720px) {
+    .experience-review-card {padding:12px;}
+    .experience-card-header {display:block;}
+    .experience-meta {margin:4px 0 0 27px;}
+    .experience-bulk-bar .btn {flex:1 1 130px;}
+    .experience-pagination {justify-content:center;}
+}

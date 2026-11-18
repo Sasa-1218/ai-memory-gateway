@@ -41,14 +41,18 @@ class SummaryHealthStructureTests(unittest.TestCase):
         self.assertNotIn("deliver_summary_health_alert", route)
 
     def test_success_is_recorded_after_state_write(self):
-        start = self.main_source.index("if rotation_count > 0:")
+        # The gateway now uses an atomic compare-and-swap instead of the old
+        # unconditional save. A concurrent writer must not be reported as success.
+        start = self.main_source.index("if rotation_count > 0:\\n        try:".replace("\\n", "\n"))
         end = self.main_source.index("if cache_diag is not None:", start)
         block = self.main_source[start:end]
+        self.assertIn("committed = await save_partition_summary_if_unchanged(", block)
+        self.assertIn("if not committed:", block)
+        self.assertIn("if committed and not rotation_failed:", block)
         self.assertLess(
-            block.index("await save_session_cache_state"),
-            block.index("await _record_summary_success_safe"),
+            block.index("committed = await save_partition_summary_if_unchanged("),
+            block.index("await _record_summary_success_safe("),
         )
-        self.assertIn("if not rotation_failed:", block)
 
 
 class SummaryHealthAlertTests(unittest.TestCase):

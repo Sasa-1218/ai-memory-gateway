@@ -260,6 +260,7 @@ class ExperienceCardDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
         self.asyncpg = asyncpg
         self.db = database
+        self.original_database_url = database.DATABASE_URL
         await database.close_pool()
         self.admin_url = os.environ["EXPERIENCE_CARD_TEST_DATABASE_URL"]
         self.database_name = f"experience_card_{uuid.uuid4().hex}"
@@ -316,6 +317,7 @@ class ExperienceCardDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.db.close_pool()
+        self.db.DATABASE_URL = self.original_database_url
         admin = await self.asyncpg.connect(self.admin_url)
         try:
             await admin.execute(f'DROP DATABASE IF EXISTS "{self.database_name}" WITH (FORCE)')

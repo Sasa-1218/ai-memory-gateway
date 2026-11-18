@@ -349,6 +349,28 @@ async def init_tables():
             );
         """)
 
+        # 不依赖历史行数的摘要边界；历史删除不会移动消息ID。
+        await conn.execute("""
+            ALTER TABLE session_cache_state
+            ADD COLUMN IF NOT EXISTS summary_checkpoint_user_id BIGINT;
+        """)
+
+        # 历史摘要归档：保存用户手动备份/自动归档的旧摘要，不默认注入聊天
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS historical_summaries (
+                id              BIGSERIAL PRIMARY KEY,
+                session_id      TEXT NOT NULL DEFAULT '',
+                period_label    TEXT NOT NULL DEFAULT '',
+                content         TEXT NOT NULL,
+                source          TEXT NOT NULL DEFAULT 'manual_backup',
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_historical_summaries_session_created
+            ON historical_summaries (session_id, created_at DESC);
+        """)
+
         # 摘要流水线健康状态：只保存脱敏状态，不保存摘要或聊天正文
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS summary_health_status (
@@ -1523,7 +1545,7 @@ async def compute_embedding(text: str) -> list:
         if EMBEDDING_DIM > 0:
             body["dimensions"] = EMBEDDING_DIM
         
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:
             resp = await client.post(
                 f"{EMBEDDING_BASE_URL}/embeddings",
                 headers={
@@ -2204,12 +2226,15 @@ async def get_all_memories_count():
 
 
 async def get_all_memories():
-    """导出所有记忆（用于备份）"""
+    """导出所有记忆（完整字段，用于备份、迁移和离线检查）"""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT content, importance, source_session, created_at FROM memories ORDER BY id"
-        )
+        rows = await conn.fetch("""
+            SELECT id, content, importance, source_session, created_at, last_accessed,
+                   layer, title, is_active, merged_from, event_date
+            FROM memories
+            ORDER BY id
+        """)
         return [dict(r) for r in rows]
 
 
@@ -2785,6 +2810,131 @@ async def update_experience_card(card_id: int, update: dict):
         return _experience_card_dict(row)
 
 
+
+async def bulk_review_experience_cards(card_ids: list[int], operation: str):
+    """Atomic, explicit human review. Replacement candidates require group approval."""
+    if operation not in ("approve", "archive"):
+        raise ValueError("invalid_bulk_experience_operation")
+    if not isinstance(card_ids, list) or not 1 <= len(card_ids) <= 30:
+        raise ValueError("bulk_experience_limit_1_to_30")
+    if any(isinstance(cid, bool) or not isinstance(cid, int) or cid < 1 for cid in card_ids):
+        raise ValueError("invalid_experience_card_id")
+    if len(card_ids) != len(set(card_ids)):
+        raise ValueError("duplicate_experience_card_id")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            rows = await conn.fetch("""
+                SELECT id, review_status, ai_visible, supersedes_card_id,
+                       title, event_summary, source_message_ids
+                FROM shared_experience_cards
+                WHERE id = ANY($1::bigint[])
+                ORDER BY id
+                FOR UPDATE
+            """, card_ids)
+            if len(rows) != len(card_ids):
+                raise ValueError("cards_changed_reload_selection")
+            for row in rows:
+                if row["review_status"] != "pending" or row["ai_visible"]:
+                    raise ValueError("only_pending_cards_can_be_bulk_reviewed")
+                if row["supersedes_card_id"] is not None:
+                    raise ValueError("replacement_candidates_need_group_approval")
+                if operation == "approve" and (
+                    not (row["title"] or "").strip()
+                    or not (row["event_summary"] or "").strip()
+                    or not row["source_message_ids"]
+                ):
+                    raise ValueError("incomplete_card_requires_individual_review")
+            if operation == "approve":
+                changed = await conn.fetch("""
+                    UPDATE shared_experience_cards SET
+                        review_status='approved', ai_visible=TRUE,
+                        approved_at=NOW(), updated_at=NOW()
+                    WHERE id=ANY($1::bigint[]) RETURNING id
+                """, card_ids)
+            else:
+                changed = await conn.fetch("""
+                    UPDATE shared_experience_cards SET
+                        review_status='archived', ai_visible=FALSE,
+                        approved_at=NULL, updated_at=NOW()
+                    WHERE id=ANY($1::bigint[]) RETURNING id
+                """, card_ids)
+            if len(changed) != len(card_ids):
+                raise ValueError("bulk_experience_update_incomplete")
+            return {"updated": len(changed), "operation": operation,
+                    "ids": sorted(row["id"] for row in changed)}
+
+
+async def retrieve_experience_recall(session_id: str, user_message: str,
+                                     min_round_gap: int = 4, limit: int = 1) -> str:
+    """Read only approved cards; durable per-session cooldown for cue recall."""
+    from experience_recall import match_experience_cards, format_experience_recall
+    if not session_id or not user_message or len(user_message) > 10000:
+        return ""
+    min_round_gap = max(1, min(int(min_round_gap), 100))
+    limit = max(1, min(int(limit), 2))
+    pool = await get_pool()
+    key = "experience_recall_last_round:" + session_id
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Serialize requests for this same session, including parallel Kelivo calls.
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", key)
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM conversations WHERE session_id=$1 AND role='user'",
+                session_id)
+            round_no = int(count or 0) + 1
+            previous_raw = await conn.fetchval(
+                "SELECT value FROM gateway_config WHERE key=$1", key)
+            try:
+                recent = json.loads(previous_raw) if previous_raw else {}
+                if not isinstance(recent, dict):
+                    recent = {"round": int(previous_raw)}
+            except (TypeError, ValueError):
+                try:
+                    recent = {"round": int(previous_raw or 0)}
+                except (TypeError, ValueError):
+                    recent = {}
+            previous_round = int(recent.get("round") or 0)
+            delta_rounds = round_no - previous_round
+            # If history was reset, do not block recall indefinitely.
+            if previous_round and 0 <= delta_rounds < min_round_gap:
+                return ""
+            rows = await conn.fetch("""
+                SELECT id, review_status, ai_visible, title, key_details,
+                       event_summary, interaction_trace,
+                       event_date_start, event_date_end
+                FROM shared_experience_cards
+                WHERE review_status='approved' AND ai_visible=TRUE
+                ORDER BY approved_at DESC NULLS LAST, id DESC
+                LIMIT 1000
+            """)
+            candidates = []
+            for row in rows:
+                item = dict(row)
+                if isinstance(item.get("key_details"), str):
+                    try:
+                        item["key_details"] = json.loads(item["key_details"])
+                    except (ValueError, TypeError):
+                        item["key_details"] = []
+                candidates.append(item)
+            selected = match_experience_cards(user_message, candidates, 2)
+            if not selected:
+                return ""
+            # Prevent the same card being offered repeatedly across a short chat.
+            # If the most relevant card was offered recently, try the next match.
+            previous_card = int(recent.get("card_id") or 0)
+            if previous_card and delta_rounds >= 0 and delta_rounds < max(20, min_round_gap):
+                selected = [card for card in selected if int(card["id"]) != previous_card]
+            selected = selected[:limit]
+            if not selected:
+                return ""
+            await conn.execute("""
+                INSERT INTO gateway_config (key,value) VALUES ($1,$2)
+                ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
+            """, key, json.dumps({"round": round_no, "card_id": int(selected[0]["id"])}))
+            return format_experience_recall(selected)
+
+
 # ============================================================
 # 网关配置
 # ============================================================
@@ -2817,17 +2967,27 @@ async def get_all_gateway_config() -> dict:
 # 对话历史读取（分区缓存用）
 # ============================================================
 
-async def get_conversation_messages(session_id: str, limit: int = 100):
-    """按时间正序读取session的消息"""
+async def get_conversation_messages(session_id: str, limit: int | None = 100):
+    """按时间正序读取session的消息；完整摘要读取时limit=None。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT role, content, metadata, created_at
-            FROM conversations
-            WHERE session_id = $1
-            ORDER BY created_at ASC
-            LIMIT $2
-        """, session_id, limit)
+        if limit is None:
+            rows = await conn.fetch("""
+                SELECT id, role, content, metadata, created_at
+                FROM conversations
+                WHERE session_id = $1
+                ORDER BY created_at ASC, id ASC
+            """, session_id)
+        else:
+            if int(limit) < 1:
+                raise ValueError("conversation_history_limit_must_be_positive")
+            rows = await conn.fetch("""
+                SELECT id, role, content, metadata, created_at
+                FROM conversations
+                WHERE session_id = $1
+                ORDER BY created_at ASC, id ASC
+                LIMIT $2
+            """, session_id, int(limit))
         return [dict(r) for r in rows]
 
 
@@ -2839,7 +2999,7 @@ async def get_session_cache_state(session_id: str) -> dict:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT summary, a_start_round, updated_at FROM session_cache_state WHERE session_id = $1",
+            "SELECT summary, a_start_round, updated_at, summary_checkpoint_user_id FROM session_cache_state WHERE session_id = $1",
             session_id
         )
         if row:
@@ -2858,22 +3018,281 @@ async def get_session_cache_state(session_id: str) -> dict:
             return {
                 'summary_parts': summary_parts,
                 'a_start_round': row['a_start_round'] or 0,
+                'summary_checkpoint_user_id': row['summary_checkpoint_user_id'],
                 'updated_at': row['updated_at'],
             }
-        return {'summary_parts': [], 'a_start_round': 0, 'updated_at': None}
+        return {'summary_parts': [], 'a_start_round': 0, 'summary_checkpoint_user_id': None, 'updated_at': None}
 
 
-async def save_session_cache_state(session_id: str, summary_parts: list, a_start_round: int):
+async def save_session_cache_state(
+    session_id: str, summary_parts: list, a_start_round: int,
+    checkpoint_user_id: int = None,
+):
     import json
     summary_json = json.dumps(summary_parts, ensure_ascii=False)
+    # Existing callers (manual edits, repair tools) retain a checkpoint,
+    # while clearing the summary also clears the checkpoint.
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO session_cache_state (session_id, summary, a_start_round, updated_at)
-            VALUES ($1, $2, $3, NOW())
-            ON CONFLICT (session_id) 
-            DO UPDATE SET summary = $2, a_start_round = $3, updated_at = NOW()
-        """, session_id, summary_json, a_start_round)
+            INSERT INTO session_cache_state
+                (session_id, summary, a_start_round, summary_checkpoint_user_id, updated_at)
+            VALUES ($1, $2, $3, $4, NOW())
+            ON CONFLICT (session_id)
+            DO UPDATE SET summary = $2, a_start_round = $3,
+                summary_checkpoint_user_id = CASE
+                    WHEN $5 THEN COALESCE($4, session_cache_state.summary_checkpoint_user_id)
+                    ELSE NULL END,
+                updated_at = NOW()
+        """, session_id, summary_json, a_start_round, checkpoint_user_id, bool(summary_parts))
+
+
+async def replace_manual_summary_if_unchanged(
+    session_id: str, expected_parts: list, expected_start: int,
+    expected_checkpoint_user_id, replacement_parts: list,
+) -> bool:
+    """Snapshot and replace a complete summary without losing concurrent writes.
+
+    A textual replacement preserves the old summary's coverage boundary. Clearing
+    the summary resets both the position cursor and stable ID checkpoint.
+    """
+    import json
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT summary, a_start_round, summary_checkpoint_user_id "
+                "FROM session_cache_state WHERE session_id=$1 FOR UPDATE",
+                session_id,
+            )
+            if row is None:
+                if expected_parts or expected_start or expected_checkpoint_user_id is not None:
+                    return False
+                has_history = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM conversations WHERE session_id=$1)",
+                    session_id,
+                )
+                starting_checkpoint = (
+                    0 if replacement_parts and not has_history else None
+                )
+                await conn.execute(
+                    "INSERT INTO session_cache_state "
+                    "(session_id, summary, a_start_round, summary_checkpoint_user_id, updated_at) "
+                    "VALUES($1,$2,0,$3,NOW())",
+                    session_id, json.dumps(replacement_parts, ensure_ascii=False),
+                    starting_checkpoint,
+                )
+                return True
+            try:
+                previous_parts = json.loads(row["summary"] or "[]")
+                if isinstance(previous_parts, str):
+                    previous_parts = [previous_parts] if previous_parts else []
+            except (ValueError, TypeError):
+                previous_parts = [row["summary"]] if row["summary"] else []
+            if (
+                previous_parts != expected_parts
+                or int(row["a_start_round"] or 0) != int(expected_start)
+                or row["summary_checkpoint_user_id"] != expected_checkpoint_user_id
+            ):
+                return False
+            snapshot = json.dumps({
+                "format": "summary_repair_snapshot_v1",
+                "summary_parts": previous_parts,
+                "a_start_round": int(row["a_start_round"] or 0),
+                "summary_checkpoint_user_id": row["summary_checkpoint_user_id"],
+                "reason": "manual_whole_summary_replace",
+            }, ensure_ascii=False)
+            await conn.execute(
+                "INSERT INTO historical_summaries "
+                "(session_id, period_label, content, source) "
+                "VALUES($1,$2,$3,'repair_snapshot')",
+                session_id, "整体摘要替换前自动快照", snapshot,
+            )
+            await conn.execute(
+                "UPDATE session_cache_state SET summary=$2, a_start_round=$3, "
+                "summary_checkpoint_user_id=$4, updated_at=NOW() WHERE session_id=$1",
+                session_id, json.dumps(replacement_parts, ensure_ascii=False),
+                int(row["a_start_round"] or 0) if replacement_parts else 0,
+                row["summary_checkpoint_user_id"] if replacement_parts else None,
+            )
+            return True
+
+
+async def save_partition_summary_if_unchanged(
+    session_id: str, old_parts: list, old_start: int,
+    old_checkpoint_user_id, new_parts: list, new_start: int,
+    new_checkpoint_user_id: int, expected_updated_at=None,
+) -> bool:
+    """CAS summary and watermark together; never overwrite a competing writer.
+
+    Legacy rows can store an empty string or raw text rather than JSON. Compare
+    safely as text rather than casting legacy content to jsonb.
+    """
+    import json
+    pool = await get_pool()
+    old_json = json.dumps(old_parts, ensure_ascii=False)
+    raw_old = old_parts[0] if len(old_parts) == 1 else None
+    new_json = json.dumps(new_parts, ensure_ascii=False)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            changed = await conn.fetchval("""
+                UPDATE session_cache_state
+                SET summary=$5, a_start_round=$6,
+                    summary_checkpoint_user_id=$7, updated_at=NOW()
+                WHERE session_id=$1
+                  AND (
+                      summary=$2
+                      OR (COALESCE(summary, '')='' AND $2='[]')
+                      OR ($8::text IS NOT NULL AND summary=$8::text)
+                  )
+                  AND a_start_round=$3
+                  AND summary_checkpoint_user_id IS NOT DISTINCT FROM $4
+                  AND updated_at IS NOT DISTINCT FROM $9
+                RETURNING session_id
+            """, session_id, old_json, int(old_start),
+                old_checkpoint_user_id, new_json, int(new_start),
+                int(new_checkpoint_user_id), raw_old, expected_updated_at)
+            if changed is not None:
+                return True
+            # Some sessions have no cache row until their very first rotation.
+            # Insert only if the empty state we read was still genuinely absent.
+            if (
+                not old_parts and int(old_start) == 0
+                and old_checkpoint_user_id is None
+                and expected_updated_at is None
+            ):
+                created = await conn.fetchval("""
+                    INSERT INTO session_cache_state (
+                        session_id, summary, a_start_round,
+                        summary_checkpoint_user_id, updated_at
+                    ) VALUES ($1,$2,$3,$4,NOW())
+                    ON CONFLICT (session_id) DO NOTHING
+                    RETURNING session_id
+                """, session_id, new_json, int(new_start),
+                    int(new_checkpoint_user_id))
+                return created is not None
+    return False
+
+async def resume_legacy_partition_if_unchanged(
+    session_id: str, expected_parts: list, expected_start: int,
+    expected_updated_at, resume_plan: dict,
+) -> bool:
+    """One-time audited legacy transition; leave all summary text unchanged.
+
+    Replay the last X stored rounds in the next normal rotation. A snapshot
+    preserves the old cursor and records unresolved older coverage for review.
+    A competing writer causes a no-op instead of a state overwrite.
+    """
+    import json
+    checkpoint = int(resume_plan["checkpoint_user_id"])
+    if checkpoint < 0:
+        raise ValueError("invalid_legacy_checkpoint")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT summary, a_start_round, summary_checkpoint_user_id, updated_at "
+                "FROM session_cache_state WHERE session_id=$1 FOR UPDATE",
+                session_id,
+            )
+            if not row:
+                return False
+            raw_summary = row["summary"] or ""
+            try:
+                current_parts = json.loads(raw_summary) if raw_summary else []
+                if not isinstance(current_parts, list):
+                    current_parts = [raw_summary]
+            except (TypeError, ValueError):
+                current_parts = [raw_summary]
+            if (
+                current_parts != expected_parts
+                or int(row["a_start_round"] or 0) != int(expected_start)
+                or row["summary_checkpoint_user_id"] is not None
+                or row["updated_at"] != expected_updated_at
+            ):
+                return False
+            snapshot = json.dumps({
+                "format": "summary_repair_snapshot_v1",
+                "reason": "legacy_resume_with_recent_overlap",
+                "summary_parts": current_parts,
+                "a_start_round": int(row["a_start_round"] or 0),
+                "summary_checkpoint_user_id": None,
+                "unverified_historical_coverage": True,
+                "resume_plan": resume_plan,
+            }, ensure_ascii=False)
+            await conn.execute(
+                "INSERT INTO historical_summaries "
+                "(session_id, period_label, content, source) "
+                "VALUES($1,$2,$3,'repair_snapshot')",
+                session_id, "旧摘要恢复轮转前快照（覆盖范围待核实）", snapshot,
+            )
+            # Align the positional cursor with the exact replay index as well.
+            # The old value is preserved in the snapshot for explicit rollback.
+            replay_cursor = int(resume_plan["first_replay_round_index"])
+            if replay_cursor < 0 or replay_cursor > int(resume_plan["history_rounds_at_migration"]):
+                raise ValueError("invalid_legacy_replay_cursor")
+            changed = await conn.fetchval(
+                "UPDATE session_cache_state SET summary_checkpoint_user_id=$2, "
+                "a_start_round=$3, updated_at=NOW() WHERE session_id=$1 "
+                "AND summary_checkpoint_user_id IS NULL RETURNING session_id",
+                session_id, checkpoint, replay_cursor,
+            )
+            if changed is None:
+                raise RuntimeError("legacy_checkpoint_update_conflict")
+            return True
+
+
+async def save_historical_summary(
+    content: str,
+    period_label: str = "",
+    session_id: str = "",
+    source: str = "manual_backup",
+) -> int:
+    """保存历史摘要归档。历史摘要默认不参与聊天注入。"""
+    clean_content = str(content or "").strip()
+    if not clean_content:
+        raise ValueError("historical_summary_content_required")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO historical_summaries (session_id, period_label, content, source)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id
+        """, str(session_id or ""), str(period_label or "")[:200], clean_content, str(source or "manual_backup")[:50])
+        return int(row["id"])
+
+
+async def list_historical_summaries(session_id: str = "", limit: int = 100) -> list:
+    """列出历史摘要归档；仅管理用途，不自动注入聊天。"""
+    pool = await get_pool()
+    limit = max(1, min(int(limit or 100), 500))
+    async with pool.acquire() as conn:
+        if session_id:
+            rows = await conn.fetch("""
+                SELECT id, session_id, period_label, content, source, created_at
+                FROM historical_summaries
+                WHERE session_id = $1
+                ORDER BY created_at DESC, id DESC
+                LIMIT $2
+            """, session_id, limit)
+        else:
+            rows = await conn.fetch("""
+                SELECT id, session_id, period_label, content, source, created_at
+                FROM historical_summaries
+                ORDER BY created_at DESC, id DESC
+                LIMIT $1
+            """, limit)
+        return [dict(row) for row in rows]
+
+
+async def delete_historical_summary(summary_id: int) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM historical_summaries WHERE id = $1",
+            int(summary_id),
+        )
+        return result.endswith("1")
 
 
 async def record_summary_attempt(
@@ -3325,7 +3744,12 @@ def db_row_to_message(row: dict) -> dict:
     meta_str = row.get("metadata")
     if meta_str:
         try:
-            meta = _json.loads(meta_str)
+            meta = _json.loads(meta_str) if isinstance(meta_str, str) else meta_str
+            if not isinstance(meta, dict):
+                meta = {}
+            # user原始多模态content优先于纯文字content列
+            if row["role"] == "user" and isinstance(meta.get("multimodal_content"), list):
+                msg["content"] = meta["multimodal_content"]
             # assistant 带 tool_calls
             if "tool_calls" in meta:
                 msg["tool_calls"] = meta["tool_calls"]
@@ -3351,7 +3775,7 @@ async def export_all_conversations():
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT session_id, role, content, model, created_at
+            SELECT session_id, role, content, model, metadata, created_at
             FROM conversations
             ORDER BY session_id, created_at
         """)
@@ -3361,6 +3785,7 @@ async def export_all_conversations():
                 'role': r['role'],
                 'content': r['content'],
                 'model': r['model'] or '',
+                'metadata': r['metadata'],
                 'created_at': r['created_at'].isoformat() if r['created_at'] else None,
             }
             for r in rows
@@ -3371,7 +3796,7 @@ async def import_conversations(records: list):
     """
     导入对话记录（自动去重）
     
-    records: [{ session_id, role, content, model?, created_at? }, ...]
+    records: [{ session_id, role, content, model?, metadata?, created_at? }, ...]
     按 session_id + role + created_at 三元组去重，已存在的跳过。
     返回 (导入数量, 跳过数量)
     """
@@ -3387,7 +3812,18 @@ async def import_conversations(records: list):
             role = r.get('role')
             content = r.get('content')
             
-            if not all([session_id, role, content]):
+            if not session_id or not role:
+                continue
+            metadata = r.get('metadata')
+            # 允许图片-only消息：content可以为空，只要metadata中带有多模态content。
+            has_multimodal = False
+            if metadata:
+                try:
+                    parsed_metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+                    has_multimodal = isinstance(parsed_metadata, dict) and isinstance(parsed_metadata.get('multimodal_content'), list)
+                except Exception:
+                    has_multimodal = False
+            if not content and not has_multimodal:
                 continue
             
             model = r.get('model', '')
@@ -3414,14 +3850,14 @@ async def import_conversations(records: list):
                     continue
                 
                 await conn.execute("""
-                    INSERT INTO conversations (session_id, role, content, model, created_at)
-                    VALUES ($1, $2, $3, $4, $5)
-                """, session_id, role, content, model, created_at)
+                    INSERT INTO conversations (session_id, role, content, model, metadata, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                """, session_id, role, content, model, metadata, created_at)
             else:
                 await conn.execute("""
-                    INSERT INTO conversations (session_id, role, content, model)
-                    VALUES ($1, $2, $3, $4)
-                """, session_id, role, content, model)
+                    INSERT INTO conversations (session_id, role, content, model, metadata)
+                    VALUES ($1, $2, $3, $4, $5)
+                """, session_id, role, content, model, metadata)
             
             imported += 1
         

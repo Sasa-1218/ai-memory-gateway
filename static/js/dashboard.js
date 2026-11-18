@@ -183,6 +183,7 @@ function switchSection(name) {
     }
     if (name === 'threads') {
         loadThreads();
+        loadHistoricalSummaries();
     }
     if (name === 'settings') {
         loadSettings();
@@ -951,93 +952,239 @@ async function loadMemories() {
 // ============================================
 const EXPERIENCE_STATUS_LABELS = {
     pending: '待检查',
-    approved: 'AI 可见',
+    approved: '已批准',
     archived: '仅归档',
     deleted: '回收站',
     superseded: '已被纠正'
 };
+const EXPERIENCE_PAGE_SIZE = 12;
+let experiencePage = 1;
+let experienceSelectedIds = new Set();
+let experienceVisiblePage = [];
 
-async function loadExperienceCards() {
+function resetExperienceCardFilters() {
+    experiencePage = 1;
+    experienceSelectedIds.clear();
+    updateExperienceBulkToolbar();
+}
+
+function canBulkReviewExperience(card) {
+    return card.review_status === 'pending' &&
+        !card.ai_visible && !card.supersedes_card_id;
+}
+
+async function changeExperienceVisibility() {
+    const status = document.getElementById('experienceCardStatus');
+    // Visibility is an independent filter across all review statuses.
+    if (status && status.value) {
+        status.value = '';
+        resetExperienceCardFilters();
+        await loadExperienceCards();
+    } else {
+        resetExperienceCardFilters();
+        renderExperienceCards();
+    }
+}
+
+function clearExperienceSelection() {
+    experienceSelectedIds.clear();
+    renderExperienceCards();
+}
+
+function selectExperienceCard(id, checked) {
+    const card = experienceCards.find(c => c.id === id);
+    if (!card || !canBulkReviewExperience(card)) return;
+    if (checked) experienceSelectedIds.add(id);
+    else experienceSelectedIds.delete(id);
+    updateExperienceBulkToolbar();
+}
+
+function selectExperiencePage(checked) {
+    for (const card of experienceVisiblePage) {
+        if (canBulkReviewExperience(card)) {
+            if (checked) experienceSelectedIds.add(card.id);
+            else experienceSelectedIds.delete(card.id);
+        }
+    }
+    renderExperienceCards();
+}
+
+function updateExperienceBulkToolbar() {
+    const valid = new Set(experienceCards.filter(canBulkReviewExperience).map(c => c.id));
+    experienceSelectedIds = new Set([...experienceSelectedIds].filter(id => valid.has(id)));
+    const count = experienceSelectedIds.size;
+    const status = document.getElementById('experienceSelectedCount');
+    if (status) status.textContent = '已选 ' + count + ' 张（每批最多30张）';
+    for (const id of ['experienceBulkApprove', 'experienceBulkArchive']) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = count === 0 || count > 30;
+    }
+    const selectPage = document.getElementById('experienceSelectPage');
+    const eligible = experienceVisiblePage.filter(canBulkReviewExperience);
+    if (selectPage) {
+        selectPage.disabled = eligible.length === 0;
+        selectPage.checked = eligible.length > 0 &&
+            eligible.every(c => experienceSelectedIds.has(c.id));
+        selectPage.indeterminate = !selectPage.checked &&
+            eligible.some(c => experienceSelectedIds.has(c.id));
+    }
+}
+
+async function bulkReviewExperiences(operation) {
+    if (!['approve', 'archive'].includes(operation)) return;
+    const cards = experienceCards.filter(c => experienceSelectedIds.has(c.id));
+    if (!cards.length || cards.length > 30 || cards.some(c => !canBulkReviewExperience(c))) {
+        alert('请选择1至30张普通待检查经历卡，替代旧卡的候选需要单独审核。');
+        return;
+    }
+    const action = operation === 'approve' ? '批准并设为 AI 可见' : '仅归档';
+    const examples = cards.slice(0, 8).map(c => '· ' + c.title).join('\n');
+    if (!confirm('确定将 ' + cards.length + ' 张经历卡' + action +
+        '吗？\n\n' + examples + (cards.length > 8 ? '\n……' : '') +
+        '\n\n批量审核仅修改所选经历卡，不更改对话或摘要。')) return;
+    const approve = document.getElementById('experienceBulkApprove');
+    const archive = document.getElementById('experienceBulkArchive');
+    approve.disabled = archive.disabled = true;
+    try {
+        const resp = await fetch('/api/experience-cards/bulk-review', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({operation,card_ids:cards.map(c=>c.id)})
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'HTTP ' + resp.status);
+        experienceSelectedIds.clear();
+        await loadExperienceCards(true);
+        const msg = document.getElementById('experienceCardMsg');
+        if (msg) msg.textContent = '已' + action + ' ' + data.updated + ' 张经历卡。';
+    } catch(error) {
+        alert('没有确认批量审核成功：' + error.message +
+              '\n请刷新列表核对状态后再操作，不要重复提交。');
+    } finally {
+        updateExperienceBulkToolbar();
+    }
+}
+
+async function loadExperienceCards(keepPage = false) {
     const list = document.getElementById('experienceCardList');
     if (!list) return;
     const status = document.getElementById('experienceCardStatus')?.value || '';
-    list.innerHTML = '<div class="card" style="padding:20px; color:var(--text-muted);">正在加载...</div>';
+    list.innerHTML = '<div class="card" style="padding:20px;">正在读取经历卡…</div>';
     try {
-        const query = status ? `?status=${encodeURIComponent(status)}` : '';
-        const resp = await fetch('/api/experience-cards' + query);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const query = status ? '?status=' + encodeURIComponent(status) + '&limit=1000' : '?limit=1000';
+        const resp = await fetch('/api/experience-cards' + query, {cache:'no-store'});
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
         experienceCards = data.cards || [];
-        const stats = document.getElementById('experienceCardStats');
-        if (stats) stats.textContent = `${experienceCards.length} 张；当前召回未接入`;
+        experienceSelectedIds.clear();
+        if (!keepPage) experiencePage = 1;
         renderExperienceCards();
-    } catch (e) {
-        list.innerHTML = `<div class="card" style="padding:20px; color:var(--danger);">加载失败：${escapeHtml(e.message)}</div>`;
+    } catch (error) {
+        list.textContent = '读取经历卡失败：' + error.message;
+    }
+}
+
+function filteredExperienceCards() {
+    const query = (document.getElementById('experienceCardSearch')?.value || '').trim().toLowerCase();
+    const visibility = document.getElementById('experienceCardVisibility')?.value || 'all';
+    return experienceCards.filter(card => {
+        const visible = card.review_status === 'approved' && card.ai_visible === true;
+        if (visibility === 'visible' && !visible) return false;
+        if (visibility === 'hidden' && visible) return false;
+        if (!query) return true;
+        const haystack = [card.title, card.event_summary, card.interaction_trace,
+            ...(Array.isArray(card.key_details) ? card.key_details : [])].join('\n').toLowerCase();
+        return haystack.includes(query);
+    });
+}
+
+function setExperiencePage(next) {
+    const pages = Math.max(1, Math.ceil(filteredExperienceCards().length / EXPERIENCE_PAGE_SIZE));
+    experiencePage = Math.max(1, Math.min(next, pages));
+    renderExperienceCards();
+    document.getElementById('section-experience-cards')?.scrollIntoView({block:'start',behavior:'instant'});
+}
+
+function renderExperiencePagination(pageCount, count) {
+    const text = '第 ' + experiencePage + ' / ' + pageCount + ' 页 · 共 ' + count + ' 张';
+    const previous = experiencePage === 1 ? 'disabled' : '';
+    const next = experiencePage >= pageCount ? 'disabled' : '';
+    const html = '<span>' + text + '</span>' +
+        '<button type="button" class="btn btn-sm" onclick="setExperiencePage(' +
+        (experiencePage - 1) + ')" ' + previous + '>上一页</button>' +
+        '<button type="button" class="btn btn-sm" onclick="setExperiencePage(' +
+        (experiencePage + 1) + ')" ' + next + '>下一页</button>';
+    for (const id of ['experienceCardPagination', 'experienceCardPaginationBottom']) {
+        const node = document.getElementById(id);
+        if (node) node.innerHTML = html;
     }
 }
 
 function renderExperienceCards() {
     const list = document.getElementById('experienceCardList');
     if (!list) return;
-    const query = (document.getElementById('experienceCardSearch')?.value || '').trim().toLowerCase();
-    const cards = experienceCards.filter(card => {
-        if (!query) return true;
-        return `${card.title || ''}\n${card.event_summary || ''}`.toLowerCase().includes(query);
-    });
+    const cards = filteredExperienceCards();
+    const pageCount = Math.max(1, Math.ceil(cards.length / EXPERIENCE_PAGE_SIZE));
+    experiencePage = Math.min(experiencePage, pageCount);
+    const offset = (experiencePage - 1) * EXPERIENCE_PAGE_SIZE;
+    experienceVisiblePage = cards.slice(offset, offset + EXPERIENCE_PAGE_SIZE);
+    const stats = document.getElementById('experienceCardStats');
+    if (stats) stats.textContent = '符合条件 ' + cards.length + ' / 已加载 ' + experienceCards.length + ' 张';
+    renderExperiencePagination(pageCount, cards.length);
     if (!cards.length) {
-        list.innerHTML = '<div class="card" style="padding:24px; color:var(--text-muted);">共同经历卡片自动生成当前默认关闭；页面为空是正常的。之后生成的卡片会先进入待检查，人工批准后才可能 AI 可见。</div>';
+        list.innerHTML = '<div class="card" style="padding:20px;">当前条件下没有经历卡，试试修改状态或可见性筛选。</div>';
+        updateExperienceBulkToolbar();
         return;
     }
-    list.innerHTML = cards.map(card => {
+    list.innerHTML = experienceVisiblePage.map(card => {
         const status = EXPERIENCE_STATUS_LABELS[card.review_status] || card.review_status;
         const visible = card.review_status === 'approved' && card.ai_visible;
         const dateLabel = card.event_date_start
             ? (card.event_date_end && card.event_date_end !== card.event_date_start
-                ? `${card.event_date_start} 至 ${card.event_date_end}` : card.event_date_start)
+                ? card.event_date_start + ' 至 ' + card.event_date_end : card.event_date_start)
             : '事件日期未明确';
         const details = Array.isArray(card.key_details) ? card.key_details : [];
-        const operationLabel = card.generation_operation === 'split' ? '拆分'
-            : card.generation_operation === 'regenerate' ? '重新生成'
-            : card.generation_operation === 'auto_generate' ? '静默后自动生成'
-            : card.generation_operation === 'manual_generate' ? '手动生成' : '';
+        const eligible = canBulkReviewExperience(card);
+        const checkbox = eligible ?
+            '<input type="checkbox" aria-label="选中这张待检查经历卡" ' +
+            (experienceSelectedIds.has(card.id) ? 'checked ' : '') +
+            'onchange="selectExperienceCard(' + card.id + ', this.checked)">' : '';
         const sourceRelation = card.supersedes_card_id
-            ? `<div style="margin-top:8px; color:var(--text-muted); font-size:12px;">来源：${escapeHtml(operationLabel || '替代候选')} · 旧卡 #${card.supersedes_card_id}${card.replacement_group_size > 1 ? ` · 同组 ${card.replacement_group_size} 张` : ''} · 任务 ${escapeHtml(card.generation_job_status || '-')}</div>`
-            : (operationLabel ? `<div style="margin-top:8px; color:var(--text-muted); font-size:12px;">来源：${escapeHtml(operationLabel)} · 任务 ${escapeHtml(card.generation_job_status || '-')}</div>` : '');
-        const comparison = card.replacement_requires_approval
-            ? `<details style="margin-top:10px; padding:10px; border:1px solid var(--border);"><summary style="cursor:pointer; color:var(--text-muted);">对比当前 AI 可见旧卡 #${card.supersedes_card_id}</summary><strong style="display:block; margin-top:8px;">${escapeHtml(card.source_card_title || '未命名经历')}</strong><div style="white-space:pre-wrap; margin-top:6px; color:var(--text-light);">${escapeHtml(card.source_card_summary || '')}</div></details>`
-            : '';
-        let actions = `<button class="btn btn-sm btn-secondary" onclick="openExperienceCard(${card.id})">查看与编辑</button>`;
+            ? '<p class="experience-muted">替代候选 · 旧卡 #' + card.supersedes_card_id +
+              '（请使用整组替代审核）</p>' : '';
+        let actions = '<button class="btn btn-sm btn-secondary" onclick="openExperienceCard(' +
+            card.id + ')">查看与编辑</button>';
         if (card.review_status === 'pending' && card.replacement_requires_approval) {
-            const groupText = card.replacement_group_size > 1 ? `整组 ${card.replacement_group_size} 张替代旧卡` : '用新卡替代旧卡';
-            actions += ` <button class="btn btn-sm btn-primary" onclick="approveExperienceReplacement(${card.id}, ${card.replacement_group_size || 1})">${groupText}</button>`;
+            actions += '<button class="btn btn-sm btn-primary" onclick="approveExperienceReplacement(' +
+                card.id + ', ' + (card.replacement_group_size || 1) + ')">审核整组替代</button>';
         }
         if (card.review_status === 'deleted') {
-            actions += ` <button class="btn btn-sm btn-primary" onclick="restoreExperienceCard(${card.id})">恢复到待检查</button>`;
+            actions += '<button class="btn btn-sm" onclick="restoreExperienceCard(' + card.id + ')">恢复到待检查</button>';
         } else if (card.review_status !== 'superseded') {
-            actions += ` <button class="btn btn-sm btn-secondary" onclick="reprocessExperienceCard(${card.id}, 'regenerate')">重新生成</button>`;
-            actions += ` <button class="btn btn-sm btn-secondary" onclick="reprocessExperienceCard(${card.id}, 'split')">拆成多张</button>`;
-            actions += ` <button class="btn btn-sm btn-warning" onclick="setExperienceCardStatus(${card.id}, 'archived', false)">仅归档</button>`;
-            actions += ` <button class="btn btn-sm btn-danger" onclick="deleteExperienceCard(${card.id})">删除</button>`;
+            actions += '<details class="experience-actions-more"><summary>更多操作</summary><div class="experience-actions">' +
+                '<button class="btn btn-sm" onclick="reprocessExperienceCard(' + card.id + ', \'regenerate\')">重新生成</button>' +
+                '<button class="btn btn-sm" onclick="reprocessExperienceCard(' + card.id + ', \'split\')">拆分多张</button>' +
+                '<button class="btn btn-sm btn-warning" onclick="setExperienceCardStatus(' + card.id + ', \'archived\', false)">仅归档</button>' +
+                '<button class="btn btn-sm btn-danger" onclick="deleteExperienceCard(' + card.id + ')">删除</button>' +
+                '</div></details>';
         }
-        return `<article class="card" style="padding:16px;">
-            <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start; flex-wrap:wrap;">
-                <div style="min-width:0; flex:1;">
-                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
-                        <strong>${escapeHtml(card.title || '未命名经历')}</strong>
-                        <span style="font-size:12px; color:var(--text-muted);">${escapeHtml(dateLabel)}</span>
-                        <span style="font-size:12px; color:var(--text-muted);">${escapeHtml(status)}</span>
-                        <span style="font-size:12px; color:${visible ? 'var(--success)' : 'var(--text-muted)'};">${visible ? 'AI 可见' : '隔离中'}</span>
-                    </div>
-                    <div style="white-space:pre-wrap; line-height:1.65; color:var(--text-light);">${escapeHtml(card.event_summary || '')}</div>
-                    ${details.length ? `<div style="margin-top:10px; color:var(--text-muted); font-size:13px;">线索：${details.map(escapeHtml).join(' · ')}</div>` : ''}
-                    ${sourceRelation}
-                    ${comparison}
-                    <div style="margin-top:8px; color:var(--text-muted); font-size:12px;">Session：${escapeHtml(card.source_session_id || '-')} · 来源消息 ${Array.isArray(card.source_message_ids) ? card.source_message_ids.length : 0} 条</div>
-                </div>
-                <div style="display:flex; gap:6px; flex-wrap:wrap;">${actions}</div>
-            </div>
-        </article>`;
+        return '<article class="card experience-review-card">' +
+            '<div class="experience-card-header"><div class="experience-title-row">' + checkbox +
+            '<strong>' + escapeHtml(card.title || '未命名经历') + '</strong></div>' +
+            '<div class="experience-meta">' + escapeHtml(dateLabel) + ' · ' + escapeHtml(status) +
+            ' · <span class="' + (visible ? 'experience-visible' : '') + '">' +
+            (visible ? 'AI 可见' : 'AI 不可见') + '</span></div></div>' +
+            '<p class="experience-summary">' + escapeHtml(card.event_summary || '（尚无事件经过）') + '</p>' +
+            '<details class="experience-full-detail"><summary>展开完整内容与来源</summary>' +
+            '<div class="experience-full-body"><strong>互动经过</strong><p>' +
+            escapeHtml(card.interaction_trace || '（无）') + '</p><strong>关键线索</strong><p>' +
+            details.map(escapeHtml).join(' · ') + '</p>' + sourceRelation +
+            '<p class="experience-muted">来源 Session：' +
+            escapeHtml(card.source_session_id || '-') + ' · ' +
+            (Array.isArray(card.source_message_ids) ? card.source_message_ids.length : 0) +
+            ' 条消息</p></div></details>' +
+            '<div class="experience-card-actions">' + actions + '</div></article>';
     }).join('');
+    updateExperienceBulkToolbar();
 }
 
 function newExperienceJobId() {
@@ -1971,6 +2118,137 @@ async function doTextImport() {
     }
 }
 
+async function saveHistoricalSummary() {
+    const content = document.getElementById('historicalSummaryContent')?.value.trim() || '';
+    const periodLabel = document.getElementById('historicalSummaryPeriod')?.value.trim() || '';
+    const status = document.getElementById('historicalSummaryStatus');
+    if (!content) {
+        if (status) status.textContent = '请先粘贴旧摘要正文。';
+        return;
+    }
+    if (status) status.textContent = '正在保存...';
+    try {
+        const resp = await fetch('/api/historical-summaries', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                period_label: periodLabel,
+                content,
+                source: 'manual_backup'
+            })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || data.error || ('HTTP ' + resp.status));
+        if (status) status.textContent = '已保存到历史摘要。它不会默认注入聊天。';
+        document.getElementById('historicalSummaryContent').value = '';
+        document.getElementById('historicalSummaryPeriod').value = '';
+        await loadHistoricalSummaries();
+    } catch (e) {
+        if (status) status.textContent = '保存失败：' + e.message;
+    }
+}
+
+let historicalSummaryManageMode = false;
+let historicalSummaryItems = [];
+
+function toggleHistoricalSummaryManage(forceValue = null) {
+    historicalSummaryManageMode = forceValue === null ? !historicalSummaryManageMode : Boolean(forceValue);
+    const btn = document.getElementById('historicalSummaryManageBtn');
+    const actions = document.getElementById('historicalSummaryBulkActions');
+    if (btn) btn.textContent = historicalSummaryManageMode ? '退出管理' : '管理归档';
+    if (actions) actions.style.display = historicalSummaryManageMode ? 'flex' : 'none';
+    renderHistoricalSummaries();
+}
+
+function updateHistoricalSummarySelection() {
+    const checked = [...document.querySelectorAll('.historical-summary-checkbox:checked')];
+    const count = document.getElementById('historicalSummarySelectedCount');
+    const del = document.getElementById('historicalSummaryDeleteSelectedBtn');
+    if (count) count.textContent = '已选择 ' + checked.length + ' 份';
+    if (del) del.disabled = checked.length === 0;
+}
+
+function renderHistoricalSummaries() {
+    const list = document.getElementById('historicalSummaryList');
+    if (!list) return;
+    if (!historicalSummaryItems.length) {
+        list.innerHTML = '<div style="color:var(--text-muted);">暂无历史摘要。</div>';
+        updateHistoricalSummarySelection();
+        return;
+    }
+
+    list.innerHTML = historicalSummaryItems.map(item => {
+        const label = escapeHtml(item.period_label || '未填写时间标签');
+        const full = escapeHtml(item.content || '');
+        const id = Number(item.id);
+        const checkbox = historicalSummaryManageMode
+            ? `<label style="display:flex; align-items:center; gap:7px; margin-right:4px;" onclick="event.stopPropagation();">
+                    <input class="historical-summary-checkbox" type="checkbox" value="${id}" onchange="updateHistoricalSummarySelection()">
+                    <span style="font-size:12px; color:var(--text-muted);">选择</span>
+               </label>`
+            : '';
+        return `
+            <details class="card" style="padding:12px; margin-bottom:10px; border:1px solid var(--border-color);">
+                <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:12px;">
+                    <span style="display:flex; align-items:center; gap:8px; min-width:0;">${checkbox}<strong style="word-break:break-word;">${label}</strong></span>
+                    <span style="color:var(--text-muted); font-size:12px; white-space:nowrap;">#${id} · ${Number((item.content || '').length)} 字</span>
+                </summary>
+                <div style="white-space:pre-wrap; line-height:1.7; margin-top:12px; max-height:65vh; overflow:auto; padding-right:4px;">${full}</div>
+            </details>`;
+    }).join('');
+    updateHistoricalSummarySelection();
+}
+
+async function loadHistoricalSummaries() {
+    const list = document.getElementById('historicalSummaryList');
+    const status = document.getElementById('historicalSummaryStatus');
+    if (!list) return;
+    list.innerHTML = '<div style="color:var(--text-muted);">正在读取历史摘要...</div>';
+    try {
+        const resp = await fetch('/api/historical-summaries?limit=100');
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || data.error || ('HTTP ' + resp.status));
+        historicalSummaryItems = Array.isArray(data.items) ? data.items : [];
+        if (status) status.textContent = historicalSummaryItems.length
+            ? '共 ' + historicalSummaryItems.length + ' 份历史摘要；默认不参与聊天注入。点击任意一份可查看全文。'
+            : '目前还没有历史摘要。';
+        renderHistoricalSummaries();
+    } catch (e) {
+        historicalSummaryItems = [];
+        list.innerHTML = '';
+        if (status) status.textContent = '读取失败：' + e.message;
+    }
+}
+
+async function deleteSelectedHistoricalSummaries() {
+    const ids = [...document.querySelectorAll('.historical-summary-checkbox:checked')]
+        .map(el => Number(el.value))
+        .filter(Number.isFinite);
+    if (!ids.length) return;
+    if (!confirm('确定永久删除选中的 ' + ids.length + ' 份历史摘要吗？\n\n删除后无法恢复。')) return;
+
+    const status = document.getElementById('historicalSummaryStatus');
+    const btn = document.getElementById('historicalSummaryDeleteSelectedBtn');
+    if (btn) btn.disabled = true;
+    try {
+        for (const id of ids) {
+            const resp = await fetch('/api/historical-summaries/' + id, {method: 'DELETE'});
+            const data = await resp.json();
+            if (!resp.ok) throw new Error('删除 #' + id + ' 失败：' + (data.detail || data.error || ('HTTP ' + resp.status)));
+        }
+        if (status) status.textContent = '已删除选中的 ' + ids.length + ' 份历史摘要。';
+        historicalSummaryManageMode = false;
+        const manageBtn = document.getElementById('historicalSummaryManageBtn');
+        const actions = document.getElementById('historicalSummaryBulkActions');
+        if (manageBtn) manageBtn.textContent = '管理归档';
+        if (actions) actions.style.display = 'none';
+        await loadHistoricalSummaries();
+    } catch (e) {
+        if (status) status.textContent = '删除失败：' + e.message;
+        updateHistoricalSummarySelection();
+    }
+}
+
 async function previewJson() {
     const file = document.getElementById('jsonFile').files[0];
     const text = document.getElementById('jsonInput').value.trim();
@@ -2667,6 +2945,14 @@ function formatConvTime(isoStr) {
 let _threadData = { threads: [], active_session_id: '' };
 let _summaryEditSid = '';
 let _summaryOriginalText = '';
+let _summarySectionState = null;
+let _summarySelectedSection = null;
+let _summarySelectedKey = '';
+let _summarySectionSaving = false;
+let _summaryMergeCandidate = null;
+let _summaryRangeOriginal = '';
+let _summaryRangeSaving = false;
+let _summaryRangeSnapshot = null;
 
 async function loadThreads() {
     try {
@@ -2870,8 +3156,10 @@ async function openSummaryModal(sessionId) {
         
         document.getElementById('summary-editor').value = summary;
         _summaryOriginalText = summary;
+        document.getElementById('summaryWholeSaveBtn').disabled = false;
         updateSummaryCharCount();
         document.getElementById('summaryModal').style.display = 'flex';
+        await refreshSummarySections();
     } catch(e) {
         alert('获取摘要失败: ' + e.message);
     }
@@ -2881,6 +3169,368 @@ function closeSummaryModal() {
     document.getElementById('summaryModal').style.display = 'none';
     _summaryEditSid = '';
     _summaryOriginalText = '';
+    _summarySectionState = null;
+    _summarySelectedSection = null;
+    _summarySelectedKey = '';
+    _summaryRangeOriginal = '';
+    _summaryRangeSnapshot = null;
+}
+
+
+function summarySectionKey(section) {
+    return section.part_index + ':' + section.section_index;
+}
+
+function summaryRangeIsDirty() {
+    const editor = document.getElementById('summaryRangeEditor');
+    return !!editor && !!_summaryRangeSnapshot && editor.value !== _summaryRangeOriginal;
+}
+
+function summarySectionIsDirty() {
+    return _summarySelectedSection &&
+        document.getElementById('summarySectionEditor').value !== _summarySelectedSection.text;
+}
+
+async function refreshSummarySections() {
+    if (!_summaryEditSid) return;
+    if (_summarySectionState && (summarySectionIsDirty() || summaryRangeIsDirty()) &&
+        !confirm('当前编辑内容有尚未保存的修改。确定放弃这些修改并重新加载吗？')) return;
+    const msg = document.getElementById('summarySectionMessage');
+    const btn = document.getElementById('summarySectionSaveBtn');
+    msg.textContent = '正在读取日期小节…';
+    btn.disabled = true;
+    try {
+        const resp = await fetch(
+            '/api/partition/summary-sections?session_id=' + encodeURIComponent(_summaryEditSid),
+            {cache:'no-store'});
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || 'HTTP ' + resp.status);
+        _summarySectionState = data;
+        const sel = document.getElementById('summarySectionSelect');
+        const priorKey = _summarySelectedKey;
+        sel.replaceChildren();
+        for (const section of data.sections) {
+            const opt = document.createElement('option');
+            opt.value = summarySectionKey(section);
+            opt.textContent = section.heading + '（' + section.chars + '字，摘要段' +
+                (section.part_index + 1) + '）';
+            sel.append(opt);
+        }
+        if (!data.sections.length) {
+            _summarySelectedSection = null;
+            _summarySelectedKey = '';
+            document.getElementById('summarySectionEditor').value = '';
+            msg.textContent = '当前对话线没有可编辑的摘要小节。';
+            return;
+        }
+        const match = data.sections.find(section => summarySectionKey(section) === priorKey);
+        sel.value = match ? priorKey : summarySectionKey(data.sections[0]);
+        _summarySelectedKey = '';
+        selectSummarySection(true);
+        populateSummaryRangeSelectors();
+        const suspect = (_summarySelectedSection && _summarySelectedSection.suspected_joined_dates) || [];
+        msg.textContent = '已读取 ' + data.sections.length + ' 个小节 / ' +
+            data.part_count + ' 个摘要段。保存时将自动创建可回滚快照。' +
+            (suspect.length ? '\n警告：当前节发现疑似被拼接的日期标题：' +
+                suspect.join('、') + '。已禁止保存本节，请核对快照。' : '');
+    } catch (err) {
+        _summarySectionState = null;
+        _summarySelectedSection = null;
+        document.getElementById('summarySectionEditor').value = '';
+        msg.textContent = '加载失败：' + err.message;
+    } finally {
+        btn.disabled = !_summarySelectedSection;
+    }
+}
+
+function selectSummarySection(force = false) {
+    if (!_summarySectionState) return;
+    const sel = document.getElementById('summarySectionSelect');
+    const nextKey = sel.value;
+    if (!force && _summarySelectedKey !== nextKey && summarySectionIsDirty()) {
+        if (!confirm('上一小节有未保存的修改。确定切换并放弃修改吗？')) {
+            sel.value = _summarySelectedKey;
+            return;
+        }
+    }
+    const next = _summarySectionState.sections.find(section => summarySectionKey(section) === nextKey);
+    if (!next) return;
+    _summarySelectedSection = next;
+    _summarySelectedKey = nextKey;
+    const nextIndex = _summarySectionState.sections.findIndex(x => summarySectionKey(x) === nextKey);
+    const adjacent = _summarySectionState.sections[nextIndex + 1];
+    const dateOf = x => x && (x.heading.match(/^【(20\d{2}[-年]\d{1,2}(?:[-月]\d{1,2}(?:日)?)?)/) || [])[1];
+    _summaryMergeCandidate = adjacent && adjacent.part_index === next.part_index &&
+        adjacent.section_index === next.section_index + 1 &&
+        dateOf(next) && dateOf(next) === dateOf(adjacent) ? adjacent : null;
+    const mergeBox = document.getElementById('summarySectionMergeNext');
+    mergeBox.checked = false;
+    mergeBox.disabled = !_summaryMergeCandidate;
+    document.getElementById('summarySectionMergeHint').textContent = _summaryMergeCandidate
+        ? '可合并下一节：' + _summaryMergeCandidate.heading + '。请在上方粘贴包含两节内容的最终稿。'
+        : '下一节不属于同一天或跨摘要段，当前无法自动合并。';
+    document.getElementById('summarySectionEditor').value = next.text;
+    const suspect = next.suspected_joined_dates || [];
+    document.getElementById('summarySectionMessage').textContent = suspect.length
+        ? '警告：本节正文中发现疑似被拼接进去的日期标题：' +
+          suspect.join('、') + '。本节暂时禁止继续保存。请先复制草稿并核对保存前快照。'
+        : '';
+    updateSummarySectionPreview();
+}
+
+function updateSummarySectionPreview() {
+    const current = _summarySelectedSection;
+    const next = document.getElementById('summarySectionEditor').value;
+    const merge = !!(document.getElementById('summarySectionMergeNext').checked && _summaryMergeCandidate);
+    const before = current ? current.text + (merge ? _summaryMergeCandidate.text : '') : '';
+    document.getElementById('summarySectionBefore').textContent = before;
+    document.getElementById('summarySectionAfter').textContent = next;
+    const oldLen = before.length;
+    const delta = next.length - oldLen;
+    document.getElementById('summarySectionStats').textContent =
+        '原文 ' + oldLen + ' 字 → 修改后 ' + next.length + ' 字（' +
+        (delta >= 0 ? '+' : '') + delta + '）' +
+        (current && next === before ? ' · 尚无修改' : ' · 有未保存修改') +
+        (merge ? ' · 将合并下一节' : '');
+    document.getElementById('summarySectionSaveBtn').disabled =
+        !_summarySelectedSection || !_summarySectionState || !next.trim() ||
+        (current && next === before) || _summarySectionSaving ||
+        (current && (current.suspected_joined_dates || []).length > 0);
+}
+
+async function saveSummarySection() {
+    if (!_summarySectionState || !_summarySelectedSection || _summarySectionSaving) return;
+    const original = _summarySelectedSection;
+    const next = document.getElementById('summarySectionEditor').value;
+    const merge = !!(document.getElementById('summarySectionMergeNext').checked && _summaryMergeCandidate);
+    const combinedOriginal = original.text + (merge ? _summaryMergeCandidate.text : '');
+    if ((original.suspected_joined_dates || []).length) {
+        document.getElementById('summarySectionMessage').textContent =
+            '检测到疑似日期粘连；已阻止保存以免扩大损坏。请核对保存前快照。';
+        return;
+    }
+    if (!next.trim() || next === combinedOriginal) return;
+    if (!confirm(merge ? '确认合并「' + original.heading + '」及下一节「' +
+        _summaryMergeCandidate.heading + '」？服务器会完整备份并删除原下一节标题及正文。'
+        : '确认替换「' + original.heading + '」？服务器会先完整备份并校验当前摘要。')) return;
+    const message = document.getElementById('summarySectionMessage');
+    const btn = document.getElementById('summarySectionSaveBtn');
+    _summarySectionSaving = true;
+    btn.disabled = true;
+    message.textContent = '正在保存单节并生成恢复前快照…';
+    try {
+        const response = await fetch('/api/partition/summary-sections/replace', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({
+                session_id: _summaryEditSid,
+                part_index: original.part_index,
+                section_index: original.section_index,
+                state_token: _summarySectionState.state_token,
+                original_text: original.text,
+                replacement: next,
+                merge_next: merge,
+                next_original_text: merge ? _summaryMergeCandidate.text : null,
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'HTTP ' + response.status);
+        // Reload from the source of truth; do not assume a cached local edit.
+        _summarySelectedKey = summarySectionKey(original);
+        _summarySectionState = null;
+        await refreshSummarySections();
+        const saved = _summarySelectedSection;
+        if (!saved || saved.part_index !== original.part_index ||
+            saved.heading !== next.split('\n')[0] ||
+            saved.text.trimEnd() !== next.trimEnd()) {
+            message.textContent = '重要：服务器已接受写入，但重新读取后内容或日期边界与提交稿不一致。' +
+                '不要继续修改或重复提交！请保存草稿并核对自动快照 #' + data.snapshot_id + '。';
+            document.getElementById('summarySectionSaveBtn').disabled = true;
+            document.getElementById('summaryWholeSaveBtn').disabled = true;
+            return;
+        }
+        const totalDelta = data.summary_length - data.previous_summary_length;
+        message.textContent = (merge ? '合并成功，原下一节已移除；' : '保存成功；') +
+            '已重新读取并核对本节。摘要仍为 ' + data.part_count +
+            ' 段，游标 ' + data.a_start_round + '，总字数 ' +
+            data.previous_summary_length + ' → ' + data.summary_length +
+            '（' + (totalDelta >= 0 ? '+' : '') + totalDelta +
+            '）。修改前快照 #' + data.snapshot_id + '。';
+        // The legacy full-summary textarea was opened before this atomic edit.
+        // Disable its write button until the modal is reopened with fresh data.
+        document.getElementById('summaryWholeSaveBtn').disabled = true;
+        await loadThreads();
+    } catch (err) {
+        message.textContent = '未确认保存：' + err.message +
+            '。当前草稿仍在编辑框中；不要重复提交，请先刷新核对。';
+    } finally {
+        _summarySectionSaving = false;
+        updateSummarySectionPreview();
+    }
+}
+
+
+function populateSummaryRangeSelectors() {
+    const start = document.getElementById('summaryRangeStart');
+    const end = document.getElementById('summaryRangeEnd');
+    if (!start || !end || !_summarySectionState) return;
+    const sections = _summarySectionState.sections.filter(s => s.heading !== '整段（无日期标题）');
+    start.replaceChildren();
+    end.replaceChildren();
+    for (const section of sections) {
+        for (const sel of [start, end]) {
+            const opt = document.createElement('option');
+            opt.value = summarySectionKey(section);
+            opt.textContent = section.heading + '（摘要段' + (section.part_index + 1) + '）';
+            sel.append(opt);
+        }
+    }
+    // First use: select the first date; subsequent refreshes intentionally
+    // discard stale range selections because the underlying structure changed.
+    if (sections.length) {
+        start.value = summarySectionKey(sections[0]);
+        end.value = summarySectionKey(sections[0]);
+    }
+    _summaryRangeSnapshot = null;
+    _summaryRangeOriginal = '';
+    document.getElementById('summaryRangeEditor').value = '';
+    updateSummaryRangeSelection(true);
+}
+
+function updateSummaryRangeSelection(force = false) {
+    if (!_summarySectionState) return;
+    if (!force && summaryRangeIsDirty() &&
+        !confirm('切换日期范围会放弃未保存的整段修改，确定继续吗？')) {
+        // Restore previous selection; leave draft untouched.
+        if (_summaryRangeSnapshot) {
+            document.getElementById('summaryRangeStart').value = _summaryRangeSnapshot.startKey;
+            document.getElementById('summaryRangeEnd').value = _summaryRangeSnapshot.endKey;
+        }
+        return;
+    }
+    const startKey = document.getElementById('summaryRangeStart').value;
+    const endKey = document.getElementById('summaryRangeEnd').value;
+    const all = _summarySectionState.sections;
+    const i = all.findIndex(x => summarySectionKey(x) === startKey);
+    const j = all.findIndex(x => summarySectionKey(x) === endKey);
+    const msg = document.getElementById('summaryRangeMessage');
+    if (i < 0 || j < i) {
+        _summaryRangeSnapshot = null;
+        _summaryRangeOriginal = '';
+        document.getElementById('summaryRangeEditor').value = '';
+        document.getElementById('summaryRangeSelectionInfo').textContent = '结束日期不能早于开始日期。';
+        updateSummaryRangePreview();
+        return;
+    }
+    const chosen = all.slice(i, j + 1);
+    if (chosen.some(x => x.heading === '整段（无日期标题）')) {
+        _summaryRangeSnapshot = null;
+        document.getElementById('summaryRangeSelectionInfo').textContent =
+            '此范围包含没有日期标题的数据库摘要段，暂不能安全批量替换。';
+        updateSummaryRangePreview();
+        return;
+    }
+    const original = chosen.map(x => x.text).join('');
+    _summaryRangeSnapshot = {
+        startKey, endKey, first: chosen[0], last: chosen[chosen.length - 1],
+        count: chosen.length, token: _summarySectionState.state_token,
+        original,
+    };
+    _summaryRangeOriginal = original;
+    document.getElementById('summaryRangeEditor').value = original;
+    const suspicious = chosen.flatMap(x => x.suspected_joined_dates || []);
+    document.getElementById('summaryRangeSelectionInfo').textContent =
+        '选择了 ' + chosen.length + ' 个原日期小节，' +
+        (chosen[0].part_index === chosen[chosen.length - 1].part_index ?
+          '位于同一摘要段。' : '横跨多个摘要段，保存后会合并被覆盖的数据库段。') +
+        ' 从 ' + chosen[0].heading + ' 到 ' + chosen[chosen.length - 1].heading;
+    msg.textContent = suspicious.length
+        ? '注意：旧文含疑似粘连日期 ' + suspicious.join('、') +
+          '。请在新稿中修复这些标题，仔细比对后再保存。'
+        : '';
+    updateSummaryRangePreview();
+}
+
+function updateSummaryRangePreview() {
+    const state = _summaryRangeSnapshot;
+    const after = document.getElementById('summaryRangeEditor').value;
+    const before = state ? state.original : '';
+    document.getElementById('summaryRangeBefore').textContent = before;
+    document.getElementById('summaryRangeAfter').textContent = after;
+    const delta = after.length - before.length;
+    document.getElementById('summaryRangeStats').textContent = state
+        ? '所选旧文 ' + before.length + ' 字 → 新稿 ' + after.length +
+          ' 字（' + (delta >= 0 ? '+' : '') + delta +
+          '）；范围外文本保持原样。'
+        : '请先选择有效的起止小节。';
+    const firstHeading = state && (state.first.heading.match(/^【20\d{2}[-年]\d{1,2}[-月]\d{1,2}/) || [])[0];
+    document.getElementById('summaryRangeSaveBtn').disabled =
+        !state || _summaryRangeSaving || !after.trim() || after === before ||
+        !firstHeading || !after.startsWith(firstHeading);
+}
+
+async function saveSummaryDateRange() {
+    const state = _summaryRangeSnapshot;
+    const editor = document.getElementById('summaryRangeEditor');
+    if (!state || _summaryRangeSaving) return;
+    const replacement = editor.value;
+    if (!replacement.trim() || replacement === state.original) return;
+    const rangeName = state.first.heading + ' 至 ' + state.last.heading;
+    if (!confirm('确认整体替换以下日期范围？\\n' + rangeName +
+        '\\n原范围内所有旧文字会被新稿取代，范围外保持不变。保存前自动备份整份摘要。')) return;
+    const btn = document.getElementById('summaryRangeSaveBtn');
+    const msg = document.getElementById('summaryRangeMessage');
+    _summaryRangeSaving = true;
+    btn.disabled = true;
+    msg.textContent = '正在校验日期范围并创建完整快照…';
+    try {
+        const response = await fetch('/api/partition/summary-sections/replace-range', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({
+                session_id: _summaryEditSid,
+                start_part: state.first.part_index, start_section: state.first.section_index,
+                end_part: state.last.part_index, end_section: state.last.section_index,
+                state_token: state.token, original_text: state.original, replacement,
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'HTTP ' + response.status);
+        // Do not reset the edited draft before an independent read confirms the save.
+        const readResponse = await fetch(
+            '/api/partition/summary-sections?session_id=' + encodeURIComponent(_summaryEditSid),
+            {cache:'no-store'});
+        if (!readResponse.ok) throw new Error('写入返回成功，但重新读取失败；请勿重试，快照 #' + data.snapshot_id);
+        const actual = await readResponse.json();
+        if (actual.state_token !== data.saved_state_token ||
+            actual.a_start_round !== data.a_start_round) {
+            msg.textContent = '服务器确认写入，但重新读取的整份摘要校验值不匹配。请勿再次保存！快照 #' +
+                data.snapshot_id + '，请先检查现有摘要。';
+            return;
+        }
+        const delta = data.summary_length - data.previous_summary_length;
+        _summaryRangeOriginal = replacement;
+        msg.textContent = '范围替换成功，已重新读取并校验整份摘要。旧文 ' +
+            data.old_chars + ' 字 → 新稿 ' + data.new_chars +
+            ' 字；整份摘要总字数 ' + data.previous_summary_length +
+            ' → ' + data.summary_length + '（' + (delta >= 0 ? '+' : '') + delta +
+            '）。游标 ' + data.a_start_round + '，自动快照 #' + data.snapshot_id + '。';
+        document.getElementById('summaryWholeSaveBtn').disabled = true;
+        // Reload source data only after success; keep the message visible.
+        _summarySectionState = null;
+        _summarySelectedKey = '';
+        await refreshSummarySections();
+        document.getElementById('summaryRangeMessage').textContent =
+            '范围替换成功，已自动备份至快照 #' + data.snapshot_id +
+            '。总字数 ' + data.previous_summary_length + ' → ' +
+            data.summary_length + '，游标 ' + data.a_start_round + '。';
+        await loadThreads();
+    } catch (err) {
+        msg.textContent = '尚未确认保存：' + err.message +
+            '。草稿仍在编辑框中；不要重复提交，请先核对摘要和快照。';
+    } finally {
+        _summaryRangeSaving = false;
+        updateSummaryRangePreview();
+    }
 }
 
 function updateSummaryCharCount() {
@@ -3042,9 +3692,9 @@ const _SETTINGS_FIELDS = {
     str: ['API_BASE_URL', 'API_KEY', 'DEFAULT_MODEL', 'MEMORY_API_BASE_URL', 'MEMORY_API_KEY', 'MEMORY_MODEL', 'MEMORY_API_THINKING',
           'CACHE_SUMMARY_MODEL', 'SUMMARY_API_BASE_URL', 'SUMMARY_API_KEY', 'CACHE_PARTITION_TRIGGER', 'EMBEDDING_API_KEY', 'EMBEDDING_BASE_URL', 'EMBEDDING_MODEL', 'REASONING_EFFORT',
          'role_display_user', 'role_display_assistant'],
-    int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'EMBEDDING_DIM'],
+    int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'EXPERIENCE_RECALL_EVERY_ROUNDS', 'EXPERIENCE_RECALL_MAX_CARDS', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'CACHE_SUMMARY_BUDGET_CHARS', 'SUMMARY_KEEP_RECENT', 'EMBEDDING_DIM'],
     float: ['MIN_SCORE_THRESHOLD'],
-    bool: ['MEMORY_ENABLED', 'CACHE_PARTITION_ENABLED', 'MEMORY_VECTOR_ENABLED', 'FORCE_STREAM'],
+    bool: ['MEMORY_ENABLED', 'EXPERIENCE_RECALL_ENABLED', 'CACHE_PARTITION_ENABLED', 'MEMORY_VECTOR_ENABLED', 'FORCE_STREAM'],
     range: ['MEMORY_HW_KEYWORD', 'MEMORY_HW_SEMANTIC', 'MEMORY_HW_IMPORTANCE',
             'MEMORY_HW_RECENCY', 'MEMORY_SEMANTIC_THRESHOLD'],
     text: ['systemPrompt'],
@@ -3056,6 +3706,33 @@ const _MODEL_COMBOS = ['DEFAULT_MODEL', 'MEMORY_MODEL', 'CACHE_SUMMARY_MODEL'];
 function _togglePartitionWindow(trigger) {
     const el = document.getElementById('field-CACHE_PARTITION_WINDOW');
     if (el) el.style.display = trigger === 'time' ? '' : 'none';
+}
+
+async function previewExperienceRecall() {
+    const query = document.getElementById('experienceRecallTestQuery')?.value.trim();
+    const output = document.getElementById('experienceRecallTestResult');
+    if (!output) return;
+    if (!query) { output.textContent = '先输入一个具体线索。'; return; }
+    output.textContent = '正在只读查询已批准的经历卡…';
+    try {
+        const response = await fetch('/api/experience-cards/recall-preview', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({query}),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'HTTP ' + response.status);
+        if (!data.matches) {
+            output.textContent = '没有匹配的已批准、AI可见经历卡。检查卡片的标题或「关键线索」是否包含这段准确文字。';
+            return;
+        }
+        output.textContent = '匹配到 ' + data.matches + ' 张（预览最多显示2张）：\n' +
+            data.cards.map(card => '· ' + card.title + '；命中：' +
+                card.matching_cues.join('、')).join('\n') +
+            '\n预览不会修改冷却状态；正式聊天仍受设置开关与轮次间隔限制。';
+    } catch (error) {
+        output.textContent = '预览失败：' + error.message;
+    }
 }
 
 async function loadSettings() {
@@ -3404,4 +4081,235 @@ function showMsg(text, type) {
     if (!container) return;
     container.innerHTML = `<div class="msg msg-${type}">${text}</div>`;
     setTimeout(() => { container.innerHTML = ''; }, 5000);
+}
+
+
+/* Explicit, one-time partition summary recovery. Never called automatically on startup. */
+let summaryRepairPreviewState = null;
+
+async function summaryRepairRequest(endpoint, payload) {
+    const response = await fetch('/api/summary-repair/' + endpoint, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+        throw new Error(typeof body.detail === 'string' ? body.detail : JSON.stringify(body));
+    }
+    return body;
+}
+
+async function loadSummaryRepairOptions() {
+    summaryRepairPreviewState = null;
+    document.getElementById('summaryRepairConfirmArea').style.display = 'none';
+    const result = document.getElementById('summaryRepairResult');
+    try {
+        const [statusResponse, archivesResponse] = await Promise.all([
+            fetch('/api/partition/status'),
+            fetch('/api/historical-summaries?limit=500'),
+        ]);
+        if (!statusResponse.ok || !archivesResponse.ok) throw new Error('读取摘要状态或归档失败');
+        const status = await statusResponse.json();
+        const archives = await archivesResponse.json();
+        const select = document.getElementById('summaryRepairArchive');
+        select.replaceChildren();
+        const matches = (archives.items || []).filter(a =>
+            a.source === 'auto_fold' && a.session_id === status.active_session_id);
+        for (const a of matches) {
+            const opt = document.createElement('option');
+            opt.value = String(a.id);
+            opt.textContent = '#' + a.id + ' ' + (a.period_label || '自动折叠') + '（' + a.content.length + ' 字）';
+            select.append(opt);
+        }
+        document.getElementById('summaryRepairPreview').textContent =
+            '当前活跃对话线：' + (status.active_session_id || '未设置') +
+            '\n当前摘要：' + status.summary_count + ' 段 / ' + status.summary_length + ' 字' +
+            '\n当前 a_start_round：' + status.a_start_round +
+            '\n可选自动折叠归档：' + matches.length + ' 份。' +
+            '\n请核对回退轮次、受保护旧段数量后点击“预览恢复”。';
+        if (!matches.length) {
+            const allAuto = (archives.items || []).filter(a => a.source === 'auto_fold');
+            const currentManual = (archives.items || []).filter(a =>
+                a.session_id === status.active_session_id && a.source !== 'auto_fold');
+            const others = allAuto.filter(a => a.session_id !== status.active_session_id);
+            result.textContent = '当前对话线没有可直接恢复的自动折叠归档。' +
+                '\\n全库自动折叠归档：' + allAuto.length + ' 份' +
+                '\\n其中属于其他对话线：' + others.length + ' 份' +
+                '\\n当前对话线其他来源归档：' + currentManual.length + ' 份' +
+                '\\n如存在其他对话线的折叠归档，可能是 session_id 不一致；如仅有手动归档，恢复工具当前不会选中它。' +
+                '\\n请先核对下方「历史摘要归档」中的来源与对话线，不要直接覆盖 active summary。';
+        } else result.textContent = '';
+    } catch (err) {
+        result.textContent = '读取失败：' + err.message;
+    }
+}
+
+async function previewSummaryRepair() {
+    const area = document.getElementById('summaryRepairConfirmArea');
+    area.style.display = 'none';
+    summaryRepairPreviewState = null;
+    const output = document.getElementById('summaryRepairPreview');
+    try {
+        const statusResp = await fetch('/api/partition/status');
+        if (!statusResp.ok) throw new Error('无法获取当前对话线');
+        const status = await statusResp.json();
+        const payload = {
+            session_id: status.active_session_id,
+            archive_id: Number(document.getElementById('summaryRepairArchive').value),
+            start_round: Number(document.getElementById('summaryRepairStartRound').value),
+            preserved_parts: Number(document.getElementById('summaryRepairPreserve').value),
+        };
+        if (!payload.archive_id || !Number.isInteger(payload.start_round) ||
+            !Number.isInteger(payload.preserved_parts)) throw new Error('归档和整数轮次不能为空');
+        const preview = await summaryRepairRequest('preview', payload);
+        summaryRepairPreviewState = {payload, preview};
+        const retainedText = preview.retained_preview.map(p =>
+            '\n【保留的现有摘要第 ' + p.index + ' 段 / ' + p.chars + ' 字】\n' + p.text
+        ).join('\n');
+        const boundaryReport = '\n\n—— 归档末尾（原样核对）——' +
+            (preview.archive_tail || []).map(p =>
+                '\n【归档段 ' + p.index + ' / ' + p.chars + ' 字】\n' + p.text
+            ).join('\n') +
+            '\n\n—— 本次丢弃的旧摘要（仅供核对，不会保留）——' +
+            (preview.discarded_current_parts || []).map(p =>
+                '\n【旧摘要段 ' + p.index + ' / ' + p.chars + ' 字】\n' + p.text
+            ).join('\n') +
+            '\n\n提示：这只是日期与内容的对照，不代表已自动验证无遗漏。';
+        output.textContent =
+            '当前：' + preview.current_parts + ' 段 / ' + preview.current_chars + ' 字' +
+            '\n归档：#' + preview.archive_id + ' ' + preview.archive_label +
+            '（' + preview.archive_parts + ' 段 / ' + preview.archive_chars + ' 字）' +
+            '\n当前游标：' + preview.current_a_start_round +
+            '\n计划从第 ' + preview.rewind_to_round + ' 轮重算' +
+            '\n预计重算：' + preview.regenerate_blocks + ' 个 8 轮区块' +
+            '\n区块范围（左闭右开）：' + JSON.stringify(preview.regenerate_round_ranges) +
+            '\n区块对应上海时间：' + JSON.stringify(preview.block_date_ranges) +
+            '\n修复后游标：' + preview.new_cursor_after_repair +
+            '\n原文总逻辑轮：' + preview.total_conversation_rounds +
+            '\n从现有摘要保留：' + preview.keep_existing_parts + ' 段' +
+            '\n注意：归档恢复段 + 保留旧段 + 重算新段，将整体替换当前 active summary。' +
+            '\n预览不会改变数据库。请核对保留段的内容和日期是否与归档重叠。' + retainedText + boundaryReport;
+        document.getElementById('summaryRepairConfirmText').value = '';
+        area.style.display = 'block';
+        document.getElementById('summaryRepairResult').textContent = '';
+    } catch (err) {
+        output.textContent = '无法预览：' + err.message;
+    }
+}
+
+async function executeSummaryRepair() {
+    const result = document.getElementById('summaryRepairResult');
+    if (!summaryRepairPreviewState) { result.textContent = '请先预览。'; return; }
+    const pending = summaryRepairPreviewState.payload;
+    if (Number(document.getElementById('summaryRepairArchive').value) !== pending.archive_id ||
+        Number(document.getElementById('summaryRepairStartRound').value) !== pending.start_round ||
+        Number(document.getElementById('summaryRepairPreserve').value) !== pending.preserved_parts) {
+        result.textContent = '预览后恢复参数已改变。请重新预览后再确认。';
+        summaryRepairPreviewState = null;
+        document.getElementById('summaryRepairConfirmArea').style.display = 'none';
+        return;
+    }
+    const confirmation = document.getElementById('summaryRepairConfirmText').value.trim();
+    if (confirmation !== '确认恢复摘要') { result.textContent = '确认文字不匹配，未执行。'; return; }
+    if (!confirm('确定按预览开始恢复？后台会生成四段摘要，完成前不要重新部署服务器。')) return;
+    const btn = document.getElementById('summaryRepairExecuteBtn');
+    btn.disabled = true;
+    try {
+        const {payload, preview} = summaryRepairPreviewState;
+        const job = await summaryRepairRequest('start', {
+            ...payload, preview_token: preview.preview_token, confirmation,
+        });
+        result.textContent = '恢复任务已提交。任务编号：' + job.job_id +
+            '\n正在等待摘要模型生成；页面会自动检查状态，请勿反复点击。';
+        // Each status request is short; no Safari/Cloudflare long-running POST.
+        let status = job;
+        for (let i = 0; i < 180; i++) {
+            if (status.status === 'succeeded' || status.status === 'failed') break;
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            const response = await fetch('/api/summary-repair/job/' + encodeURIComponent(job.job_id),
+                {cache: 'no-store'});
+            if (!response.ok) {
+                throw new Error('任务状态暂时不可读取（HTTP ' + response.status +
+                    '）。请先刷新摘要状态核对是否已恢复，不要重复执行。');
+            }
+            status = await response.json();
+            result.textContent = '恢复任务：' + status.status +
+                '\n阶段：' + status.stage +
+                '\n任务编号：' + job.job_id +
+                '\n第 ' + (i + 1) + ' 次状态检查';
+        }
+        if (status.status === 'failed') {
+            throw new Error('恢复任务失败：' + (status.error || '未提供错误信息') +
+                '。如需诊断请查看 Coolify 日志中的 [summary-repair-job]。');
+        }
+        if (status.status !== 'succeeded') {
+            throw new Error('任务仍在执行，页面等待已结束。请先刷新摘要状态，避免重复提交。');
+        }
+        result.textContent = '恢复完成：' + status.summary_part_count + ' 段 / 游标 ' +
+            status.a_start_round + ' / 重算 ' + status.generated_blocks +
+            ' 块。恢复前快照 ID：' + status.snapshot_id;
+        document.getElementById('summaryRepairSnapshotId').value = status.snapshot_id;
+        summaryRepairPreviewState = null;
+        document.getElementById('summaryRepairConfirmArea').style.display = 'none';
+        await loadThreads();
+        await loadHistoricalSummaries();
+    } catch (err) {
+        result.textContent = '恢复状态未确认：' + err.message +
+            '\n请先刷新当前摘要与游标，核对是否已恢复；不要盲目重试。';
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function rollbackSummaryRepair() {
+    const result = document.getElementById('summaryRepairResult');
+    const snapshotId = Number(document.getElementById('summaryRepairSnapshotId').value);
+    const confirmation = document.getElementById('summaryRepairRollbackConfirm').value.trim();
+    if (!Number.isInteger(snapshotId) || snapshotId < 1 ||
+        confirmation !== '确认回滚摘要') {
+        result.textContent = '快照 ID 或回滚确认文字无效，未执行。';
+        return;
+    }
+    if (!confirm('确定用该快照覆盖当前摘要和游标？当前状态也会保存为新快照。')) return;
+    try {
+        const response = await fetch('/api/partition/status');
+        if (!response.ok) throw new Error('无法取得当前对话线');
+        const status = await response.json();
+        const data = await summaryRepairRequest('rollback', {
+            session_id: status.active_session_id, snapshot_id: snapshotId, confirmation
+        });
+        result.textContent = '回滚完成：' + data.summary_parts.length + ' 段 / 游标 ' +
+            data.a_start_round + '。回滚前状态也已备份到快照 #' + data.saved_current_as_snapshot_id;
+        summaryRepairPreviewState = null;
+        document.getElementById('summaryRepairConfirmArea').style.display = 'none';
+        await loadThreads();
+    } catch (err) {
+        result.textContent = '回滚失败：' + err.message;
+    }
+}
+
+
+async function uploadDashboardIcon() {
+    const input = document.getElementById('dashboardIconFile');
+    const status = document.getElementById('dashboardIconUploadStatus');
+    const file = input && input.files && input.files[0];
+    if (!file) { status.textContent = '先选择原版猫咪的 PNG 图片。'; return; }
+    if (file.type !== 'image/png' || file.size > 400000) {
+        status.textContent = '请选择小于 400KB 的正方形 PNG。';
+        return;
+    }
+    try {
+        const response = await fetch('/api/dashboard/icon', {
+            method: 'POST', headers: {'Content-Type':'image/png'}, body:file,
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || '图标保存失败');
+        const image = document.getElementById('dashboardIconPreview');
+        image.src = '/apple-touch-icon.png?v=' + Date.now();
+        status.textContent = '原版图标已保存（' + data.width + '×' + data.height +
+            '）。若主屏幕仍是旧猫图，请删除旧快捷方式后重新从 Safari 添加。';
+    } catch(err) {
+        status.textContent = '上传失败：' + err.message;
+    }
 }
