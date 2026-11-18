@@ -2810,6 +2810,61 @@ async def update_experience_card(card_id: int, update: dict):
         return _experience_card_dict(row)
 
 
+
+async def bulk_review_experience_cards(card_ids: list[int], operation: str):
+    """Atomic, explicit human review. Replacement candidates require group approval."""
+    if operation not in ("approve", "archive"):
+        raise ValueError("invalid_bulk_experience_operation")
+    if not isinstance(card_ids, list) or not 1 <= len(card_ids) <= 30:
+        raise ValueError("bulk_experience_limit_1_to_30")
+    if any(isinstance(cid, bool) or not isinstance(cid, int) or cid < 1 for cid in card_ids):
+        raise ValueError("invalid_experience_card_id")
+    if len(card_ids) != len(set(card_ids)):
+        raise ValueError("duplicate_experience_card_id")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            rows = await conn.fetch("""
+                SELECT id, review_status, ai_visible, supersedes_card_id,
+                       title, event_summary, source_message_ids
+                FROM shared_experience_cards
+                WHERE id = ANY($1::bigint[])
+                ORDER BY id
+                FOR UPDATE
+            """, card_ids)
+            if len(rows) != len(card_ids):
+                raise ValueError("cards_changed_reload_selection")
+            for row in rows:
+                if row["review_status"] != "pending" or row["ai_visible"]:
+                    raise ValueError("only_pending_cards_can_be_bulk_reviewed")
+                if row["supersedes_card_id"] is not None:
+                    raise ValueError("replacement_candidates_need_group_approval")
+                if operation == "approve" and (
+                    not (row["title"] or "").strip()
+                    or not (row["event_summary"] or "").strip()
+                    or not row["source_message_ids"]
+                ):
+                    raise ValueError("incomplete_card_requires_individual_review")
+            if operation == "approve":
+                changed = await conn.fetch("""
+                    UPDATE shared_experience_cards SET
+                        review_status='approved', ai_visible=TRUE,
+                        approved_at=NOW(), updated_at=NOW()
+                    WHERE id=ANY($1::bigint[]) RETURNING id
+                """, card_ids)
+            else:
+                changed = await conn.fetch("""
+                    UPDATE shared_experience_cards SET
+                        review_status='archived', ai_visible=FALSE,
+                        approved_at=NULL, updated_at=NOW()
+                    WHERE id=ANY($1::bigint[]) RETURNING id
+                """, card_ids)
+            if len(changed) != len(card_ids):
+                raise ValueError("bulk_experience_update_incomplete")
+            return {"updated": len(changed), "operation": operation,
+                    "ids": sorted(row["id"] for row in changed)}
+
+
 # ============================================================
 # 网关配置
 # ============================================================
