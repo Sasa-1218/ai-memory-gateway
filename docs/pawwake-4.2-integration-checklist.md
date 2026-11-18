@@ -40,3 +40,10 @@
 - The existing 12-card Dashboard pagination loads at most 1000 cards; large-card paging remains separate future work. Do not claim unlimited paging.
 - Risk: stricter candidate threshold may return a valid empty selection; fallback should only occur on technical failures, and no caller is connected yet.
 - Rollback: restore earlier Pawwake branch commit `c4cd77d9ad5e23515847dee6ce8dddaaa6910d0d` (or revert specific rerank commits) on this experimental branch only.
+
+## 2026-11-18 shared-budget staging
+- Added pure `recall_selection.py` with `select_recall_items(memories, cards, max_items=8, max_chars=6000)`. It is deliberately NOT wired to live chat, because current memory rows may not carry `source_message_ids` and shared budgeting must be integrated consistently across three constructors.
+- Candidate order: approved/AI-visible experience first, then active memory; only identical normalized content or >=70% Jaccard overlap of positive source-message IDs in the same nonempty session counts as duplicate. Nonmatching source identities are retained.
+- No historical writes or schema migration; data records are not mutated. Text is never truncated inside this selector. This budget counts characters, not model tokens, and does not yet include wrappers or dates.
+- Added `tests/test_recall_selection.py` (10 targeted tests). Executed locally in an isolated Python 3.13 runtime: `python -m unittest discover -s tests -p 'test_*.py' -v` -> 10 passed; `python -m compileall -q recall_selection.py tests` -> passed. This local test environment had ONLY this module and its tests, not the whole gateway.
+- Remaining before production integration: obtain source IDs for ordinary memories with explicit migration approval, verify result types from database queries, apply one budget across all constructors, preserve citation/detail metadata, add real PostgreSQL tests, then do production-like end-to-end tests.
