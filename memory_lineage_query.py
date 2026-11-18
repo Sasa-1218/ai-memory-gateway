@@ -57,6 +57,30 @@ async def inspect_memory_lineage(memory_id, fetch_rows, *, max_nodes=100, max_de
         return {"exists": False, "memory_id": memory_id, "source_memory_ids": [],
                 "source_session": "", "source_message_ids": [], "message_sources_verified": False,
                 "lineage_complete": False, "missing_memory_ids": sorted(missing), "truncated": truncated}
+    # A repeated parent may be a legitimate DAG join. Detect actual cycles
+    # after fetching, without recursion or unbounded traversal.
+    visiting, visited = set(), set()
+    cycle = False
+    for start in found:
+        stack = [(start, False)]
+        while stack:
+            node, exiting = stack.pop()
+            if exiting:
+                visiting.discard(node)
+                visited.add(node)
+                continue
+            if node in visiting:
+                cycle = True
+                break
+            if node in visited:
+                continue
+            visiting.add(node)
+            stack.append((node, True))
+            for parent in found[node].get("merged_from") or []:
+                if parent in found:
+                    stack.append((parent, False))
+        if cycle:
+            break
     sessions = {str(row["source_session"]) for row in found.values() if row.get("source_session")}
     source_session = next(iter(sessions)) if len(sessions) == 1 else ""
     return {
@@ -65,7 +89,7 @@ async def inspect_memory_lineage(memory_id, fetch_rows, *, max_nodes=100, max_de
         "source_session": source_session,
         "source_message_ids": [],  # No such verified column in current memories schema.
         "message_sources_verified": False,
-        "lineage_complete": not (truncated or malformed or missing or pending),
+        "lineage_complete": not (truncated or malformed or missing or pending or cycle or len(sessions) > 1),
         "missing_memory_ids": sorted(missing),
         "truncated": truncated,
     }
