@@ -43,6 +43,21 @@ class LineageQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['source_memory_ids'],[1,2])
         self.assertFalse(result['lineage_complete'])
 
+    async def test_shared_ancestor_is_not_a_cycle(self):
+        rows={4:{'id':4,'merged_from':[2,3]},2:{'id':2,'merged_from':[1]},
+              3:{'id':3,'merged_from':[1]},1:{'id':1,'source_session':'s'}}
+        async def fetch(ids): return [rows[i] for i in ids]
+        result = await inspect_memory_lineage(4,fetch)
+        self.assertEqual(result['source_memory_ids'],[1,2,3,4])
+        self.assertTrue(result['lineage_complete'])
+
+    async def test_depth_limit_marks_truncated(self):
+        rows={3:{'id':3,'merged_from':[2]},2:{'id':2,'merged_from':[1]},1:{'id':1}}
+        async def fetch(ids): return [rows[i] for i in ids]
+        result = await inspect_memory_lineage(3,fetch,max_depth=1)
+        self.assertTrue(result['truncated'])
+        self.assertFalse(result['lineage_complete'])
+
     async def test_node_budget_marks_truncated(self):
         rows={1:{'id':1,'merged_from':[2,3]},2:{'id':2},3:{'id':3}}
         async def fetch(ids): return [rows[i] for i in ids]
