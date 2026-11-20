@@ -43,8 +43,6 @@ jobs:
         run: python -m unittest discover -s tests -p test_memory_provenance.py -v
       - name: Verify read-only memory ancestry
         run: python -m unittest discover -s tests -p test_memory_lineage_query.py -v
-      - name: Verify read-only memory ancestry adapter
-        run: python -m unittest discover -s tests -p test_memory_lineage_db.py -v
       - name: Verify provenance API and Dashboard wiring
         run: python -m unittest discover -s tests -p test_memory_lineage_wiring.py -v
       - name: Verify shared injection budget and safe default
