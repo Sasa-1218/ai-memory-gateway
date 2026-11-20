@@ -4852,16 +4852,16 @@ async def chat_completions(request: Request):
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
             memory_block = await build_system_prompt_with_memories(user_message)
 
+        experience_text = ""
         if EXPERIENCE_RECALL_ENABLED and user_message:
             experience_text = await build_experience_recall(user_message, get_active_session_id())
-            if experience_text:
-                if SHARED_RECALL_BUDGET_ENABLED:
-                    from recall_budget import combine_recall_blocks
-                    memory_block = combine_recall_blocks(
-                        memory_block, experience_text, max_chars=SHARED_RECALL_MAX_CHARS,
-                    )
-                else:
-                    memory_block = (memory_block + "\n\n" + experience_text) if memory_block else experience_text
+        if SHARED_RECALL_BUDGET_ENABLED:
+            from recall_budget import combine_recall_blocks
+            memory_block = combine_recall_blocks(
+                memory_block, experience_text, max_chars=SHARED_RECALL_MAX_CHARS,
+            )
+        elif experience_text:
+            memory_block = (memory_block + "\n\n" + experience_text) if memory_block else experience_text
 
         has_system = any(msg.get("role") == "system" for msg in messages)
 
