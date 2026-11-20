@@ -74,7 +74,9 @@ class RecallBudgetTests(unittest.TestCase):
             "- Another memory\n"
             "</脑海中浮现的既往事实>"
         )
-        combined = combine(facts, "CARD", max_chars=50)
+        from recall_budget import fit_memory_entries
+        packed = fit_memory_entries(["- Relevant memory", "- Another memory"], 44)
+        combined = combine(packed, "CARD", max_chars=50)
         self.assertTrue(combined.startswith("CARD\n\n"))
         self.assertIn("- Relevant memory", combined)
         self.assertNotIn("- Another memory", combined)
@@ -103,6 +105,25 @@ class RecallBudgetTests(unittest.TestCase):
         one = "<脑海中浮现的既往事实>\n- Alpha one\n</脑海中浮现的既往事实>"
         result = fit_memory_fact_block(source, len(one))
         self.assertEqual(result, one)
+
+    def test_embedded_bullet_remains_in_single_source_memory(self):
+        from recall_budget import fit_memory_entries
+        one = "- 2026-11-20 memory\n- embedded list item\ncontinued"
+        other = "- unrelated later memory"
+        cap = len("<脑海中浮现的既往事实>\n" + one + "\n</脑海中浮现的既往事实>")
+        got = fit_memory_entries([one, other], cap)
+        self.assertIn(one, got)
+        self.assertNotIn(other, got)
+
+    def test_pack_skips_oversized_first_memory(self):
+        from recall_budget import fit_memory_entries
+        result = fit_memory_entries(["- " + "X"*1000, "- short"], 80)
+        self.assertIn("- short", result)
+        self.assertNotIn("X", result)
+
+    def test_formatted_overbudget_block_is_not_reparsed(self):
+        block = "<脑海中浮现的既往事实>\n- item1\n- item2\n</脑海中浮现的既往事实>"
+        self.assertEqual(combine(block, "CARD", max_chars=10), "CARD")
 
     def test_invalid_budget_rejected(self):
         for bad in (-1, True, 1.5, None):
