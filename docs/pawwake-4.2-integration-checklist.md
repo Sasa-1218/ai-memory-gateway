@@ -71,3 +71,11 @@
 - Added two regression cases and tightened the missing-parent assertion in `tests/test_memory_provenance.py`.
 - **Verification pending:** GitHub source was updated but no full Python test execution or CI success has been observed for these commits. Earlier 32/32 isolated results apply only to the earlier commit, not to this revision.
 - No schema, production data, deployed branch, or active retrieval behavior changed.
+
+## 2026-11-20 recall quality and provenance safety pass
+- `memory_lineage_query.py`: replaced ad-hoc cycle detection with iterative 3-colour traversal; flag a missing session on any leaf as incomplete; added shared-DAG and missing-session tests.
+- `recall_selection.py`: preserve word boundaries in normalized text, avoid cross-session exact-text deduplication when both sessions are known, and require substantial text overlap in addition to >=70% shared message-source overlap. This protects distinct observations made during the same conversation.
+- Updated tests for exact-text deduplication, source overlap, distinct observation, and cross-session repeated wording.
+- **Migration design, not execution**: the current `memories` schema does not contain `source_message_ids`. Before adding it, define canonical semantics for each source (single session + positive conversation message IDs); use additive nullable column migration, backfill only where provenance can be verified against `conversations` with session match, batch with audit counts, snapshot and dry-run, and leave all ambiguous legacy memories NULL. A merge of multiple sessions must retain session-scoped evidence separately, not union numeric IDs into a single session.
+- Existing `merged_from` values are memory IDs, not message IDs. Never infer the latter from content similarity.
+- **Release status**: commits are saved to the Pawwake development branch; full tests/CI and production-like PostgreSQL/Kelivo integration are not verified. The previously reported 32 passing tests predate this change and do not validate it. No production migration or deployment.
