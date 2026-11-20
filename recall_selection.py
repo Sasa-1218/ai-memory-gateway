@@ -16,7 +16,7 @@ def _source_ids(item):
 
 
 def _normal_text(value):
-    return re.sub(r'\s+', '', value).casefold()
+    return re.sub(r'\s+', ' ', value).strip().casefold()
 
 
 def _duplicate(a, b):
