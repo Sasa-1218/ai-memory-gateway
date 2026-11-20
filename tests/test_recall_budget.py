@@ -74,11 +74,11 @@ class RecallBudgetTests(unittest.TestCase):
             "- Another memory\n"
             "</脑海中浮现的既往事实>"
         )
-        combined = combine(facts, "CARD", max_chars=70)
+        combined = combine(facts, "CARD", max_chars=50)
         self.assertTrue(combined.startswith("CARD\n\n"))
         self.assertIn("- Relevant memory", combined)
         self.assertNotIn("- Another memory", combined)
-        self.assertLessEqual(len(combined), 70)
+        self.assertLessEqual(len(combined), 50)
 
     def test_too_small_memory_wrapper_budget_skips_all(self):
         from recall_budget import fit_memory_fact_block
