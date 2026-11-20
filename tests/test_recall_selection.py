@@ -14,8 +14,18 @@ def card(id, text, ids=None, session='a', visible=True, status='approved'):
 
 class SelectionTests(unittest.TestCase):
     def test_card_preferred_for_same_source(self):
-        got = select_recall_items([memory(1, 'fragment', [10,11])], [card(2, 'whole event', [10,11])])
+        got = select_recall_items([memory(1, 'whole event fragment', [10,11])], [card(2, 'whole event', [10,11])])
         self.assertEqual([(x['kind'], x['id']) for x in got], [('experience', 2)])
+
+    def test_same_source_different_observation_is_preserved(self):
+        got=select_recall_items([memory(1,'doctor appointment on Tuesday',[10,11])],
+                                [card(2,'walk in the park on Sunday',[10,11])])
+        self.assertEqual(len(got),2)
+
+    def test_same_text_distinct_known_sessions_is_preserved(self):
+        got=select_recall_items([memory(1,'Went for a walk',session='b')],
+                                [card(2,'Went for a walk',session='a')])
+        self.assertEqual(len(got),2)
 
     def test_distinct_sources_are_preserved(self):
         got = select_recall_items([memory(1, 'fragment', [10])], [card(2, 'whole event', [10,11,12])])
