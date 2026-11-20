@@ -55,6 +55,30 @@ def fit_memory_fact_block(text: str, max_chars: int) -> str:
     return result
 
 
+def fit_memory_entries(entries, max_chars: int) -> str:
+    """Pack complete source memory records without parsing formatted text.
+
+    Each entry is one whole preformatted fact including its '- ' prefix.
+    Newlines and bullet markers inside an entry remain part of that fact.
+    """
+    if type(max_chars) is not int or max_chars < 0:
+        raise ValueError("invalid max_chars")
+    overhead = len(MEMORY_OPEN) + len(MEMORY_CLOSE) + 2
+    selected = []
+    used = overhead
+    for entry in entries:
+        if not isinstance(entry, str) or not entry.startswith("- ") or not entry.strip():
+            continue
+        extra = len(entry) + (1 if selected else 0)
+        if used + extra > max_chars:
+            continue
+        selected.append(entry)
+        used += extra
+    if not selected:
+        return ""
+    return MEMORY_OPEN + "\n" + "\n".join(selected) + "\n" + MEMORY_CLOSE
+
+
 def combine_recall_blocks(memory_block: str, experience_block: str, *,
                           max_chars: int = 6000, prefer_experience: bool = True) -> str:
     """Choose complete recall blocks and whole memories under one budget.
@@ -74,8 +98,6 @@ def combine_recall_blocks(memory_block: str, experience_block: str, *,
         if not block or block in chosen:
             continue
         remaining = max_chars - used - (2 if chosen else 0)
-        if kind == "memory" and len(block) > remaining:
-            block = fit_memory_fact_block(block, max(0, remaining))
         if not block or len(block) > remaining:
             continue
         chosen.append(block)
