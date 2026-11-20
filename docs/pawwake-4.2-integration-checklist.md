@@ -97,3 +97,6 @@
 - Updated the integration-branch smoke workflow to compile new modules and run new pure-module/static tests. The DB adapter is exercised only by the full regression workflow, which installs all app dependencies.
 - **Known limitation**: formatted-block budget cannot deduplicate overlapping memories/cards by `source_message_ids` and may omit whole memory blocks. Source-aware structured budgeting requires bringing verified provenance and approved-card selection into one transaction-aware recall path, then releasing the staged switch after real-chat regression.
 - **Do not deploy or enable this setting yet**; production branch and database are unchanged. Rollback: leave `SHARED_RECALL_BUDGET_ENABLED=false`, or revert these commits on this experimental branch after verification.
+
+- Supplemental randomized property check on the standalone formatted-block helper: 5,000 deterministic randomized input/budget combinations passed, confirming output length does not exceed max_chars and output contains complete source blocks. This does **not** validate main.py, database.py, or real LLM behavior.
+- The isolated Git checkout cannot fetch GitHub due DNS resolution failure. Complete repository CI results are not available through the connected GitHub PR-run-only workflow lookup. Status remains **experimental, not production-ready**.
