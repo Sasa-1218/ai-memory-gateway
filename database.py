@@ -2881,11 +2881,14 @@ async def bulk_review_experience_cards(card_ids: list[int], operation: str):
 
 
 async def retrieve_experience_recall(session_id: str, user_message: str,
-                                     min_round_gap: int = 4, limit: int = 1) -> str:
+                                     min_round_gap: int = 4, limit: int = 1,
+                                     max_chars: int | None = None) -> str:
     """Read only approved cards; durable per-session cooldown for cue recall."""
     from experience_recall import match_experience_cards, format_experience_recall
     if not session_id or not user_message or len(user_message) > 10000:
         return ""
+    if max_chars is not None and (type(max_chars) is not int or max_chars < 0):
+        raise ValueError("invalid_recall_max_chars")
     min_round_gap = max(1, min(int(min_round_gap), 100))
     limit = max(1, min(int(limit), 2))
     pool = await get_pool()
@@ -2943,11 +2946,15 @@ async def retrieve_experience_recall(session_id: str, user_message: str,
             selected = selected[:limit]
             if not selected:
                 return ""
+            formatted = format_experience_recall(selected)
+            # A budget-rejected card must not consume the durable cooldown.
+            if max_chars is not None and len(formatted) > max_chars:
+                return ""
             await conn.execute("""
                 INSERT INTO gateway_config (key,value) VALUES ($1,$2)
                 ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
             """, key, json.dumps({"round": round_no, "card_id": int(selected[0]["id"])}))
-            return format_experience_recall(selected)
+            return formatted
 
 
 # ============================================================
