@@ -343,6 +343,12 @@ EXPERIENCE_RECALL_ENABLED = os.getenv("EXPERIENCE_RECALL_ENABLED", "false").lowe
 EXPERIENCE_RECALL_EVERY_ROUNDS = _env_int("EXPERIENCE_RECALL_EVERY_ROUNDS", 4)
 EXPERIENCE_RECALL_MAX_CARDS = _env_int("EXPERIENCE_RECALL_MAX_CARDS", 1)
 
+# Shared recall budget is experimental and disabled unless explicitly enabled.
+# It never changes existing search, experience approval, or cooldown decisions.
+SHARED_RECALL_BUDGET_ENABLED = os.getenv("SHARED_RECALL_BUDGET_ENABLED", "false").lower() == "true"
+SHARED_RECALL_MAX_CHARS = max(0, min(_env_int("SHARED_RECALL_MAX_CHARS", 6000), 30000))
+
+
 # 主动推送配置
 PUSH_SECRET = os.getenv("PUSH_SECRET", "")
 PUSH_MAX_PER_DAY = _env_int("PUSH_MAX_PER_DAY", 7)
@@ -1952,12 +1958,22 @@ async def build_partitioned_messages(
     if current_user_msg:
         parts = [build_time_injection()]
         
+        mem_text = ""
+        experience_text = ""
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
             mem_text = await build_memory_text(user_message)
-            if mem_text:
-                parts.append(mem_text)
         if EXPERIENCE_RECALL_ENABLED and user_message:
             experience_text = await build_experience_recall(user_message, session_id)
+        if SHARED_RECALL_BUDGET_ENABLED:
+            from recall_budget import combine_recall_blocks
+            combined = combine_recall_blocks(
+                mem_text, experience_text, max_chars=SHARED_RECALL_MAX_CHARS,
+            )
+            if combined:
+                parts.append(combined)
+        else:
+            if mem_text:
+                parts.append(mem_text)
             if experience_text:
                 parts.append(experience_text)
         
@@ -2013,12 +2029,22 @@ async def _build_basic_cached(
     if current_user_msg:
         parts = [build_time_injection()]
         
+        mem_text = ""
+        experience_text = ""
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
             mem_text = await build_memory_text(user_message)
-            if mem_text:
-                parts.append(mem_text)
         if EXPERIENCE_RECALL_ENABLED and user_message:
             experience_text = await build_experience_recall(user_message, get_active_session_id())
+        if SHARED_RECALL_BUDGET_ENABLED:
+            from recall_budget import combine_recall_blocks
+            combined = combine_recall_blocks(
+                mem_text, experience_text, max_chars=SHARED_RECALL_MAX_CHARS,
+            )
+            if combined:
+                parts.append(combined)
+        else:
+            if mem_text:
+                parts.append(mem_text)
             if experience_text:
                 parts.append(experience_text)
         
@@ -4829,7 +4855,13 @@ async def chat_completions(request: Request):
         if EXPERIENCE_RECALL_ENABLED and user_message:
             experience_text = await build_experience_recall(user_message, get_active_session_id())
             if experience_text:
-                memory_block = (memory_block + "\n\n" + experience_text) if memory_block else experience_text
+                if SHARED_RECALL_BUDGET_ENABLED:
+                    from recall_budget import combine_recall_blocks
+                    memory_block = combine_recall_blocks(
+                        memory_block, experience_text, max_chars=SHARED_RECALL_MAX_CHARS,
+                    )
+                else:
+                    memory_block = (memory_block + "\n\n" + experience_text) if memory_block else experience_text
 
         has_system = any(msg.get("role") == "system" for msg in messages)
 
