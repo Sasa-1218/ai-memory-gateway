@@ -20,12 +20,19 @@ def _normal_text(value):
 
 
 def _duplicate(a, b):
+    # Identical wording can describe separate events in separate sessions.
+    # Deduplicate it only when both source sessions match or are unknown.
     if _normal_text(a['text']) == _normal_text(b['text']):
-        return True
+        if not (a['session_id'] and b['session_id']) or a['session_id'] == b['session_id']:
+            return True
     if a['session_id'] and a['session_id'] == b['session_id']:
         left, right = set(a['source_message_ids']), set(b['source_message_ids'])
         if left and right and len(left & right) / len(left | right) >= 0.7:
-            return True
+            # A memory can contain a distinct observation from the same
+            # conversation. Keep it unless the text also substantially agrees.
+            ta, tb = set(_normal_text(a['text']).split()), set(_normal_text(b['text']).split())
+            if ta and tb and len(ta & tb) / len(ta | tb) >= 0.5:
+                return True
     return False
 
 
