@@ -25,16 +25,16 @@ class RecallBudgetTests(unittest.TestCase):
     def test_preserve_two_complete_memories_without_truncating(self):
         from recall_budget import fit_memory_fact_block
         source = (
-            "<脑海中浮现的既往事实>\\n"
-            "- First memory detail\\n"
-            "- Second memory detail\\n"
-            "- Third memory detail\\n"
+            "<脑海中浮现的既往事实>\n"
+            "- First memory detail\n"
+            "- Second memory detail\n"
+            "- Third memory detail\n"
             "</脑海中浮现的既往事实>"
         )
         budget = len(
-            "<脑海中浮现的既往事实>\\n"
-            "- First memory detail\\n"
-            "- Second memory detail\\n"
+            "<脑海中浮现的既往事实>\n"
+            "- First memory detail\n"
+            "- Second memory detail\n"
             "</脑海中浮现的既往事实>"
         )
         result = fit_memory_fact_block(source, budget)
@@ -47,15 +47,15 @@ class RecallBudgetTests(unittest.TestCase):
     def test_preserve_multiline_fact_intact(self):
         from recall_budget import fit_memory_fact_block
         source = (
-            "<脑海中浮现的既往事实>\\n"
-            "- A memory\\n"
-            "a continuation\\n"
-            "- Short\\n"
+            "<脑海中浮现的既往事实>\n"
+            "- A memory\n"
+            "a continuation\n"
+            "- Short\n"
             "</脑海中浮现的既往事实>"
         )
         budget = len(
-            "<脑海中浮现的既往事实>\\n"
-            "- Short\\n"
+            "<脑海中浮现的既往事实>\n"
+            "- Short\n"
             "</脑海中浮现的既往事实>"
         )
         result = fit_memory_fact_block(source, budget)
@@ -69,13 +69,13 @@ class RecallBudgetTests(unittest.TestCase):
 
     def test_shares_budget_with_card_and_keeps_whole_memory(self):
         facts = (
-            "<脑海中浮现的既往事实>\\n"
-            "- Relevant memory\\n"
-            "- Another memory\\n"
+            "<脑海中浮现的既往事实>\n"
+            "- Relevant memory\n"
+            "- Another memory\n"
             "</脑海中浮现的既往事实>"
         )
         combined = combine(facts, "CARD", max_chars=70)
-        self.assertTrue(combined.startswith("CARD\\n\\n"))
+        self.assertTrue(combined.startswith("CARD\n\n"))
         self.assertIn("- Relevant memory", combined)
         self.assertNotIn("- Another memory", combined)
         self.assertLessEqual(len(combined), 70)
