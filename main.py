@@ -717,7 +717,7 @@ async def gateway_auth_middleware(request: Request, call_next):
 # 记忆注入
 # ============================================================
 
-async def build_system_prompt_with_memories(user_message: str) -> str:
+async def build_system_prompt_with_memories(user_message: str, max_chars: int | None = None) -> str:
     """构建记忆数据块（不含人设，由调用方追加到人设末尾）"""
     if not MEMORY_ENABLED or not MEMORY_EXTRACT_ENABLED:
         return ""
@@ -741,6 +741,9 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
                 except:
                     date_str = f"[{str(mem['created_at'])[:10]}] "
             memory_lines.append(f"- {date_str}{mem['content']}")
+        if max_chars is not None:
+            from recall_budget import fit_memory_entries
+            return fit_memory_entries(memory_lines, max_chars)
         memory_text = "\n".join(memory_lines)
 
         print(f"📚 注入了 {len(memories)} 条相关记忆")
@@ -1960,11 +1963,15 @@ async def build_partitioned_messages(
         
         mem_text = ""
         experience_text = ""
-        if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
-            mem_text = await build_memory_text(user_message)
-        if EXPERIENCE_RECALL_ENABLED and user_message:
-            experience_text = await build_experience_recall(user_message, session_id)
         if SHARED_RECALL_BUDGET_ENABLED:
+            # Retrieve cards first: their size determines the remaining budget.
+            # The memory search still returns individually ranked records.
+            if EXPERIENCE_RECALL_ENABLED and user_message:
+                experience_text = await build_experience_recall(user_message, session_id)
+            remaining = max(0, SHARED_RECALL_MAX_CHARS - len(experience_text)
+                            - (2 if experience_text else 0))
+            if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
+                mem_text = await build_memory_text(user_message, max_chars=remaining)
             from recall_budget import combine_recall_blocks
             combined = combine_recall_blocks(
                 mem_text, experience_text, max_chars=SHARED_RECALL_MAX_CHARS,
@@ -1972,6 +1979,10 @@ async def build_partitioned_messages(
             if combined:
                 parts.append(combined)
         else:
+            if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
+                mem_text = await build_memory_text(user_message)
+            if EXPERIENCE_RECALL_ENABLED and user_message:
+                experience_text = await build_experience_recall(user_message, session_id)
             if mem_text:
                 parts.append(mem_text)
             if experience_text:
@@ -2031,11 +2042,15 @@ async def _build_basic_cached(
         
         mem_text = ""
         experience_text = ""
-        if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
-            mem_text = await build_memory_text(user_message)
-        if EXPERIENCE_RECALL_ENABLED and user_message:
-            experience_text = await build_experience_recall(user_message, get_active_session_id())
         if SHARED_RECALL_BUDGET_ENABLED:
+            # Retrieve cards first: their size determines the remaining budget.
+            # The memory search still returns individually ranked records.
+            if EXPERIENCE_RECALL_ENABLED and user_message:
+                experience_text = await build_experience_recall(user_message, get_active_session_id())
+            remaining = max(0, SHARED_RECALL_MAX_CHARS - len(experience_text)
+                            - (2 if experience_text else 0))
+            if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
+                mem_text = await build_memory_text(user_message, max_chars=remaining)
             from recall_budget import combine_recall_blocks
             combined = combine_recall_blocks(
                 mem_text, experience_text, max_chars=SHARED_RECALL_MAX_CHARS,
@@ -2043,6 +2058,10 @@ async def _build_basic_cached(
             if combined:
                 parts.append(combined)
         else:
+            if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
+                mem_text = await build_memory_text(user_message)
+            if EXPERIENCE_RECALL_ENABLED and user_message:
+                experience_text = await build_experience_recall(user_message, get_active_session_id())
             if mem_text:
                 parts.append(mem_text)
             if experience_text:
@@ -2087,7 +2106,7 @@ async def build_experience_recall(user_message: str, session_id: str) -> str:
         return ""
 
 
-async def build_memory_text(user_message: str) -> str:
+async def build_memory_text(user_message: str, max_chars: int | None = None) -> str:
     """搜索记忆并格式化为注入文本（分区缓存模式用）"""
     if MAX_MEMORIES_INJECT <= 0:
         return ""
@@ -2108,7 +2127,10 @@ async def build_memory_text(user_message: str) -> str:
                 except:
                     date_str = f"[{str(mem['created_at'])[:10]}] "
             memory_lines.append(f"- {date_str}{mem['content']}")
-        
+        if max_chars is not None:
+            from recall_budget import fit_memory_entries
+            return fit_memory_entries(memory_lines, max_chars)
+
         print(f"📚 注入了 {len(memories)} 条相关记忆")
         return "<脑海中浮现的既往事实>\n" + "\n".join(memory_lines) + "\n</脑海中浮现的既往事实>"
     except Exception as e:
@@ -4850,19 +4872,27 @@ async def chat_completions(request: Request):
     else:
         # ---------- 原有逻辑：system prompt + 记忆注入 ----------
         memory_block = ""
-        if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
-            memory_block = await build_system_prompt_with_memories(user_message)
-
         experience_text = ""
-        if EXPERIENCE_RECALL_ENABLED and user_message:
-            experience_text = await build_experience_recall(user_message, get_active_session_id())
         if SHARED_RECALL_BUDGET_ENABLED:
+            if EXPERIENCE_RECALL_ENABLED and user_message:
+                experience_text = await build_experience_recall(user_message, get_active_session_id())
+            remaining = max(0, SHARED_RECALL_MAX_CHARS - len(experience_text)
+                            - (2 if experience_text else 0))
+            if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
+                memory_block = await build_system_prompt_with_memories(
+                    user_message, max_chars=remaining,
+                )
             from recall_budget import combine_recall_blocks
             memory_block = combine_recall_blocks(
                 memory_block, experience_text, max_chars=SHARED_RECALL_MAX_CHARS,
             )
-        elif experience_text:
-            memory_block = (memory_block + "\n\n" + experience_text) if memory_block else experience_text
+        else:
+            if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
+                memory_block = await build_system_prompt_with_memories(user_message)
+            if EXPERIENCE_RECALL_ENABLED and user_message:
+                experience_text = await build_experience_recall(user_message, get_active_session_id())
+                if experience_text:
+                    memory_block = (memory_block + "\n\n" + experience_text) if memory_block else experience_text
 
         has_system = any(msg.get("role") == "system" for msg in messages)
 
