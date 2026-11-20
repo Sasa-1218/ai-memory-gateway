@@ -81,6 +81,23 @@ class DatabaseExperienceRecallTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await retrieve_experience_recall("6.14", "烟花日", 4, 1), "")
             self.assertEqual(json.loads(conn.saved["experience_recall_last_round:6.14"])["round"], 11)
 
+    async def test_budget_rejection_does_not_consume_cooldown(self):
+        conn = FakeConnection([card()])
+        with patch("database.get_pool", new=AsyncMock(return_value=FakePool(conn))):
+            self.assertEqual(
+                await retrieve_experience_recall("6.14", "烟花日", 4, 1, max_chars=5), ""
+            )
+            self.assertNotIn("experience_recall_last_round:6.14", conn.saved)
+            text = await retrieve_experience_recall("6.14", "烟花日", 4, 1, max_chars=6000)
+            self.assertIn("烟花日的手链", text)
+            self.assertIn("experience_recall_last_round:6.14", conn.saved)
+
+    async def test_invalid_budget_rejected(self):
+        conn = FakeConnection([card()])
+        with patch("database.get_pool", new=AsyncMock(return_value=FakePool(conn))):
+            with self.assertRaises(ValueError):
+                await retrieve_experience_recall("6.14", "烟花日", max_chars=-1)
+
     async def test_pending_and_hidden_cards_are_never_injected(self):
         conn = FakeConnection([card(1, status="pending"), card(2, visible=False)])
         with patch("database.get_pool", new=AsyncMock(return_value=FakePool(conn))):
