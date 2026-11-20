@@ -68,9 +68,11 @@ def trace_memory_provenance(memory, rows_by_id, *, max_nodes=100):
             incomplete = True
             continue
         for parent_id in parents:
-            if parent_id in seen:
+            if parent_id == row_id or parent_id in ancestors:
                 incomplete = True
                 continue
+            if parent_id in seen:
+                continue  # Shared ancestor in a DAG, not a cycle.
             parent = rows_by_id.get(parent_id)
             if parent is None:
                 incomplete = True
