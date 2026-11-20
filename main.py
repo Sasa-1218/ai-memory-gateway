@@ -2080,6 +2080,7 @@ async def build_experience_recall(user_message: str, session_id: str) -> str:
         return await retrieve_experience_recall(
             session_id, user_message,
             EXPERIENCE_RECALL_EVERY_ROUNDS, EXPERIENCE_RECALL_MAX_CARDS,
+            max_chars=SHARED_RECALL_MAX_CHARS if SHARED_RECALL_BUDGET_ENABLED else None,
         )
     except Exception as exc:
         print(f"[experience-recall] skipped: {type(exc).__name__}", flush=True)
