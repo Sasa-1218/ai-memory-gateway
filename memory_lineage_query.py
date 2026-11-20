@@ -57,39 +57,45 @@ async def inspect_memory_lineage(memory_id, fetch_rows, *, max_nodes=100, max_de
         return {"exists": False, "memory_id": memory_id, "source_memory_ids": [],
                 "source_session": "", "source_message_ids": [], "message_sources_verified": False,
                 "lineage_complete": False, "missing_memory_ids": sorted(missing), "truncated": truncated}
-    # A repeated parent may be a legitimate DAG join. Detect actual cycles
-    # after fetching, without recursion or unbounded traversal.
-    visiting, visited = set(), set()
+    # Iterative three-colour DFS: grey means active ancestor, black means
+    # completed. A diamond-shaped DAG is valid, but a back-edge is a cycle.
+    colour = {}
     cycle = False
     for start in found:
+        if colour.get(start) == 2:
+            continue
         stack = [(start, False)]
         while stack:
             node, exiting = stack.pop()
             if exiting:
-                visiting.discard(node)
-                visited.add(node)
+                colour[node] = 2
                 continue
-            if node in visiting:
+            state = colour.get(node, 0)
+            if state == 1:
                 cycle = True
                 break
-            if node in visited:
+            if state == 2:
                 continue
-            visiting.add(node)
+            colour[node] = 1
             stack.append((node, True))
-            for parent in found[node].get("merged_from") or []:
+            for parent in reversed(found[node].get("merged_from") or []):
                 if parent in found:
                     stack.append((parent, False))
         if cycle:
             break
     sessions = {str(row["source_session"]) for row in found.values() if row.get("source_session")}
     source_session = next(iter(sessions)) if len(sessions) == 1 else ""
+    # Missing session on the root or any leaf means the session cannot be
+    # asserted for the entire lineage, even if one ancestor has a session.
+    unscoped_leaf = any(not row.get("source_session") and not row.get("merged_from")
+                        for row in found.values())
     return {
         "exists": True, "memory_id": memory_id,
         "source_memory_ids": sorted(found),
         "source_session": source_session,
         "source_message_ids": [],  # No such verified column in current memories schema.
         "message_sources_verified": False,
-        "lineage_complete": not (truncated or malformed or missing or pending or cycle or len(sessions) > 1),
+        "lineage_complete": not (truncated or malformed or missing or pending or cycle or len(sessions) > 1 or unscoped_leaf),
         "missing_memory_ids": sorted(missing),
         "truncated": truncated,
     }
