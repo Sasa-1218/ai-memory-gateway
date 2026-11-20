@@ -16,7 +16,9 @@ class MemoryProvenanceTests(unittest.TestCase):
         self.assertEqual(trace(root,parents)['source_message_ids'], [])
     def test_missing_parent_flagged(self):
         root={'id':2,'source_session':'s','source_message_ids':[4],'merged_from':[5]}
-        self.assertFalse(trace(root,{})['complete'])
+        result=trace(root,{})
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['source_message_ids'],[])
     def test_legacy_session_only_is_unverified(self):
         self.assertEqual(trace({'id':1,'source_session':'s'},{}),
                          {'source_session':'s','source_message_ids':[],'complete':False})
@@ -32,6 +34,21 @@ class MemoryProvenanceTests(unittest.TestCase):
         root={'id':100,'source_session':'s','merged_from':list(range(1,20))}
         rows={i:{'id':i,'source_session':'s','source_message_ids':[i]} for i in range(1,20)}
         self.assertFalse(trace(root,rows,max_nodes=2)['complete'])
+    def test_shared_parent_in_dag_is_valid(self):
+        leaf={'id':1,'source_session':'s','source_message_ids':[7]}
+        a={'id':2,'source_session':'s','merged_from':[1]}
+        b={'id':3,'source_session':'s','merged_from':[1]}
+        root={'id':4,'source_session':'s','merged_from':[2,3]}
+        self.assertEqual(trace(root,{1:leaf,2:a,3:b}),
+                         {'source_session':'s','source_message_ids':[7],'complete':True})
+
+    def test_incomplete_cycle_never_exposes_partial_message_ids(self):
+        a={'id':1,'source_session':'s','source_message_ids':[4],'merged_from':[2]}
+        b={'id':2,'source_session':'s','source_message_ids':[5],'merged_from':[1]}
+        result=trace(a,{1:a,2:b})
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['source_message_ids'],[])
+
     def test_does_not_mutate_input(self):
         row={'id':1,'source_session':'s','source_message_ids':[2,1]}
         original=dict(row);trace(row,{});self.assertEqual(row,original)
