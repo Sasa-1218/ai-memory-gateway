@@ -64,3 +64,10 @@
 - Added `tests/test_memory_lineage_query.py` (10 isolated async tests), `tests/test_memory_lineage_db.py` (database adapter/API mocks), `tests/test_memory_lineage_wiring.py` (static integration guards).
 - Actual isolated tests executed in local Python 3.13.5 environment: 32/32 passed across `test_recall_selection.py`, `test_memory_provenance.py`, `test_memory_lineage_query.py`; `python -m compileall -q recall_selection.py memory_provenance.py memory_lineage_query.py tests` passed. **These 30 do not include full application database/route mocks or static wiring tests**; they require the full checked-out repository and dependencies.
 - Release blockers: run full GitHub Actions regression on this branch; confirm FastAPI route and Dashboard JS syntax; verify a real staged PostgreSQL with copy/synthetic data; then Kelivo end-to-end tests. GitHub Actions status for the current commit has not been independently verified.
+
+## 2026-11-20 provenance regression fix
+- Fixed staged `memory_provenance.trace_memory_provenance`: a shared ancestor in a diamond-shaped merge DAG is no longer incorrectly flagged as a cycle. Actual ancestor-path cycles still fail closed.
+- On any incomplete lineage (missing ancestor, invalid source, cycle, over-limit), `source_message_ids` is now empty instead of leaking partially verified message IDs.
+- Added two regression cases and tightened the missing-parent assertion in `tests/test_memory_provenance.py`.
+- **Verification pending:** GitHub source was updated but no full Python test execution or CI success has been observed for these commits. Earlier 32/32 isolated results apply only to the earlier commit, not to this revision.
+- No schema, production data, deployed branch, or active retrieval behavior changed.
