@@ -39,7 +39,7 @@ def fit_memory_fact_block(text: str, max_chars: int) -> str:
             return ""
     if current is not None:
         records.append(current)
-    overhead = len(MEMORY_OPEN) + len(MEMORY_CLOSE) + 2
+    overhead = len(MEMORY_OPEN) + len(MEMORY_CLOSE) + 1
     chosen = []
     used = overhead
     for record in records:
