@@ -26,12 +26,16 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(len(got), 2)
 
     def test_exact_text_dedup_when_source_unknown(self):
-        got = select_recall_items([memory(1, ' same  text ')], [card(2, 'sametext')])
+        got = select_recall_items([memory(1, ' same  text ')], [card(2, 'same text')])
         self.assertEqual(len(got), 1)
 
     def test_pending_and_hidden_cards_never_included(self):
         got = select_recall_items([], [card(1,'secret',visible=False),card(2,'pending',status='pending')])
         self.assertEqual(got, [])
+
+    def test_word_boundary_does_not_collapse_distinct_meanings(self):
+        got=select_recall_items([memory(1,'therapist')],[card(2,'the rapist')])
+        self.assertEqual(len(got),2)
 
     def test_inactive_memory_never_included(self):
         self.assertEqual(select_recall_items([memory(1,'archived',active=False)], []), [])
