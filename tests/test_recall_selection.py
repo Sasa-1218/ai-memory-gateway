@@ -27,6 +27,11 @@ class SelectionTests(unittest.TestCase):
                                 [card(2,'Went for a walk',session='a')])
         self.assertEqual(len(got),2)
 
+    def test_unknown_source_does_not_erase_known_session(self):
+        saved=memory(1,'same event',session='')
+        got=select_recall_items([saved],[card(2,'same event',session='known')])
+        self.assertEqual(len(got),2)
+
     def test_distinct_sources_are_preserved(self):
         got = select_recall_items([memory(1, 'fragment', [10])], [card(2, 'whole event', [10,11,12])])
         self.assertEqual(len(got), 2)
