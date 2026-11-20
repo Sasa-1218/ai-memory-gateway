@@ -21,9 +21,10 @@ def _normal_text(value):
 
 def _duplicate(a, b):
     # Identical wording can describe separate events in separate sessions.
-    # Deduplicate it only when both source sessions match or are unknown.
+    # Deduplicate only when both sessions match or both are absent.
+    # A known session and an unknown one cannot prove event identity.
     if _normal_text(a['text']) == _normal_text(b['text']):
-        if not (a['session_id'] and b['session_id']) or a['session_id'] == b['session_id']:
+        if a['session_id'] == b['session_id']:
             return True
     if a['session_id'] and a['session_id'] == b['session_id']:
         left, right = set(a['source_message_ids']), set(b['source_message_ids'])
