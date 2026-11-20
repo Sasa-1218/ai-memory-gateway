@@ -58,6 +58,23 @@ class LineageQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result['truncated'])
         self.assertFalse(result['lineage_complete'])
 
+    async def test_unknown_leaf_session_is_incomplete(self):
+        rows={3:{'id':3,'merged_from':[1,2]},
+              1:{'id':1,'source_session':'a'},
+              2:{'id':2}}
+        async def fetch(ids): return [rows[i] for i in ids]
+        result=await inspect_memory_lineage(3,fetch)
+        self.assertFalse(result['lineage_complete'])
+
+    async def test_three_way_shared_dag_no_false_cycle(self):
+        rows={5:{'id':5,'merged_from':[2,3,4]},
+              2:{'id':2,'merged_from':[1]},
+              3:{'id':3,'merged_from':[1]},
+              4:{'id':4,'merged_from':[1]},
+              1:{'id':1,'source_session':'a'}}
+        async def fetch(ids): return [rows[i] for i in ids]
+        self.assertTrue((await inspect_memory_lineage(5,fetch))['lineage_complete'])
+
     async def test_node_budget_marks_truncated(self):
         rows={1:{'id':1,'merged_from':[2,3]},2:{'id':2},3:{'id':3}}
         async def fetch(ids): return [rows[i] for i in ids]
