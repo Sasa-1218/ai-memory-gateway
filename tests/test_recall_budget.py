@@ -85,6 +85,25 @@ class RecallBudgetTests(unittest.TestCase):
         source = "<脑海中浮现的既往事实>\n- A\n</脑海中浮现的既往事实>"
         self.assertEqual(fit_memory_fact_block(source, 5), "")
 
+    def test_memory_priority_respects_source_order(self):
+        from recall_budget import fit_memory_fact_block
+        source = (
+            "<脑海中浮现的既往事实>\n"
+            "- Alpha one\n"
+            "- Beta two\n"
+            "- Gamma three\n"
+            "</脑海中浮现的既往事实>"
+        )
+        target = "<脑海中浮现的既往事实>\n- Alpha one\n- Beta two\n</脑海中浮现的既往事实>"
+        self.assertEqual(fit_memory_fact_block(source, len(target)), target)
+
+    def test_budget_exactly_one_character_short_keeps_whole_fact(self):
+        from recall_budget import fit_memory_fact_block
+        source = "<脑海中浮现的既往事实>\n- Alpha one\n- Beta two\n</脑海中浮现的既往事实>"
+        one = "<脑海中浮现的既往事实>\n- Alpha one\n</脑海中浮现的既往事实>"
+        result = fit_memory_fact_block(source, len(one))
+        self.assertEqual(result, one)
+
     def test_invalid_budget_rejected(self):
         for bad in (-1, True, 1.5, None):
             with self.assertRaises(ValueError):
