@@ -20,7 +20,7 @@ jobs:
           python-version: "3.12"
       - name: Compile changed core modules
         run: |
-          python -m compileall -q main.py database.py experience_cards.py experience_recall.py recall_rerank.py recall_selection.py memory_provenance.py memory_lineage_query.py summary_section_edit.py
+          python -m compileall -q main.py database.py experience_cards.py experience_recall.py recall_rerank.py recall_selection.py recall_budget.py memory_provenance.py memory_lineage_query.py summary_section_edit.py
       - name: Check Dashboard JavaScript syntax
         run: node --check static/js/dashboard.js
       - name: Check experience settings controls exist
@@ -47,3 +47,7 @@ jobs:
         run: python -m unittest discover -s tests -p test_memory_lineage_db.py -v
       - name: Verify provenance API and Dashboard wiring
         run: python -m unittest discover -s tests -p test_memory_lineage_wiring.py -v
+      - name: Verify shared injection budget and safe default
+        run: |
+          python -m unittest discover -s tests -p test_recall_budget.py -v
+          python -m unittest discover -s tests -p test_recall_budget_wiring.py -v
