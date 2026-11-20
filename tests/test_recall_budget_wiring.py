@@ -15,6 +15,23 @@ class RecallBudgetWiringTests(unittest.TestCase):
         self.assertEqual(source.count("combined = combine_recall_blocks("), 2)
         self.assertEqual(source.count("memory_block = combine_recall_blocks("), 1)
 
+    def test_source_records_are_packed_before_formatting(self):
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertEqual(source.count("return fit_memory_entries(memory_lines, max_chars)"), 2)
+        self.assertIn("async def build_system_prompt_with_memories(user_message: str, max_chars:", source)
+        self.assertIn("async def build_memory_text(user_message: str, max_chars:", source)
+
+    def test_three_paths_limit_records_after_card_selection(self):
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertEqual(source.count("SHARED_RECALL_MAX_CHARS - len(experience_text)"), 3)
+        self.assertEqual(source.count("build_memory_text(user_message, max_chars=remaining)"), 2)
+        self.assertIn("user_message, max_chars=remaining,", source)
+
+    def test_ambiguous_formatted_parser_is_not_available(self):
+        source = (ROOT / "recall_budget.py").read_text(encoding="utf-8")
+        self.assertNotIn("def fit_memory_fact_block(", source)
+        self.assertIn("def fit_memory_entries(", source)
+
     def test_legacy_fallback_preserves_memory_before_experience(self):
         source = (ROOT / "main.py").read_text(encoding="utf-8")
         self.assertIn('memory_block = (memory_block + "\\n\\n" + experience_text) if memory_block else experience_text', source)
