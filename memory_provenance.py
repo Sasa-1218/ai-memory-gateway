@@ -32,22 +32,26 @@ def trace_memory_provenance(memory, rows_by_id, *, max_nodes=100):
         raise TypeError('expected mapping records')
     if not isinstance(max_nodes, int) or isinstance(max_nodes, bool) or max_nodes < 1:
         raise ValueError('invalid max_nodes')
-    stack = [memory]
+    stack = [(memory, frozenset())]
     seen = set()
     sessions = set()
     message_ids = set()
     incomplete = False
     while stack:
-        row = stack.pop()
+        row, ancestors = stack.pop()
         if not isinstance(row, Mapping):
             incomplete = True
             continue
         row_id = row.get('id')
-        if isinstance(row_id, int) and not isinstance(row_id, bool):
-            if row_id in seen:
-                incomplete = True  # Cycle or repeated lineage branch, conservatively flag it.
-                continue
-            seen.add(row_id)
+        if type(row_id) is not int or row_id <= 0:
+            incomplete = True
+            continue
+        if row_id in ancestors:
+            incomplete = True  # A genuine cycle, not a shared ancestor in a DAG.
+            continue
+        if row_id in seen:
+            continue
+        seen.add(row_id)
         if len(seen) > max_nodes:
             incomplete = True
             break
@@ -71,10 +75,11 @@ def trace_memory_provenance(memory, rows_by_id, *, max_nodes=100):
             if parent is None:
                 incomplete = True
             else:
-                stack.append(parent)
+                stack.append((parent, ancestors | {row_id}))
     if len(sessions) != 1:
         # Never combine message IDs from different sessions or unscoped rows.
         return {'source_session': '', 'source_message_ids': [], 'complete': False}
+    complete = not incomplete and bool(message_ids)
     return {'source_session': next(iter(sessions)),
-            'source_message_ids': sorted(message_ids),
-            'complete': not incomplete and bool(message_ids)}
+            'source_message_ids': sorted(message_ids) if complete else [],
+            'complete': complete}
