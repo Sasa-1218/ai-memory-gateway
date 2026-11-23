@@ -67,6 +67,10 @@ def trace_memory_provenance(memory, rows_by_id, *, max_nodes=100):
         if parents is None:
             incomplete = True
             continue
+        if not parents and not session:
+            # A leaf with no identifiable session cannot establish where its
+            # messages came from, even if another ancestor has a session.
+            incomplete = True
         for parent_id in parents:
             if parent_id == row_id or parent_id in ancestors:
                 incomplete = True
