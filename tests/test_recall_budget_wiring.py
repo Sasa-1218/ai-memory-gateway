@@ -38,8 +38,21 @@ class RecallBudgetWiringTests(unittest.TestCase):
         self.assertIn('SHARED_RECALL_MAX_CHARS // 5', source)
         self.assertIn('min(_env_int("SHARED_RECALL_CARD_MAX_CHARS", 600)', source)
         self.assertIn('600, SHARED_RECALL_MAX_CHARS // 5', source)
-        self.assertIn('1 if SHARED_RECALL_BUDGET_ENABLED else EXPERIENCE_RECALL_MAX_CARDS', source)
-        self.assertIn('max_chars=SHARED_RECALL_CARD_MAX_CHARS if SHARED_RECALL_BUDGET_ENABLED else None', source)
+        self.assertIn('            1,\n            max_chars=SHARED_RECALL_CARD_MAX_CHARS', source)
+        self.assertIn('max_chars=SHARED_RECALL_CARD_MAX_CHARS if _shared_recall_budget_active() else None', source)
+
+    def test_dashboard_toggle_automatically_applies_budget(self):
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn("return bool(SHARED_RECALL_BUDGET_ENABLED or EXPERIENCE_RECALL_ENABLED)", source)
+        self.assertEqual(source.count("if _shared_recall_budget_active():"), 3)
+        self.assertIn("if _shared_recall_budget_active() and SHARED_RECALL_CARD_MAX_CHARS < 80:", source)
+
+    def test_dashboard_is_single_card_and_persists_normalized_value(self):
+        html = (ROOT / "templates/dashboard.html").read_text(encoding="utf-8")
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn('id="set-EXPERIENCE_RECALL_MAX_CARDS" class="input" min="1" max="1" value="1" readonly', html)
+        self.assertIn('"EXPERIENCE_RECALL_MAX_CARDS": 1,', source)
+        self.assertIn('if key == "EXPERIENCE_RECALL_MAX_CARDS":', source)
 
     def test_experience_card_default_off_and_interval_unchanged(self):
         source = (ROOT / "main.py").read_text(encoding="utf-8")
@@ -56,7 +69,7 @@ class RecallBudgetWiringTests(unittest.TestCase):
         start = source.index("        experience_text = \"\"", source.index("# ---------- 原有逻辑"))
         end = source.index("        has_system =", start)
         code = source[start:end]
-        self.assertIn("if SHARED_RECALL_BUDGET_ENABLED:", code)
+        self.assertIn("if _shared_recall_budget_active():", code)
         self.assertIn("memory_block = combine_recall_blocks(", code)
 
 
