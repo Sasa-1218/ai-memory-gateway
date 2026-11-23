@@ -7641,7 +7641,7 @@ async def get_settings():
             "MEMORY_EXTRACT_INTERVAL": int(db.get("MEMORY_EXTRACT_INTERVAL") or MEMORY_EXTRACT_INTERVAL),
             "EXPERIENCE_RECALL_ENABLED": _parse_bool(db.get("EXPERIENCE_RECALL_ENABLED"), EXPERIENCE_RECALL_ENABLED),
             "EXPERIENCE_RECALL_EVERY_ROUNDS": int(db.get("EXPERIENCE_RECALL_EVERY_ROUNDS") or EXPERIENCE_RECALL_EVERY_ROUNDS),
-            "EXPERIENCE_RECALL_MAX_CARDS": int(db.get("EXPERIENCE_RECALL_MAX_CARDS") or EXPERIENCE_RECALL_MAX_CARDS),
+            "EXPERIENCE_RECALL_MAX_CARDS": 1,
 
             # 缓存分区
             "CACHE_PARTITION_ENABLED": _parse_bool(db.get("CACHE_PARTITION_ENABLED"), CACHE_PARTITION_ENABLED),
@@ -7770,6 +7770,8 @@ async def save_settings(request: Request):
                 continue
 
             # --- 常规字段 ---
+            if key == "EXPERIENCE_RECALL_MAX_CARDS":
+                value = 1  # Normalize legacy dashboard values before persisting.
             await set_gateway_config(key, str(value))
 
             if key in _MAIN_VARS:
