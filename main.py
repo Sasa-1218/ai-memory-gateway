@@ -341,10 +341,11 @@ EXPERIENCE_CARD_AUTO_BATCH_LIMIT = _env_int(
 # Approved-experience chat recall is optional; default is OFF.
 EXPERIENCE_RECALL_ENABLED = os.getenv("EXPERIENCE_RECALL_ENABLED", "false").lower() == "true"
 EXPERIENCE_RECALL_EVERY_ROUNDS = _env_int("EXPERIENCE_RECALL_EVERY_ROUNDS", 4)
-EXPERIENCE_RECALL_MAX_CARDS = _env_int("EXPERIENCE_RECALL_MAX_CARDS", 1)
+EXPERIENCE_RECALL_MAX_CARDS = 1  # One relevant card per successful recall.
 
-# Shared recall budget is experimental and disabled unless explicitly enabled.
-# It never changes existing search, experience approval, or cooldown decisions.
+# The shared budget activates automatically with the user-facing experience
+# recall toggle. The separate environment flag also permits memory-only testing.
+# Both are false by default, preserving existing memory retrieval.
 SHARED_RECALL_BUDGET_ENABLED = os.getenv("SHARED_RECALL_BUDGET_ENABLED", "false").lower() == "true"
 SHARED_RECALL_MAX_CHARS = max(0, min(_env_int("SHARED_RECALL_MAX_CHARS", 6000), 30000))
 # A single concise experience cue may use at most 600 characters and 20% of
@@ -353,6 +354,11 @@ SHARED_RECALL_CARD_MAX_CHARS = max(
     0, min(_env_int("SHARED_RECALL_CARD_MAX_CHARS", 600),
            600, SHARED_RECALL_MAX_CHARS // 5)
 )
+
+def _shared_recall_budget_active() -> bool:
+    """Dashboard experience toggle implies safe one-card shared budgeting."""
+    return bool(SHARED_RECALL_BUDGET_ENABLED or EXPERIENCE_RECALL_ENABLED)
+
 
 
 # 主动推送配置
@@ -510,7 +516,7 @@ async def lifespan(app: FastAPI):
                         "MAX_MEMORIES_INJECT": int, "MEMORY_EXTRACT_INTERVAL": int,
                         "EXPERIENCE_RECALL_ENABLED": lambda v: _parse_bool(v),
                         "EXPERIENCE_RECALL_EVERY_ROUNDS": lambda v: max(1, min(int(v), 100)),
-                        "EXPERIENCE_RECALL_MAX_CARDS": lambda v: max(1, min(int(v), 2)),
+                        "EXPERIENCE_RECALL_MAX_CARDS": lambda v: 1,
                         "CACHE_PARTITION_ENABLED": lambda v: _parse_bool(v),
                         "CACHE_PARTITION_X": int, "CACHE_PARTITION_TRIGGER": str,
                         "CACHE_PARTITION_WINDOW": int, "CACHE_SUMMARY_MODEL": str,
@@ -1969,7 +1975,7 @@ async def build_partitioned_messages(
         
         mem_text = ""
         experience_text = ""
-        if SHARED_RECALL_BUDGET_ENABLED:
+        if _shared_recall_budget_active():
             # Retrieve cards first: their size determines the remaining budget.
             # The memory search still returns individually ranked records.
             if EXPERIENCE_RECALL_ENABLED and user_message:
@@ -2048,7 +2054,7 @@ async def _build_basic_cached(
         
         mem_text = ""
         experience_text = ""
-        if SHARED_RECALL_BUDGET_ENABLED:
+        if _shared_recall_budget_active():
             # Retrieve cards first: their size determines the remaining budget.
             # The memory search still returns individually ranked records.
             if EXPERIENCE_RECALL_ENABLED and user_message:
@@ -2100,15 +2106,15 @@ async def build_experience_recall(user_message: str, session_id: str) -> str:
     """Only approved visible cards, exact cues, with persistent anti-repeat state."""
     if not EXPERIENCE_RECALL_ENABLED or not user_message or not session_id:
         return ""
-    if SHARED_RECALL_BUDGET_ENABLED and SHARED_RECALL_CARD_MAX_CHARS < 80:
+    if _shared_recall_budget_active() and SHARED_RECALL_CARD_MAX_CHARS < 80:
         return ""  # Budget too small for a meaningful, properly labelled cue.
     try:
         from database import retrieve_experience_recall
         return await retrieve_experience_recall(
             session_id, user_message,
             EXPERIENCE_RECALL_EVERY_ROUNDS,
-            1 if SHARED_RECALL_BUDGET_ENABLED else EXPERIENCE_RECALL_MAX_CARDS,
-            max_chars=SHARED_RECALL_CARD_MAX_CHARS if SHARED_RECALL_BUDGET_ENABLED else None,
+            1,
+            max_chars=SHARED_RECALL_CARD_MAX_CHARS if _shared_recall_budget_active() else None,
         )
     except Exception as exc:
         print(f"[experience-recall] skipped: {type(exc).__name__}", flush=True)
@@ -4882,7 +4888,7 @@ async def chat_completions(request: Request):
         # ---------- 原有逻辑：system prompt + 记忆注入 ----------
         memory_block = ""
         experience_text = ""
-        if SHARED_RECALL_BUDGET_ENABLED:
+        if _shared_recall_budget_active():
             if EXPERIENCE_RECALL_ENABLED and user_message:
                 experience_text = await build_experience_recall(user_message, get_active_session_id())
             remaining = max(0, SHARED_RECALL_MAX_CHARS - len(experience_text)
@@ -7700,7 +7706,7 @@ async def save_settings(request: Request):
             "MEMORY_EXTRACT_INTERVAL": int,
             "EXPERIENCE_RECALL_ENABLED": lambda v: _parse_bool(v),
             "EXPERIENCE_RECALL_EVERY_ROUNDS": lambda v: max(1, min(int(v), 100)),
-            "EXPERIENCE_RECALL_MAX_CARDS": lambda v: max(1, min(int(v), 2)),
+            "EXPERIENCE_RECALL_MAX_CARDS": lambda v: 1,
             "CACHE_PARTITION_ENABLED": lambda v: _parse_bool(v),
             "CACHE_PARTITION_X":     int,
             "CACHE_PARTITION_TRIGGER": str,
