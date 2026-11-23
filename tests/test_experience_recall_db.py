@@ -115,6 +115,18 @@ class DatabaseExperienceRecallTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(conn.saved, {})
 
+    async def test_skips_empty_highest_ranked_card_without_cooldown_loss(self):
+        good = card(1)
+        empty = card(2, "烟花日的另一条空摘要")
+        empty["event_summary"] = ""
+        conn = FakeConnection([good, empty])
+        with patch("database.get_pool", new=AsyncMock(return_value=FakePool(conn))):
+            result = await retrieve_experience_recall("6.14", "烟花日", 4, 1, max_chars=300)
+            self.assertIn("烟花日的手链", result)
+            self.assertNotIn("烟花日的另一条空摘要", result)
+            state = json.loads(conn.saved["experience_recall_last_round:6.14"])
+            self.assertEqual(state["card_id"], 1)
+
     async def test_invalid_budget_rejected(self):
         conn = FakeConnection([card()])
         with patch("database.get_pool", new=AsyncMock(return_value=FakePool(conn))):
