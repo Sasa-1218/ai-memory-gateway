@@ -2946,9 +2946,9 @@ async def retrieve_experience_recall(session_id: str, user_message: str,
             selected = selected[:limit]
             if not selected:
                 return ""
-            formatted = format_experience_recall(selected)
-            # A budget-rejected card must not consume the durable cooldown.
-            if max_chars is not None and len(formatted) > max_chars:
+            formatted = format_experience_recall(selected, max_chars=max_chars)
+            # An empty or budget-rejected card must not consume cooldown.
+            if not formatted or (max_chars is not None and len(formatted) > max_chars):
                 return ""
             await conn.execute("""
                 INSERT INTO gateway_config (key,value) VALUES ($1,$2)
