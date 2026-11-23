@@ -32,6 +32,20 @@ class RecallBudgetWiringTests(unittest.TestCase):
         self.assertNotIn("def fit_memory_fact_block(", source)
         self.assertIn("def fit_memory_entries(", source)
 
+    def test_experience_card_budget_is_independent_and_small(self):
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn('SHARED_RECALL_CARD_MAX_CHARS = max(', source)
+        self.assertIn('SHARED_RECALL_MAX_CHARS // 5', source)
+        self.assertIn('min(_env_int("SHARED_RECALL_CARD_MAX_CHARS", 600)', source)
+        self.assertIn('600, SHARED_RECALL_MAX_CHARS // 5', source)
+        self.assertIn('1 if SHARED_RECALL_BUDGET_ENABLED else EXPERIENCE_RECALL_MAX_CARDS', source)
+        self.assertIn('max_chars=SHARED_RECALL_CARD_MAX_CHARS if SHARED_RECALL_BUDGET_ENABLED else None', source)
+
+    def test_experience_card_default_off_and_interval_unchanged(self):
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertIn('EXPERIENCE_RECALL_ENABLED = os.getenv("EXPERIENCE_RECALL_ENABLED", "false")', source)
+        self.assertIn('_env_int("EXPERIENCE_RECALL_EVERY_ROUNDS", 4)', source)
+
     def test_legacy_fallback_preserves_memory_before_experience(self):
         source = (ROOT / "main.py").read_text(encoding="utf-8")
         self.assertIn('memory_block = (memory_block + "\\n\\n" + experience_text) if memory_block else experience_text', source)
