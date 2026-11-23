@@ -92,6 +92,29 @@ class DatabaseExperienceRecallTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("烟花日的手链", text)
             self.assertIn("experience_recall_last_round:6.14", conn.saved)
 
+    async def test_compact_one_card_when_max_two_requested(self):
+        first = card()
+        first["event_summary"] = "关于烟花日的重要细节。" * 80
+        second = card(2, "烟花日的另一段回忆")
+        conn = FakeConnection([first, second])
+        with patch("database.get_pool", new=AsyncMock(return_value=FakePool(conn))):
+            result = await retrieve_experience_recall("6.14", "烟花日", 4, 2, max_chars=300)
+            self.assertTrue(result)
+            self.assertLessEqual(len(result), 300)
+            self.assertIn("历史经历节选", result)
+            self.assertIn("烟花日的另一段回忆", result)  # higher ID wins exact cue
+            self.assertNotIn("烟花日的手链", result)
+
+    async def test_empty_summary_skips_and_preserves_cooldown(self):
+        item = card()
+        item["event_summary"] = ""
+        conn = FakeConnection([item])
+        with patch("database.get_pool", new=AsyncMock(return_value=FakePool(conn))):
+            self.assertEqual(
+                await retrieve_experience_recall("6.14", "烟花日", 4, 1, max_chars=300), ""
+            )
+            self.assertEqual(conn.saved, {})
+
     async def test_invalid_budget_rejected(self):
         conn = FakeConnection([card()])
         with patch("database.get_pool", new=AsyncMock(return_value=FakePool(conn))):
