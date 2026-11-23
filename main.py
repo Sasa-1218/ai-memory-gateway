@@ -347,6 +347,12 @@ EXPERIENCE_RECALL_MAX_CARDS = _env_int("EXPERIENCE_RECALL_MAX_CARDS", 1)
 # It never changes existing search, experience approval, or cooldown decisions.
 SHARED_RECALL_BUDGET_ENABLED = os.getenv("SHARED_RECALL_BUDGET_ENABLED", "false").lower() == "true"
 SHARED_RECALL_MAX_CHARS = max(0, min(_env_int("SHARED_RECALL_MAX_CHARS", 6000), 30000))
+# A single concise experience cue may use at most 600 characters and 20% of
+# the common recall budget. The rest remains available to normal memories.
+SHARED_RECALL_CARD_MAX_CHARS = max(
+    0, min(_env_int("SHARED_RECALL_CARD_MAX_CHARS", 600),
+           600, SHARED_RECALL_MAX_CHARS // 5)
+)
 
 
 # 主动推送配置
@@ -2094,12 +2100,15 @@ async def build_experience_recall(user_message: str, session_id: str) -> str:
     """Only approved visible cards, exact cues, with persistent anti-repeat state."""
     if not EXPERIENCE_RECALL_ENABLED or not user_message or not session_id:
         return ""
+    if SHARED_RECALL_BUDGET_ENABLED and SHARED_RECALL_CARD_MAX_CHARS < 80:
+        return ""  # Budget too small for a meaningful, properly labelled cue.
     try:
         from database import retrieve_experience_recall
         return await retrieve_experience_recall(
             session_id, user_message,
-            EXPERIENCE_RECALL_EVERY_ROUNDS, EXPERIENCE_RECALL_MAX_CARDS,
-            max_chars=SHARED_RECALL_MAX_CHARS if SHARED_RECALL_BUDGET_ENABLED else None,
+            EXPERIENCE_RECALL_EVERY_ROUNDS,
+            1 if SHARED_RECALL_BUDGET_ENABLED else EXPERIENCE_RECALL_MAX_CARDS,
+            max_chars=SHARED_RECALL_CARD_MAX_CHARS if SHARED_RECALL_BUDGET_ENABLED else None,
         )
     except Exception as exc:
         print(f"[experience-recall] skipped: {type(exc).__name__}", flush=True)
