@@ -49,6 +49,16 @@ class MemoryProvenanceTests(unittest.TestCase):
         self.assertFalse(result['complete'])
         self.assertEqual(result['source_message_ids'],[])
 
+    def test_unknown_session_leaf_blocks_verified_merged_sources(self):
+        root={'id':3,'merged_from':[1,2]}
+        parents={
+            1:{'id':1,'source_session':'s','source_message_ids':[4]},
+            2:{'id':2,'source_session':None,'source_message_ids':[]},
+        }
+        result=trace(root,parents)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['source_message_ids'],[])
+
     def test_does_not_mutate_input(self):
         row={'id':1,'source_session':'s','source_message_ids':[2,1]}
         original=dict(row);trace(row,{});self.assertEqual(row,original)
