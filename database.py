@@ -2943,10 +2943,21 @@ async def retrieve_experience_recall(session_id: str, user_message: str,
             previous_card = int(recent.get("card_id") or 0)
             if previous_card and delta_rounds >= 0 and delta_rounds < max(20, min_round_gap):
                 selected = [card for card in selected if int(card["id"]) != previous_card]
-            selected = selected[:limit]
             if not selected:
                 return ""
-            formatted = format_experience_recall(selected, max_chars=max_chars)
+            if max_chars is None:
+                selected = selected[:limit]
+                formatted = format_experience_recall(selected)
+            else:
+                # Capped mode uses one concise card. If the highest ranked
+                # card has an empty summary, try the next approved match.
+                formatted = ""
+                for candidate in selected:
+                    candidate_text = format_experience_recall([candidate], max_chars=max_chars)
+                    if candidate_text:
+                        selected = [candidate]
+                        formatted = candidate_text
+                        break
             # An empty or budget-rejected card must not consume cooldown.
             if not formatted or (max_chars is not None and len(formatted) > max_chars):
                 return ""
