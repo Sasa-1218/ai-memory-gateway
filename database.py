@@ -1906,8 +1906,16 @@ async def get_memory_source_info(ids: list[int]):
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT id,source_session,source_message_ids FROM memories
-            WHERE id=ANY($1::int[])
+            SELECT m.id,m.source_session,
+                   CASE WHEN m.source_session IS NOT NULL
+                        AND cardinality(m.source_message_ids) > 0
+                        AND cardinality(m.source_message_ids) = (
+                            SELECT COUNT(*) FROM conversations c
+                            WHERE c.session_id = m.source_session
+                              AND c.id = ANY(m.source_message_ids)
+                        )
+                        THEN m.source_message_ids ELSE NULL END AS source_message_ids
+            FROM memories m WHERE m.id=ANY($1::int[])
         """, checked)
         return {row["id"]: dict(row) for row in rows}
 
