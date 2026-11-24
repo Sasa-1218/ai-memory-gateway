@@ -352,6 +352,7 @@ SHARED_RECALL_MAX_CHARS = max(0, min(_env_int("SHARED_RECALL_MAX_CHARS", 6000), 
 MEMORY_QUERY_ALIASES_JSON = os.getenv("MEMORY_QUERY_ALIASES_JSON", "")
 MEMORY_PINNED_ENABLED = os.getenv("MEMORY_PINNED_ENABLED", "false").lower() == "true"
 MEMORY_RERANK_ENABLED = os.getenv("MEMORY_RERANK_ENABLED", "false").lower() == "true"
+MEMORY_DEDUP_ENABLED = os.getenv("MEMORY_DEDUP_ENABLED", "false").lower() == "true"
 MEMORY_RERANK_MODEL = os.getenv("MEMORY_RERANK_MODEL", "").strip()
 # Externally accessible read-only tools require a configured gateway secret.
 MCP_READONLY_ENABLED = os.getenv("MCP_READONLY_ENABLED", "false").lower() == "true"
@@ -521,6 +522,7 @@ async def lifespan(app: FastAPI):
                         "MEMORY_API_THINKING": str,
                         "MEMORY_ENABLED": lambda v: _parse_bool(v),
                         "MAX_MEMORIES_INJECT": int, "MEMORY_EXTRACT_INTERVAL": int,
+                        "MEMORY_DEDUP_ENABLED": lambda v: _parse_bool(v),
                         "MEMORY_RERANK_ENABLED": lambda v: _parse_bool(v),
                         "MEMORY_QUERY_ALIASES_JSON": str,
                         "MEMORY_RERANK_MODEL": str,
@@ -747,6 +749,36 @@ def _memory_query_with_aliases(query: str) -> str:
     return expand_query_terms(query, MEMORY_QUERY_ALIASES_JSON)
 
 
+async def _deduplicate_verified_memory_candidates(records):
+    """Opt-in conservative dedup: same verified session and source/text evidence."""
+    if not MEMORY_DEDUP_ENABLED or not records:
+        return records
+    try:
+        from recall_selection import select_recall_items
+        rows = [dict(record) for record in records]
+        ids = [row.get("id") for row in rows if type(row.get("id")) is int]
+        sources = await _db_module.get_memory_source_info(ids)
+        candidates = []
+        for row in rows:
+            metadata = sources.get(row.get("id"), {})
+            candidate = dict(row)
+            session = metadata.get("source_session") or ""
+            # Unknown sessions must not be treated as the same historical event.
+            candidate["source_session"] = session or "unknown-memory-" + str(row.get("id"))
+            candidate["source_message_ids"] = metadata.get("source_message_ids") or []
+            candidate["is_active"] = True
+            candidates.append(candidate)
+        selected = select_recall_items(
+            candidates, [], max_items=len(candidates),
+            max_chars=sum(len(str(c.get("content") or "")) for c in candidates) + 1,
+        )
+        chosen_ids = {item["id"] for item in selected}
+        return [row for row in records if row.get("id") in chosen_ids]
+    except Exception as exc:
+        print(f"[memory-dedup] fallback {type(exc).__name__}", flush=True)
+        return records
+
+
 async def _rerank_memory_candidates(user_message: str, records):
     """Optional paid rerank, with strict fallback on errors or unavailable model."""
     if not MEMORY_RERANK_ENABLED or not MEMORY_RERANK_MODEL:
@@ -804,6 +836,7 @@ async def build_system_prompt_with_memories(user_message: str, max_chars: int | 
             _memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT,
         ) if MAX_MEMORIES_INJECT > 0 else []
         if memories:
+            memories = await _deduplicate_verified_memory_candidates(memories)
             memories = await _rerank_memory_candidates(user_message, memories)
         if not memories:
             return pinned
@@ -2199,6 +2232,7 @@ async def build_memory_text(user_message: str, max_chars: int | None = None) -> 
             _memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT,
         ) if MAX_MEMORIES_INJECT > 0 else []
         if memories:
+            memories = await _deduplicate_verified_memory_candidates(memories)
             memories = await _rerank_memory_candidates(user_message, memories)
         if not memories:
             return pinned
@@ -7811,6 +7845,7 @@ async def get_settings():
             "MAX_MEMORIES_INJECT":     int(db.get("MAX_MEMORIES_INJECT") or MAX_MEMORIES_INJECT),
             "MIN_SCORE_THRESHOLD":     float(db.get("MIN_SCORE_THRESHOLD") or _db_module.MIN_SCORE_THRESHOLD),
             "MEMORY_EXTRACT_INTERVAL": int(db.get("MEMORY_EXTRACT_INTERVAL") or MEMORY_EXTRACT_INTERVAL),
+            "MEMORY_DEDUP_ENABLED": _parse_bool(db.get("MEMORY_DEDUP_ENABLED"), MEMORY_DEDUP_ENABLED),
             "MEMORY_RERANK_ENABLED": _parse_bool(db.get("MEMORY_RERANK_ENABLED"), MEMORY_RERANK_ENABLED),
             "MEMORY_QUERY_ALIASES_JSON": db.get("MEMORY_QUERY_ALIASES_JSON") or MEMORY_QUERY_ALIASES_JSON,
             "MEMORY_RERANK_MODEL": db.get("MEMORY_RERANK_MODEL") or MEMORY_RERANK_MODEL,
@@ -7880,7 +7915,8 @@ async def save_settings(request: Request):
             "MEMORY_ENABLED":        lambda v: _parse_bool(v),
             "MAX_MEMORIES_INJECT":   int,
             "MEMORY_EXTRACT_INTERVAL": int,
-            "MEMORY_RERANK_ENABLED": lambda v: _parse_bool(v),
+            "MEMORY_DEDUP_ENABLED": lambda v: _parse_bool(v),
+                        "MEMORY_RERANK_ENABLED": lambda v: _parse_bool(v),
                         "MEMORY_QUERY_ALIASES_JSON": str,
                         "MEMORY_RERANK_MODEL": str,
                         "MEMORY_PINNED_ENABLED": lambda v: _parse_bool(v),
