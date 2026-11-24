@@ -351,6 +351,8 @@ SHARED_RECALL_MAX_CHARS = max(0, min(_env_int("SHARED_RECALL_MAX_CHARS", 6000), 
 # Optional, literal alias dictionary for proper-noun search. Empty by default.
 MEMORY_QUERY_ALIASES_JSON = os.getenv("MEMORY_QUERY_ALIASES_JSON", "")
 MEMORY_PINNED_ENABLED = os.getenv("MEMORY_PINNED_ENABLED", "false").lower() == "true"
+MEMORY_RERANK_ENABLED = os.getenv("MEMORY_RERANK_ENABLED", "false").lower() == "true"
+MEMORY_RERANK_MODEL = os.getenv("MEMORY_RERANK_MODEL", "").strip()
 # A single concise experience cue may use at most 600 characters and 20% of
 # the common recall budget. The rest remains available to normal memories.
 SHARED_RECALL_CARD_MAX_CHARS = max(
@@ -517,6 +519,8 @@ async def lifespan(app: FastAPI):
                         "MEMORY_API_THINKING": str,
                         "MEMORY_ENABLED": lambda v: _parse_bool(v),
                         "MAX_MEMORIES_INJECT": int, "MEMORY_EXTRACT_INTERVAL": int,
+                        "MEMORY_RERANK_ENABLED": lambda v: _parse_bool(v),
+                        "MEMORY_RERANK_MODEL": str,
                         "MEMORY_PINNED_ENABLED": lambda v: _parse_bool(v),
                         "EXPERIENCE_RECALL_ENABLED": lambda v: _parse_bool(v),
                         "EXPERIENCE_RECALL_EVERY_ROUNDS": lambda v: max(1, min(int(v), 100)),
@@ -740,6 +744,24 @@ def _memory_query_with_aliases(query: str) -> str:
     return expand_query_terms(query, MEMORY_QUERY_ALIASES_JSON)
 
 
+async def _rerank_memory_candidates(user_message: str, records):
+    """Optional paid rerank, with strict fallback on errors or unavailable model."""
+    if not MEMORY_RERANK_ENABLED or not MEMORY_RERANK_MODEL:
+        return records
+    from recall_rerank import rerank
+    try:
+        candidates = [dict(record) for record in records[:20]]
+        if not candidates:
+            return records
+        ranked = await rerank(MEMORY_RERANK_MODEL, user_message[:500], candidates, "memory")
+        if ranked is None:
+            return records  # Provider unavailable: never lose existing retrieval.
+        return ranked  # Valid no-match is intentionally an empty selection.
+    except Exception as exc:
+        print(f"[memory-rerank] fallback {type(exc).__name__}", flush=True)
+        return records
+
+
 async def _read_pinned_memory_text(max_chars: int | None) -> str:
     """Pinned memory is optional, bounded, and only ever reads active user pins."""
     if not MEMORY_PINNED_ENABLED:
@@ -776,6 +798,8 @@ async def build_system_prompt_with_memories(user_message: str, max_chars: int | 
         pinned = await _read_pinned_memory_text(max_chars)
         remaining = max(0, max_chars - len(pinned) - (2 if pinned else 0)) if max_chars is not None else None
         memories = await search_memories(_memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT)
+        if memories:
+            memories = await _rerank_memory_candidates(user_message, memories)
         if not memories:
             return pinned
 
@@ -2167,6 +2191,8 @@ async def build_memory_text(user_message: str, max_chars: int | None = None) -> 
         pinned = await _read_pinned_memory_text(max_chars)
         remaining = max(0, max_chars - len(pinned) - (2 if pinned else 0)) if max_chars is not None else None
         memories = await search_memories(_memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT)
+        if memories:
+            memories = await _rerank_memory_candidates(user_message, memories)
         if not memories:
             return pinned
         
@@ -7694,6 +7720,8 @@ async def get_settings():
             "MAX_MEMORIES_INJECT":     int(db.get("MAX_MEMORIES_INJECT") or MAX_MEMORIES_INJECT),
             "MIN_SCORE_THRESHOLD":     float(db.get("MIN_SCORE_THRESHOLD") or _db_module.MIN_SCORE_THRESHOLD),
             "MEMORY_EXTRACT_INTERVAL": int(db.get("MEMORY_EXTRACT_INTERVAL") or MEMORY_EXTRACT_INTERVAL),
+            "MEMORY_RERANK_ENABLED": _parse_bool(db.get("MEMORY_RERANK_ENABLED"), MEMORY_RERANK_ENABLED),
+            "MEMORY_RERANK_MODEL": db.get("MEMORY_RERANK_MODEL") or MEMORY_RERANK_MODEL,
             "MEMORY_PINNED_ENABLED": _parse_bool(db.get("MEMORY_PINNED_ENABLED"), MEMORY_PINNED_ENABLED),
             "EXPERIENCE_RECALL_ENABLED": _parse_bool(db.get("EXPERIENCE_RECALL_ENABLED"), EXPERIENCE_RECALL_ENABLED),
             "EXPERIENCE_RECALL_EVERY_ROUNDS": int(db.get("EXPERIENCE_RECALL_EVERY_ROUNDS") or EXPERIENCE_RECALL_EVERY_ROUNDS),
@@ -7760,7 +7788,9 @@ async def save_settings(request: Request):
             "MEMORY_ENABLED":        lambda v: _parse_bool(v),
             "MAX_MEMORIES_INJECT":   int,
             "MEMORY_EXTRACT_INTERVAL": int,
-            "MEMORY_PINNED_ENABLED": lambda v: _parse_bool(v),
+            "MEMORY_RERANK_ENABLED": lambda v: _parse_bool(v),
+                        "MEMORY_RERANK_MODEL": str,
+                        "MEMORY_PINNED_ENABLED": lambda v: _parse_bool(v),
                         "EXPERIENCE_RECALL_ENABLED": lambda v: _parse_bool(v),
             "EXPERIENCE_RECALL_EVERY_ROUNDS": lambda v: max(1, min(int(v), 100)),
             "EXPERIENCE_RECALL_MAX_CARDS": lambda v: 1,
