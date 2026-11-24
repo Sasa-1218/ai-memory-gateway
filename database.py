@@ -222,6 +222,24 @@ async def init_tables():
             );
         """)
 
+        # Conversation recycle bin captures messages and summary cursor
+        # before deleting. Nothing is purged automatically.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_recycle_bin (
+                id BIGSERIAL PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                messages JSONB NOT NULL,
+                cache_state JSONB,
+                deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                restored_at TIMESTAMPTZ
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_conversation_recycle_bin_active
+            ON conversation_recycle_bin (deleted_at DESC)
+            WHERE restored_at IS NULL
+        """)
+
         # Opt-in pinned memories: additive, idempotent, existing rows stay unpinned.
         await conn.execute("""
             ALTER TABLE memories ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE
@@ -3705,17 +3723,121 @@ async def get_conversations_paginated(page: int = 1, per_page: int = 20):
 
 
 async def delete_conversation(session_id: str):
+    """Snapshot and delete a session atomically; no irreversible chat deletion."""
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("invalid_session_id")
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM conversations WHERE session_id = $1", session_id)
-        await conn.execute("DELETE FROM session_cache_state WHERE session_id = $1", session_id)
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", "recycle:" + session_id)
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM conversations WHERE session_id = $1", session_id)
+            if not count:
+                return None
+            recycle_id = await conn.fetchval("""
+                INSERT INTO conversation_recycle_bin (session_id, messages, cache_state)
+                SELECT $1, COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.id), '[]'::jsonb),
+                    (SELECT to_jsonb(s) FROM session_cache_state s WHERE s.session_id=$1)
+                FROM conversations c WHERE c.session_id=$1
+                RETURNING id
+            """, session_id)
+            await conn.execute("DELETE FROM conversations WHERE session_id=$1", session_id)
+            await conn.execute("DELETE FROM session_cache_state WHERE session_id=$1", session_id)
+            return int(recycle_id)
 
 
 async def batch_delete_conversations(session_ids: list):
+    """Safely recycle each independent session; report successful snapshots."""
+    if not isinstance(session_ids, list):
+        raise ValueError("invalid_session_ids")
+    ids = list(dict.fromkeys(
+        item.strip() for item in session_ids
+        if isinstance(item, str) and item.strip()
+    ))
+    if len(ids) > 100:
+        raise ValueError("too_many_sessions")
+    archived = []
+    for session_id in ids:
+        recycle_id = await delete_conversation(session_id)
+        if recycle_id is not None:
+            archived.append({"session_id": session_id, "recycle_id": recycle_id})
+    return archived
+
+
+async def list_recycled_conversations(limit: int = 50):
+    limit = max(1, min(int(limit), 100))
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM conversations WHERE session_id = ANY($1)", session_ids)
-        await conn.execute("DELETE FROM session_cache_state WHERE session_id = ANY($1)", session_ids)
+        rows = await conn.fetch("""
+            SELECT id, session_id, deleted_at,
+                   jsonb_array_length(messages) AS message_count
+            FROM conversation_recycle_bin
+            WHERE restored_at IS NULL
+            ORDER BY deleted_at DESC, id DESC LIMIT $1
+        """, limit)
+        return [dict(row) for row in rows]
+
+
+async def restore_recycled_conversation(recycle_id: int):
+    """Restore exact message IDs and cache checkpoint, fail on live-session conflicts."""
+    if type(recycle_id) is not int or recycle_id <= 0:
+        raise ValueError("invalid_recycle_id")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow("""
+                SELECT id, session_id, messages::text AS messages,
+                       cache_state::text AS cache_state
+                FROM conversation_recycle_bin
+                WHERE id=$1 AND restored_at IS NULL FOR UPDATE
+            """, recycle_id)
+            if row is None:
+                return None
+            session_id = row["session_id"]
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", "recycle:" + session_id)
+            existing = await conn.fetchval(
+                "SELECT COUNT(*) FROM conversations WHERE session_id=$1", session_id)
+            cached = await conn.fetchval(
+                "SELECT COUNT(*) FROM session_cache_state WHERE session_id=$1", session_id)
+            if existing or cached:
+                raise ValueError("session_id_already_in_use")
+            # Explicit columns avoid executing content as SQL and preserve
+            # multimodal metadata, timestamps, original IDs and assistant tools.
+            await conn.execute("""
+                INSERT INTO conversations (id, session_id, role, content, model, created_at, metadata)
+                SELECT (x->>'id')::integer, x->>'session_id', x->>'role',
+                       x->>'content', x->>'model',
+                       (x->>'created_at')::timestamptz, x->>'metadata'
+                FROM jsonb_array_elements($1::jsonb) AS x
+            """, row["messages"])
+            if row["cache_state"]:
+                await conn.execute("""
+                    INSERT INTO session_cache_state
+                       (session_id, summary, a_start_round, updated_at, summary_checkpoint_user_id)
+                    SELECT c->>'session_id', c->>'summary',
+                           (c->>'a_start_round')::integer,
+                           (c->>'updated_at')::timestamptz,
+                           (c->>'summary_checkpoint_user_id')::bigint
+                    FROM (SELECT $1::jsonb AS c) s
+                """, row["cache_state"])
+            await conn.execute("""
+                UPDATE conversation_recycle_bin SET restored_at=NOW()
+                WHERE id=$1 AND restored_at IS NULL
+            """, recycle_id)
+            return {"session_id": session_id, "recycle_id": recycle_id}
+
+
+async def purge_recycled_conversation(recycle_id: int):
+    """Permanent deletion is a separate explicit operation."""
+    if type(recycle_id) is not int or recycle_id <= 0:
+        raise ValueError("invalid_recycle_id")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            DELETE FROM conversation_recycle_bin
+            WHERE id=$1 AND restored_at IS NULL RETURNING id
+        """, recycle_id)
+        return row is not None
 
 
 async def merge_sessions_to_target(source_ids: list, target_id: str) -> dict:
