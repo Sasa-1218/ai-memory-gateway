@@ -793,13 +793,15 @@ async def build_system_prompt_with_memories(user_message: str, max_chars: int | 
     """构建记忆数据块（不含人设，由调用方追加到人设末尾）"""
     if not MEMORY_ENABLED or not MEMORY_EXTRACT_ENABLED:
         return ""
-    if MAX_MEMORIES_INJECT <= 0:
+    if MAX_MEMORIES_INJECT <= 0 and not MEMORY_PINNED_ENABLED:
         return ""
 
     try:
         pinned = await _read_pinned_memory_text(max_chars)
         remaining = max(0, max_chars - len(pinned) - (2 if pinned else 0)) if max_chars is not None else None
-        memories = await search_memories(_memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT)
+        memories = await search_memories(
+            _memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT,
+        ) if MAX_MEMORIES_INJECT > 0 else []
         if memories:
             memories = await _rerank_memory_candidates(user_message, memories)
         if not memories:
@@ -2187,12 +2189,14 @@ async def build_experience_recall(user_message: str, session_id: str) -> str:
 
 async def build_memory_text(user_message: str, max_chars: int | None = None) -> str:
     """搜索记忆并格式化为注入文本（分区缓存模式用）"""
-    if MAX_MEMORIES_INJECT <= 0:
+    if MAX_MEMORIES_INJECT <= 0 and not MEMORY_PINNED_ENABLED:
         return ""
     try:
         pinned = await _read_pinned_memory_text(max_chars)
         remaining = max(0, max_chars - len(pinned) - (2 if pinned else 0)) if max_chars is not None else None
-        memories = await search_memories(_memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT)
+        memories = await search_memories(
+            _memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT,
+        ) if MAX_MEMORIES_INJECT > 0 else []
         if memories:
             memories = await _rerank_memory_candidates(user_message, memories)
         if not memories:
