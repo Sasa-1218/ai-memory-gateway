@@ -6517,6 +6517,30 @@ async def api_reprocess_experience_card(card_id: int, operation: str, request: R
     return await _run_experience_generation(operation, job_id, card["source_session_id"], messages, card)
 
 
+@app.put("/api/memories/{memory_id}/sources")
+async def api_attach_memory_source_ids(memory_id: int, request: Request):
+    """Explicitly attach only same-session, existing original message IDs."""
+    if not MEMORY_ENABLED:
+        raise HTTPException(status_code=400, detail="memory_disabled")
+    body = await request.json()
+    try:
+        result = await _db_module.attach_verified_memory_sources(
+            memory_id, body.get("session_id"), body.get("message_ids"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", **result}
+
+
+@app.get("/api/memories/{memory_id}/sources")
+async def api_read_verified_memory_sources(memory_id: int):
+    if not MEMORY_ENABLED:
+        raise HTTPException(status_code=400, detail="memory_disabled")
+    result = await _db_module.get_verified_memory_sources_readonly(memory_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="memory_not_found")
+    return result
+
+
 @app.put("/api/memories/{memory_id}/pin")
 async def api_pin_memory(memory_id: int, request: Request):
     """User-controlled pin; an inactive memory cannot be pinned."""
