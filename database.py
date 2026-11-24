@@ -240,6 +240,12 @@ async def init_tables():
             WHERE restored_at IS NULL
         """)
 
+        # Nullable verified provenance: legacy rows stay unknown, not empty.
+        # Never infer historical source IDs by matching text or timestamps.
+        await conn.execute("""
+            ALTER TABLE memories ADD COLUMN IF NOT EXISTS source_message_ids BIGINT[]
+        """)
+
         # Opt-in pinned memories: additive, idempotent, existing rows stay unpinned.
         await conn.execute("""
             ALTER TABLE memories ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE
@@ -1838,6 +1844,48 @@ async def update_message_content(message_id: int, new_content: str):
 # 记忆操作
 # ============================================================
 
+async def attach_verified_memory_sources(memory_id: int, source_session: str,
+                                         source_ids: list[int]):
+    """Explicit source association; DB verifies every message belongs to session."""
+    if (type(memory_id) is not int or memory_id <= 0 or
+            not isinstance(source_session, str) or not source_session.strip() or
+            not isinstance(source_ids, list) or not 1 <= len(source_ids) <= 40 or
+            any(type(i) is not int or i <= 0 for i in source_ids)):
+        raise ValueError("invalid_source_reference")
+    ids = sorted(set(source_ids))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            source_count = await conn.fetchval("""
+                SELECT COUNT(*) FROM conversations
+                WHERE session_id=$1 AND id=ANY($2::bigint[])
+            """, source_session, ids)
+            if source_count != len(ids):
+                raise ValueError("source_messages_do_not_match_session")
+            row = await conn.fetchrow("""
+                UPDATE memories SET source_message_ids=$3::bigint[]
+                WHERE id=$1 AND source_session=$2
+                RETURNING id,source_session,source_message_ids
+            """, memory_id, source_session, ids)
+            if row is None:
+                raise ValueError("memory_session_mismatch")
+            return dict(row)
+
+
+async def get_memory_source_info(ids: list[int]):
+    """Only verified non-null source IDs; used for conservative deduplication."""
+    checked = sorted(set(i for i in ids if type(i) is int and i > 0))[:100]
+    if not checked:
+        return {}
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id,source_session,source_message_ids FROM memories
+            WHERE id=ANY($1::int[])
+        """, checked)
+        return {row["id"]: dict(row) for row in rows}
+
+
 async def get_pinned_memories(limit: int = 4):
     """Return bounded, active, explicitly user-pinned memories."""
     limit = max(0, min(int(limit), 10))
@@ -2282,7 +2330,7 @@ async def get_recent_memories_detail(limit: int = 12):
         rows = await conn.fetch(
             """
             SELECT id, content, importance, source_session, created_at,
-                   layer, title, is_active, merged_from, event_date, is_pinned
+                   layer, title, is_active, merged_from, event_date, is_pinned, source_message_ids
             FROM memories
             ORDER BY created_at DESC, id DESC
             LIMIT $1
@@ -2305,7 +2353,7 @@ async def get_all_memories():
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT id, content, importance, source_session, created_at, last_accessed,
-                   layer, title, is_active, merged_from, event_date
+                   layer, title, is_active, merged_from, event_date, source_message_ids
             FROM memories
             ORDER BY id
         """)
