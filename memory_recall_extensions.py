@@ -43,7 +43,7 @@ def expand_query_terms(query, raw_dictionary, *, max_terms=4, max_length=500):
     return query + (" " + " ".join(matches) if matches else "")
 
 
-def pinned_lines(rows, *, max_items=4, max_chars=900):
+def pinned_lines(rows, *, max_items=4, max_chars=900, return_ids=False):
     """Strictly cap stable context. Return whole facts only."""
     if type(max_items) is not int or not 0 <= max_items <= 10:
         raise ValueError("bad max_items")
@@ -52,6 +52,7 @@ def pinned_lines(rows, *, max_items=4, max_chars=900):
     opening = "<固定记忆（已人工标记）>"
     closing = "</固定记忆（已人工标记）>"
     chosen = []
+    selected_ids = []
     used = len(opening) + len(closing) + 2
     for row in rows:
         if len(chosen) >= max_items:
@@ -66,5 +67,7 @@ def pinned_lines(rows, *, max_items=4, max_chars=900):
         if used + extra > max_chars:
             continue
         chosen.append(line)
+        selected_ids.append(row.get("id"))
         used += extra
-    return opening + "\n" + "\n".join(chosen) + "\n" + closing if chosen else ""
+    text = opening + "\n" + "\n".join(chosen) + "\n" + closing if chosen else ""
+    return (text, selected_ids) if return_ids else text
