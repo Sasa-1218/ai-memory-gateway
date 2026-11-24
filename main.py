@@ -522,6 +522,7 @@ async def lifespan(app: FastAPI):
                         "MEMORY_ENABLED": lambda v: _parse_bool(v),
                         "MAX_MEMORIES_INJECT": int, "MEMORY_EXTRACT_INTERVAL": int,
                         "MEMORY_RERANK_ENABLED": lambda v: _parse_bool(v),
+                        "MEMORY_QUERY_ALIASES_JSON": str,
                         "MEMORY_RERANK_MODEL": str,
                         "MEMORY_PINNED_ENABLED": lambda v: _parse_bool(v),
                         "EXPERIENCE_RECALL_ENABLED": lambda v: _parse_bool(v),
@@ -7787,6 +7788,7 @@ async def get_settings():
             "MIN_SCORE_THRESHOLD":     float(db.get("MIN_SCORE_THRESHOLD") or _db_module.MIN_SCORE_THRESHOLD),
             "MEMORY_EXTRACT_INTERVAL": int(db.get("MEMORY_EXTRACT_INTERVAL") or MEMORY_EXTRACT_INTERVAL),
             "MEMORY_RERANK_ENABLED": _parse_bool(db.get("MEMORY_RERANK_ENABLED"), MEMORY_RERANK_ENABLED),
+            "MEMORY_QUERY_ALIASES_JSON": db.get("MEMORY_QUERY_ALIASES_JSON") or MEMORY_QUERY_ALIASES_JSON,
             "MEMORY_RERANK_MODEL": db.get("MEMORY_RERANK_MODEL") or MEMORY_RERANK_MODEL,
             "MEMORY_PINNED_ENABLED": _parse_bool(db.get("MEMORY_PINNED_ENABLED"), MEMORY_PINNED_ENABLED),
             "EXPERIENCE_RECALL_ENABLED": _parse_bool(db.get("EXPERIENCE_RECALL_ENABLED"), EXPERIENCE_RECALL_ENABLED),
@@ -7855,6 +7857,7 @@ async def save_settings(request: Request):
             "MAX_MEMORIES_INJECT":   int,
             "MEMORY_EXTRACT_INTERVAL": int,
             "MEMORY_RERANK_ENABLED": lambda v: _parse_bool(v),
+                        "MEMORY_QUERY_ALIASES_JSON": str,
                         "MEMORY_RERANK_MODEL": str,
                         "MEMORY_PINNED_ENABLED": lambda v: _parse_bool(v),
                         "EXPERIENCE_RECALL_ENABLED": lambda v: _parse_bool(v),
@@ -7923,6 +7926,21 @@ async def save_settings(request: Request):
                 continue
 
             # --- 常规字段 ---
+            if key == "MEMORY_QUERY_ALIASES_JSON":
+                raw = str(value).strip()
+                if len(raw) > 8000:
+                    raise HTTPException(status_code=400, detail="alias_dictionary_too_large")
+                try:
+                    dictionary = json.loads(raw) if raw else {}
+                    if not isinstance(dictionary, dict) or len(dictionary) > 80:
+                        raise ValueError("aliases_must_be_object_with_max_80_keys")
+                    if any(not isinstance(k, str) or not isinstance(v, list) or
+                           len(v) > 8 or any(not isinstance(item, str) for item in v)
+                           for k, v in dictionary.items()):
+                        raise ValueError("invalid_alias_dictionary_values")
+                except (ValueError, TypeError) as exc:
+                    raise HTTPException(status_code=400, detail=f"invalid_alias_dictionary: {exc}")
+                value = raw
             if key == "EXPERIENCE_RECALL_MAX_CARDS":
                 value = 1  # Normalize legacy dashboard values before persisting.
             await set_gateway_config(key, str(value))
