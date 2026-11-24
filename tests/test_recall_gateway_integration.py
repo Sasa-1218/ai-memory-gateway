@@ -71,6 +71,23 @@ class GatewayRecallIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("记住我的小细节", result)
         self.assertIn("<固定记忆", result)
 
+    async def test_pinned_memory_not_repeated_as_normal_memory(self):
+        rows = [{"id": 7, "content": "独有细节", "importance": 10,
+                 "is_active": True, "is_pinned": True}]
+        search = [{"id": 7, "content": "独有细节"},
+                  {"id": 8, "content": "另一条"}]
+        with (patch.object(main, "MEMORY_PINNED_ENABLED", True),
+              patch.object(main, "MAX_MEMORIES_INJECT", 15),
+              patch.object(main, "MEMORY_ENABLED", True),
+              patch.object(main, "MEMORY_EXTRACT_ENABLED", True),
+              patch.object(main, "MEMORY_RERANK_ENABLED", False),
+              patch.object(main, "MEMORY_DEDUP_ENABLED", False),
+              patch("database.get_pinned_memories", new=AsyncMock(return_value=rows)),
+              patch.object(main, "search_memories", new=AsyncMock(return_value=search))):
+            result = await main.build_memory_text("独有细节", max_chars=6000)
+        self.assertEqual(result.count("独有细节"), 1)
+        self.assertIn("另一条", result)
+
     async def test_rerank_success_or_provider_failure(self):
         original = [{"id": 1, "content": "A"}, {"id": 2, "content": "B"}]
         with (patch.object(main, "MEMORY_RERANK_ENABLED", True),
