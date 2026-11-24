@@ -58,6 +58,41 @@ class GatewayRecallIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retrieve.await_args.args[3], 1)
         self.assertEqual(retrieve.await_args.kwargs["max_chars"], 600)
 
+    async def test_pinned_memory_floats_when_normal_search_empty(self):
+        rows = [{"id": 7, "content": "记住我的小细节", "importance": 10,
+                 "is_active": True, "is_pinned": True}]
+        with (patch.object(main, "MEMORY_PINNED_ENABLED", True),
+              patch.object(main, "MAX_MEMORIES_INJECT", 15),
+              patch.object(main, "MEMORY_ENABLED", True),
+              patch.object(main, "MEMORY_EXTRACT_ENABLED", True),
+              patch("database.get_pinned_memories", new=AsyncMock(return_value=rows)),
+              patch.object(main, "search_memories", new=AsyncMock(return_value=[]))):
+            result = await main.build_memory_text("不相关内容", max_chars=6000)
+        self.assertIn("记住我的小细节", result)
+        self.assertIn("<固定记忆", result)
+
+    async def test_rerank_success_or_provider_failure(self):
+        original = [{"id": 1, "content": "A"}, {"id": 2, "content": "B"}]
+        with (patch.object(main, "MEMORY_RERANK_ENABLED", True),
+              patch.object(main, "MEMORY_RERANK_MODEL", "demo-model"),
+              patch("recall_rerank.rerank", new=AsyncMock(return_value=[original[1]])) as ranked):
+            filtered = await main._rerank_memory_candidates("B是什么", original)
+            self.assertEqual(filtered, [original[1]])
+            self.assertEqual(ranked.await_args.args[-1], "memory")
+        with (patch.object(main, "MEMORY_RERANK_ENABLED", True),
+              patch.object(main, "MEMORY_RERANK_MODEL", "demo-model"),
+              patch("recall_rerank.rerank", new=AsyncMock(return_value=None))):
+            filtered = await main._rerank_memory_candidates("B是什么", original)
+            self.assertEqual(filtered, original)
+
+    async def test_rerank_default_off_avoids_paid_call(self):
+        with (patch.object(main, "MEMORY_RERANK_ENABLED", False),
+              patch("recall_rerank.rerank", new=AsyncMock()) as ranked):
+            rows = [{"id": 1, "content": "A"}]
+            result = await main._rerank_memory_candidates("A", rows)
+            self.assertEqual(result, rows)
+            ranked.assert_not_awaited()
+
     async def test_recall_helper_does_not_fetch_when_off(self):
         with (patch.object(main, "SHARED_RECALL_BUDGET_ENABLED", False),
               patch.object(main, "EXPERIENCE_RECALL_ENABLED", False),
