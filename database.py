@@ -250,12 +250,6 @@ async def init_tables():
         await conn.execute("""
             ALTER TABLE memories ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE
         """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_memories_pinned_active
-            ON memories (importance DESC, id ASC)
-            WHERE is_pinned = TRUE AND is_active = TRUE
-        """)
-
         # 共同经历卡片草稿。Phase 1 仅用于 Dashboard 人工审核，聊天检索不读取此表。
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS shared_experience_cards (
@@ -767,6 +761,13 @@ async def init_tables():
             END $$;
         """)
         
+        # Only index pins after legacy is_active migration is complete.
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_pinned_active
+            ON memories (importance DESC, id ASC)
+            WHERE is_pinned = TRUE AND is_active = TRUE
+        """)
+
         # 三层记忆索引
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_memories_layer ON memories (layer);
