@@ -1872,6 +1872,32 @@ async def attach_verified_memory_sources(memory_id: int, source_session: str,
             return dict(row)
 
 
+async def get_verified_memory_sources_readonly(memory_id: int):
+    """Return source IDs only while all original messages remain verifiable."""
+    if type(memory_id) is not int or memory_id <= 0:
+        raise ValueError("invalid_memory_id")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT id, source_session, source_message_ids FROM memories WHERE id=$1
+        """, memory_id)
+        if row is None:
+            return None
+        session = row["source_session"] or ""
+        ids = row["source_message_ids"] or []
+        if not session or not ids:
+            return {"memory_id": memory_id, "complete": False, "source_message_ids": []}
+        found = await conn.fetch("""
+            SELECT id FROM conversations
+            WHERE session_id=$1 AND id=ANY($2::bigint[])
+        """, session, ids)
+        actual = {item["id"] for item in found}
+        if actual != set(ids):
+            return {"memory_id": memory_id, "complete": False, "source_message_ids": []}
+        return {"memory_id": memory_id, "complete": True,
+                "source_session": session, "source_message_ids": sorted(actual)}
+
+
 async def get_memory_source_info(ids: list[int]):
     """Only verified non-null source IDs; used for conservative deduplication."""
     checked = sorted(set(i for i in ids if type(i) is int and i > 0))[:100]
