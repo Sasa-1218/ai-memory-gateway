@@ -93,6 +93,31 @@ class GatewayRecallIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, rows)
             ranked.assert_not_awaited()
 
+    async def test_verified_source_dedup_keeps_earliest_rank(self):
+        records=[{"id":1,"content":"one important fact"},
+                 {"id":2,"content":"one important fact"}]
+        sources={1:{"source_session":"s","source_message_ids":[11]},
+                 2:{"source_session":"s","source_message_ids":[11]}}
+        with (patch.object(main,"MEMORY_DEDUP_ENABLED",True),
+              patch("database.get_memory_source_info",new=AsyncMock(return_value=sources))):
+            output=await main._deduplicate_verified_memory_candidates(records)
+        self.assertEqual([r["id"] for r in output],[1])
+
+    async def test_dedup_unknown_sessions_keeps_distinct_facts(self):
+        records=[{"id":1,"content":"the same text"},
+                 {"id":2,"content":"the same text"}]
+        with (patch.object(main,"MEMORY_DEDUP_ENABLED",True),
+              patch("database.get_memory_source_info",new=AsyncMock(return_value={}))):
+            output=await main._deduplicate_verified_memory_candidates(records)
+        self.assertEqual([r["id"] for r in output],[1,2])
+
+    async def test_dedup_off_has_no_source_db_read(self):
+        rows=[{"id":1,"content":"fact"}]
+        with (patch.object(main,"MEMORY_DEDUP_ENABLED",False),
+              patch("database.get_memory_source_info",new=AsyncMock()) as get):
+            self.assertEqual(await main._deduplicate_verified_memory_candidates(rows),rows)
+        get.assert_not_awaited()
+
     async def test_recall_helper_does_not_fetch_when_off(self):
         with (patch.object(main, "SHARED_RECALL_BUDGET_ENABLED", False),
               patch.object(main, "EXPERIENCE_RECALL_ENABLED", False),
