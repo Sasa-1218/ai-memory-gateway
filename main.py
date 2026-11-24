@@ -350,6 +350,7 @@ SHARED_RECALL_BUDGET_ENABLED = os.getenv("SHARED_RECALL_BUDGET_ENABLED", "false"
 SHARED_RECALL_MAX_CHARS = max(0, min(_env_int("SHARED_RECALL_MAX_CHARS", 6000), 30000))
 # Optional, literal alias dictionary for proper-noun search. Empty by default.
 MEMORY_QUERY_ALIASES_JSON = os.getenv("MEMORY_QUERY_ALIASES_JSON", "")
+MEMORY_PINNED_ENABLED = os.getenv("MEMORY_PINNED_ENABLED", "false").lower() == "true"
 # A single concise experience cue may use at most 600 characters and 20% of
 # the common recall budget. The rest remains available to normal memories.
 SHARED_RECALL_CARD_MAX_CHARS = max(
@@ -516,6 +517,7 @@ async def lifespan(app: FastAPI):
                         "MEMORY_API_THINKING": str,
                         "MEMORY_ENABLED": lambda v: _parse_bool(v),
                         "MAX_MEMORIES_INJECT": int, "MEMORY_EXTRACT_INTERVAL": int,
+                        "MEMORY_PINNED_ENABLED": lambda v: _parse_bool(v),
                         "EXPERIENCE_RECALL_ENABLED": lambda v: _parse_bool(v),
                         "EXPERIENCE_RECALL_EVERY_ROUNDS": lambda v: max(1, min(int(v), 100)),
                         "EXPERIENCE_RECALL_MAX_CARDS": lambda v: 1,
@@ -738,6 +740,31 @@ def _memory_query_with_aliases(query: str) -> str:
     return expand_query_terms(query, MEMORY_QUERY_ALIASES_JSON)
 
 
+async def _read_pinned_memory_text(max_chars: int | None) -> str:
+    """Pinned memory is optional, bounded, and only ever reads active user pins."""
+    if not MEMORY_PINNED_ENABLED:
+        return ""
+    from memory_recall_extensions import pinned_lines
+    try:
+        rows = await _db_module.get_pinned_memories(limit=4)
+        cap = min(900, max_chars) if max_chars is not None else 900
+        return pinned_lines(rows, max_chars=cap)
+    except Exception as exc:
+        print(f"[pinned-memory] skipped {type(exc).__name__}", flush=True)
+        return ""
+
+
+def _join_pinned_memory(pinned: str, normal: str, max_chars: int | None):
+    if not pinned:
+        return normal
+    if not normal:
+        return pinned
+    combined = pinned + "\n\n" + normal
+    if max_chars is not None and len(combined) > max_chars:
+        return pinned
+    return combined
+
+
 async def build_system_prompt_with_memories(user_message: str, max_chars: int | None = None) -> str:
     """构建记忆数据块（不含人设，由调用方追加到人设末尾）"""
     if not MEMORY_ENABLED or not MEMORY_EXTRACT_ENABLED:
@@ -746,9 +773,11 @@ async def build_system_prompt_with_memories(user_message: str, max_chars: int | 
         return ""
 
     try:
+        pinned = await _read_pinned_memory_text(max_chars)
+        remaining = max(0, max_chars - len(pinned) - (2 if pinned else 0)) if max_chars is not None else None
         memories = await search_memories(_memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT)
         if not memories:
-            return ""
+            return pinned
 
         memory_lines = []
         for mem in memories:
@@ -764,11 +793,11 @@ async def build_system_prompt_with_memories(user_message: str, max_chars: int | 
             memory_lines.append(f"- {date_str}{mem['content']}")
         if max_chars is not None:
             from recall_budget import fit_memory_entries
-            return fit_memory_entries(memory_lines, max_chars)
+            return _join_pinned_memory(pinned, fit_memory_entries(memory_lines, remaining), max_chars)
         memory_text = "\n".join(memory_lines)
 
         print(f"📚 注入了 {len(memories)} 条相关记忆")
-        return f"<脑海中浮现的既往事实>\n{memory_text}\n</脑海中浮现的既往事实>"
+        return _join_pinned_memory(pinned, f"<脑海中浮现的既往事实>\n{memory_text}\n</脑海中浮现的既往事实>", max_chars)
 
     except Exception as e:
         print(f"⚠️  记忆检索失败: {e}")
@@ -2135,9 +2164,11 @@ async def build_memory_text(user_message: str, max_chars: int | None = None) -> 
     if MAX_MEMORIES_INJECT <= 0:
         return ""
     try:
+        pinned = await _read_pinned_memory_text(max_chars)
+        remaining = max(0, max_chars - len(pinned) - (2 if pinned else 0)) if max_chars is not None else None
         memories = await search_memories(_memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT)
         if not memories:
-            return ""
+            return pinned
         
         memory_lines = []
         for mem in memories:
@@ -2153,10 +2184,11 @@ async def build_memory_text(user_message: str, max_chars: int | None = None) -> 
             memory_lines.append(f"- {date_str}{mem['content']}")
         if max_chars is not None:
             from recall_budget import fit_memory_entries
-            return fit_memory_entries(memory_lines, max_chars)
+            return _join_pinned_memory(pinned, fit_memory_entries(memory_lines, remaining), max_chars)
 
         print(f"📚 注入了 {len(memories)} 条相关记忆")
-        return "<脑海中浮现的既往事实>\n" + "\n".join(memory_lines) + "\n</脑海中浮现的既往事实>"
+        normal = "<脑海中浮现的既往事实>\n" + "\n".join(memory_lines) + "\n</脑海中浮现的既往事实>"
+        return _join_pinned_memory(pinned, normal, max_chars)
     except Exception as e:
         print(f"⚠️ 记忆检索失败: {e}")
         return ""
@@ -6452,6 +6484,20 @@ async def api_reprocess_experience_card(card_id: int, operation: str, request: R
     return await _run_experience_generation(operation, job_id, card["source_session_id"], messages, card)
 
 
+@app.put("/api/memories/{memory_id}/pin")
+async def api_pin_memory(memory_id: int, request: Request):
+    """User-controlled pin; an inactive memory cannot be pinned."""
+    if not MEMORY_ENABLED:
+        raise HTTPException(status_code=400, detail="memory_disabled")
+    body = await request.json()
+    if type(body.get("pinned")) is not bool:
+        raise HTTPException(status_code=400, detail="invalid_pinned_flag")
+    item = await _db_module.set_memory_pinned(memory_id, body["pinned"])
+    if item is None:
+        raise HTTPException(status_code=404, detail="active_memory_not_found")
+    return {"status": "ok", **item}
+
+
 @app.put("/api/memories/{memory_id}")
 async def api_update_memory(memory_id: int, request: Request):
     """更新单条记忆（支持 content / importance / title / layer）"""
@@ -7648,6 +7694,7 @@ async def get_settings():
             "MAX_MEMORIES_INJECT":     int(db.get("MAX_MEMORIES_INJECT") or MAX_MEMORIES_INJECT),
             "MIN_SCORE_THRESHOLD":     float(db.get("MIN_SCORE_THRESHOLD") or _db_module.MIN_SCORE_THRESHOLD),
             "MEMORY_EXTRACT_INTERVAL": int(db.get("MEMORY_EXTRACT_INTERVAL") or MEMORY_EXTRACT_INTERVAL),
+            "MEMORY_PINNED_ENABLED": _parse_bool(db.get("MEMORY_PINNED_ENABLED"), MEMORY_PINNED_ENABLED),
             "EXPERIENCE_RECALL_ENABLED": _parse_bool(db.get("EXPERIENCE_RECALL_ENABLED"), EXPERIENCE_RECALL_ENABLED),
             "EXPERIENCE_RECALL_EVERY_ROUNDS": int(db.get("EXPERIENCE_RECALL_EVERY_ROUNDS") or EXPERIENCE_RECALL_EVERY_ROUNDS),
             "EXPERIENCE_RECALL_MAX_CARDS": 1,
@@ -7713,7 +7760,8 @@ async def save_settings(request: Request):
             "MEMORY_ENABLED":        lambda v: _parse_bool(v),
             "MAX_MEMORIES_INJECT":   int,
             "MEMORY_EXTRACT_INTERVAL": int,
-            "EXPERIENCE_RECALL_ENABLED": lambda v: _parse_bool(v),
+            "MEMORY_PINNED_ENABLED": lambda v: _parse_bool(v),
+                        "EXPERIENCE_RECALL_ENABLED": lambda v: _parse_bool(v),
             "EXPERIENCE_RECALL_EVERY_ROUNDS": lambda v: max(1, min(int(v), 100)),
             "EXPERIENCE_RECALL_MAX_CARDS": lambda v: 1,
             "CACHE_PARTITION_ENABLED": lambda v: _parse_bool(v),
