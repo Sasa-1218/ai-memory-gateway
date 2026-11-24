@@ -347,7 +347,7 @@ async def init_tables():
             DO $$ BEGIN
                 IF NOT EXISTS (
                     SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'conversations' AND column_name = 'metadata'
+                    WHERE table_schema = current_schema() AND table_name = 'conversations' AND column_name = 'metadata'
                 ) THEN
                     ALTER TABLE conversations ADD COLUMN metadata TEXT;
                 END IF;
@@ -706,7 +706,7 @@ async def init_tables():
             DO $$ BEGIN
                 IF NOT EXISTS (
                     SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'memories' AND column_name = 'layer'
+                    WHERE table_schema = current_schema() AND table_name = 'memories' AND column_name = 'layer'
                 ) THEN
                     ALTER TABLE memories ADD COLUMN layer INTEGER DEFAULT 1;
                 END IF;
@@ -718,7 +718,7 @@ async def init_tables():
             DO $$ BEGIN
                 IF NOT EXISTS (
                     SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'memories' AND column_name = 'title'
+                    WHERE table_schema = current_schema() AND table_name = 'memories' AND column_name = 'title'
                 ) THEN
                     ALTER TABLE memories ADD COLUMN title TEXT DEFAULT NULL;
                 END IF;
@@ -730,7 +730,7 @@ async def init_tables():
             DO $$ BEGIN
                 IF NOT EXISTS (
                     SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'memories' AND column_name = 'is_active'
+                    WHERE table_schema = current_schema() AND table_name = 'memories' AND column_name = 'is_active'
                 ) THEN
                     ALTER TABLE memories ADD COLUMN is_active BOOLEAN DEFAULT TRUE;
                 END IF;
@@ -742,7 +742,7 @@ async def init_tables():
             DO $$ BEGIN
                 IF NOT EXISTS (
                     SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'memories' AND column_name = 'merged_from'
+                    WHERE table_schema = current_schema() AND table_name = 'memories' AND column_name = 'merged_from'
                 ) THEN
                     ALTER TABLE memories ADD COLUMN merged_from INTEGER[] DEFAULT NULL;
                 END IF;
@@ -754,7 +754,7 @@ async def init_tables():
             DO $$ BEGIN
                 IF NOT EXISTS (
                     SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'memories' AND column_name = 'event_date'
+                    WHERE table_schema = current_schema() AND table_name = 'memories' AND column_name = 'event_date'
                 ) THEN
                     ALTER TABLE memories ADD COLUMN event_date DATE DEFAULT NULL;
                 END IF;
@@ -790,7 +790,7 @@ async def init_tables():
                 DO $$ BEGIN
                     IF NOT EXISTS (
                         SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'conversations' AND column_name = 'embedding'
+                        WHERE table_schema = current_schema() AND table_name = 'conversations' AND column_name = 'embedding'
                     ) THEN
                         ALTER TABLE conversations ADD COLUMN embedding vector({EMBEDDING_DIM});
                     END IF;
@@ -802,7 +802,7 @@ async def init_tables():
                 DO $$ BEGIN
                     IF NOT EXISTS (
                         SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'memories' AND column_name = 'embedding'
+                        WHERE table_schema = current_schema() AND table_name = 'memories' AND column_name = 'embedding'
                     ) THEN
                         ALTER TABLE memories ADD COLUMN embedding vector({EMBEDDING_DIM});
                     END IF;
@@ -825,7 +825,7 @@ async def init_tables():
                 DO $$ BEGIN
                     IF NOT EXISTS (
                         SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'conversations' AND column_name = 'embedding_json'
+                        WHERE table_schema = current_schema() AND table_name = 'conversations' AND column_name = 'embedding_json'
                     ) THEN
                         ALTER TABLE conversations ADD COLUMN embedding_json TEXT;
                     END IF;
@@ -835,7 +835,7 @@ async def init_tables():
                 DO $$ BEGIN
                     IF NOT EXISTS (
                         SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'memories' AND column_name = 'embedding_json'
+                        WHERE table_schema = current_schema() AND table_name = 'memories' AND column_name = 'embedding_json'
                     ) THEN
                         ALTER TABLE memories ADD COLUMN embedding_json TEXT;
                     END IF;
