@@ -7184,8 +7184,8 @@ async def api_delete_conversation(session_id: str):
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
     try:
-        await delete_conversation(session_id)
-        return {"status": "ok"}
+        recycle_id = await delete_conversation(session_id)
+        return {"status": "ok", "recycle_id": recycle_id}
     except Exception as e:
         return {"error": str(e)}
 
@@ -7197,11 +7197,42 @@ async def api_batch_delete(request: Request):
     try:
         body = await request.json()
         ids = body.get("session_ids", [])
-        if ids:
-            await batch_delete_conversations(ids)
-        return {"status": "ok", "deleted": len(ids)}
+        archived = await batch_delete_conversations(ids) if ids else []
+        return {"status": "ok", "deleted": len(archived), "recycled": archived}
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/api/conversations/recycle-bin")
+async def api_list_conversation_recycle_bin(limit: int = 50):
+    if not MEMORY_ENABLED:
+        raise HTTPException(status_code=400, detail="memory_disabled")
+    return {"items": await _db_module.list_recycled_conversations(limit)}
+
+
+@app.post("/api/conversations/recycle-bin/{recycle_id}/restore")
+async def api_restore_conversation_recycle_bin(recycle_id: int):
+    if not MEMORY_ENABLED:
+        raise HTTPException(status_code=400, detail="memory_disabled")
+    try:
+        restored = await _db_module.restore_recycled_conversation(recycle_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not restored:
+        raise HTTPException(status_code=404, detail="recycled_conversation_missing")
+    return {"status": "ok", **restored}
+
+
+@app.delete("/api/conversations/recycle-bin/{recycle_id}")
+async def api_purge_conversation_recycle_bin(recycle_id: int, confirm: bool = False):
+    if not MEMORY_ENABLED:
+        raise HTTPException(status_code=400, detail="memory_disabled")
+    if not confirm:
+        raise HTTPException(status_code=400, detail="permanent_delete_requires_confirmation")
+    deleted = await _db_module.purge_recycled_conversation(recycle_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="recycled_conversation_missing")
+    return {"status": "ok", "permanently_deleted": recycle_id}
 
 
 @app.post("/api/admin/merge-sessions")
