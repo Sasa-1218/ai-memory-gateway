@@ -17,7 +17,7 @@ class RecallBudgetWiringTests(unittest.TestCase):
 
     def test_source_records_are_packed_before_formatting(self):
         source = (ROOT / "main.py").read_text(encoding="utf-8")
-        self.assertEqual(source.count("return fit_memory_entries(memory_lines, max_chars)"), 2)
+        self.assertEqual(source.count("fit_memory_entries(memory_lines, remaining)"), 2)
         self.assertIn("async def build_system_prompt_with_memories(user_message: str, max_chars:", source)
         self.assertIn("async def build_memory_text(user_message: str, max_chars:", source)
 
