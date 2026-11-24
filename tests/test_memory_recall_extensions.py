@@ -30,6 +30,14 @@ class RecallExtensions(unittest.TestCase):
         self.assertNotIn("A"*50,result)
     def test_pinned_inactive_is_ignored(self):
         self.assertEqual(pinned_lines([{"content":"hidden","is_active":False,"is_pinned":True}]),"")
+    def test_return_only_ids_of_pins_that_fitted(self):
+        rows=[{"id":1,"content":"X"*200,"is_active":True,"is_pinned":True},
+              {"id":2,"content":"short","is_active":True,"is_pinned":True}]
+        text, ids=pinned_lines(rows,max_chars=65,return_ids=True)
+        self.assertEqual(ids,[2])
+        self.assertIn("short",text)
+        self.assertNotIn("X"*200,text)
+
     def test_pinned_max_records(self):
         rows=[{"content":str(i),"is_active":True,"is_pinned":True} for i in range(10)]
         self.assertEqual(pinned_lines(rows,max_items=2).count("\n- "),2)
