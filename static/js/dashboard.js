@@ -2837,7 +2837,7 @@ async function deleteSingleMessage(msgId) {
 
 // 删除对话
 async function deleteConversation(sessionId) {
-    if (!confirm(`确定删除整个对话「${sessionId}」吗？\n\n这不是删除单条消息。当前对话删除没有回收站。`)) return;
+    if (!confirm(`确定删除整个对话「${sessionId}」吗？\n\n这不是删除单条消息。删除后进入回收站，可从对话记录页面恢复。`)) return;
     if (!confirm(`二次确认：真的要删除整个对话「${sessionId}」吗？\n\n如果只是想删除某一条消息，请取消后进入对话详情，使用单条消息旁边的“删除”。`)) return;
     
     try {
@@ -2856,6 +2856,55 @@ async function deleteConversation(sessionId) {
     } catch(e) {
         alert('请求失败: ' + e.message);
     }
+}
+
+async function loadConversationRecycleBin() {
+    const target = document.getElementById('conversationRecycleList');
+    if (!target) return;
+    target.textContent = '正在加载回收站…';
+    try {
+        const res = await fetch('/api/conversations/recycle-bin', {cache:'no-store'});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) { target.textContent = '回收站为空'; return; }
+        target.innerHTML = items.map(item => {
+            const id = Number(item.id);
+            const title = escHtml(String(item.session_id || ''));
+            const count = Number(item.message_count || 0);
+            const date = escHtml(String(item.deleted_at || ''));
+            return '<div class="card" style="margin:8px 0;padding:12px;">' +
+                '<b>' + title + '</b> · ' + count + ' 条消息 · ' + date +
+                '<div style="margin-top:8px;display:flex;gap:8px;">' +
+                '<button class="btn btn-primary btn-sm" onclick="restoreConversationFromRecycle(' + id + ')">恢复</button>' +
+                '<button class="btn btn-secondary btn-sm" onclick="purgeConversationFromRecycle(' + id + ')">永久清除</button>' +
+                '</div></div>';
+        }).join('');
+    } catch(e) {
+        target.textContent = '加载回收站失败：' + e.message;
+    }
+}
+
+async function restoreConversationFromRecycle(id) {
+    if (!confirm('恢复整个对话及其摘要状态？若同名会话已经被重新使用，恢复会被拒绝。')) return;
+    try {
+        const res = await fetch('/api/conversations/recycle-bin/' + encodeURIComponent(id) + '/restore', {method:'POST'});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
+        await loadConversationRecycleBin();
+        loadConversationList(1);
+    } catch(e) { alert('恢复失败：' + e.message); }
+}
+
+async function purgeConversationFromRecycle(id) {
+    if (!confirm('这将永久删除回收站里的原始对话和摘要快照，无法通过回收站恢复。确定？')) return;
+    if (!confirm('再次确认：永久清除这份回收站备份？')) return;
+    try {
+        const res = await fetch('/api/conversations/recycle-bin/' + encodeURIComponent(id) + '?confirm=true', {method:'DELETE'});
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
+        await loadConversationRecycleBin();
+    } catch(e) { alert('永久清除失败：' + e.message); }
 }
 
 // 多选功能
