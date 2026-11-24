@@ -1037,6 +1037,19 @@
                     </div>
                 </div>
 
+                <div class="card settings-card">
+                    <h3 class="settings-group-title">记忆二次排序 · 可选付费</h3>
+                    <p class="section-desc">默认关闭。开启后对最多20条检索候选做第二次相关性筛选，可能产生额外 API 费用；供应商不可用时自动保留原搜索结果。需先配置支持的 Rerank 模型和密钥。</p>
+                    <div class="settings-field settings-toggle-row">
+                        <label for="set-MEMORY_RERANK_ENABLED">启用记忆二次排序</label>
+                        <label class="toggle"><input type="checkbox" id="set-MEMORY_RERANK_ENABLED"><span class="toggle-slider"></span></label>
+                    </div>
+                    <div class="settings-field">
+                        <label for="set-MEMORY_RERANK_MODEL">Rerank 模型 ID（非聊天模型）</label>
+                        <input id="set-MEMORY_RERANK_MODEL" type="text" class="input" placeholder="填写服务商支持的模型 ID">
+                    </div>
+                </div>
+
                 <!-- 共同经历召回：默认关闭，不影响经历卡生成和现有聊天 -->
                 <div class="card settings-card">
                     <h3 class="settings-group-title">共同经历 · 线索浮现（试用）</h3>
