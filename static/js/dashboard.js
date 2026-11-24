@@ -1492,6 +1492,17 @@ async function previewMemoryLineage(memoryId) {
         const result = await response.json();
         const ancestors = Array.isArray(result.source_memory_ids) ? result.source_memory_ids : [];
         const missing = Array.isArray(result.missing_memory_ids) ? result.missing_memory_ids : [];
+        let verifiedSource = '原始对话消息：目前没有可核实的直接来源；记忆编号不能当作消息编号。';
+        try {
+            const sourceResp = await fetch('/api/memories/' + encodeURIComponent(memoryId) + '/sources', {cache:'no-store'});
+            if (sourceResp.ok) {
+                const sourceData = await sourceResp.json();
+                if (sourceData.complete && Array.isArray(sourceData.source_message_ids)) {
+                    verifiedSource = '已核实的原始对话消息 ID：' + sourceData.source_message_ids.join(', ') +
+                        '（会话 ' + (sourceData.source_session || '未知') + '）';
+                }
+            }
+        } catch (_) { /* Keep conservative unknown-source label. */ }
         const lines = [
             '记忆 #' + memoryId + ' 的来源链（只读）',
             '找到的记忆编号：' + (ancestors.join(', ') || '无'),
@@ -1499,7 +1510,7 @@ async function previewMemoryLineage(memoryId) {
             '合并关系是否完整：' + (result.lineage_complete ? '是' : '否'),
             '缺失记忆编号：' + (missing.join(', ') || '无'),
             result.truncated ? '来源链超过查询限制，结果已截断。' : '',
-            '原始对话消息：尚未建立可核实的关联。记忆编号不能当作消息编号。',
+            verifiedSource,
         ].filter(Boolean);
         alert(lines.join('\n'));
     } catch (error) {
