@@ -1460,12 +1460,28 @@ function renderTable(mems, startIndex) {
             '<td class="col-actions"><div class="row-actions">' +
                 '<button class="btn btn-primary btn-sm" onclick="saveMem(' + m.id + ')">保存</button>' +
                 '<button class="btn btn-secondary btn-sm" onclick="previewMemoryLineage(' + m.id + ')">来源链</button>' +
+                (m.is_active ? '<button class="btn btn-secondary btn-sm" onclick="togglePinnedMemory(' + m.id + ', ' + (!m.is_pinned) + ')">' + (m.is_pinned ? '取消固定' : '固定') + '</button>' : '') +
                 revertBtn +
                 restoreBtn +
                 deleteBtn +
             '</div></td>' +
             '</tr>';
     }).join('');
+}
+
+async function togglePinnedMemory(memoryId, pinned) {
+    try {
+        const response = await fetch('/api/memories/' + encodeURIComponent(memoryId) + '/pin', {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({pinned: !!pinned}),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || 'HTTP ' + response.status);
+        await loadMemories();
+        showManageMsg('success', pinned ? '已固定记忆 #' + memoryId : '已取消固定 #' + memoryId);
+    } catch (error) {
+        showManageMsg('error', '固定记忆失败：' + error.message);
+    }
 }
 
 async function previewMemoryLineage(memoryId) {
@@ -3718,7 +3734,7 @@ const _SETTINGS_FIELDS = {
          'role_display_user', 'role_display_assistant'],
     int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'EXPERIENCE_RECALL_EVERY_ROUNDS', 'EXPERIENCE_RECALL_MAX_CARDS', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'CACHE_SUMMARY_BUDGET_CHARS', 'SUMMARY_KEEP_RECENT', 'EMBEDDING_DIM'],
     float: ['MIN_SCORE_THRESHOLD'],
-    bool: ['MEMORY_ENABLED', 'EXPERIENCE_RECALL_ENABLED', 'CACHE_PARTITION_ENABLED', 'MEMORY_VECTOR_ENABLED', 'FORCE_STREAM'],
+    bool: ['MEMORY_ENABLED', 'MEMORY_PINNED_ENABLED', 'EXPERIENCE_RECALL_ENABLED', 'CACHE_PARTITION_ENABLED', 'MEMORY_VECTOR_ENABLED', 'FORCE_STREAM'],
     range: ['MEMORY_HW_KEYWORD', 'MEMORY_HW_SEMANTIC', 'MEMORY_HW_IMPORTANCE',
             'MEMORY_HW_RECENCY', 'MEMORY_SEMANTIC_THRESHOLD'],
     text: ['systemPrompt'],
