@@ -59,3 +59,5 @@ jobs:
         run: |
           python -m unittest discover -s tests -p test_mcp_readonly.py -v
           python -m unittest discover -s tests -p test_mcp_gateway_auth.py -v
+      - name: Verify Pawwake feature wiring and migration order
+        run: python -m unittest discover -s tests -p test_pawwake_integration_wiring.py -v
