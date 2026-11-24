@@ -53,3 +53,9 @@ jobs:
           python -m unittest discover -s tests -p test_recall_budget_wiring.py -v
       - name: Verify gateway basic-chat recall and multimodal handling
         run: python -m unittest discover -s tests -p test_recall_gateway_integration.py -v
+      - name: Verify pinned memories and literal proper-noun aliases
+        run: python -m unittest discover -s tests -p test_memory_recall_extensions.py -v
+      - name: Verify key-gated read-only MCP protocol
+        run: |
+          python -m unittest discover -s tests -p test_mcp_readonly.py -v
+          python -m unittest discover -s tests -p test_mcp_gateway_auth.py -v
