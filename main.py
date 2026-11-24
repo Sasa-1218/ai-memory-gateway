@@ -348,6 +348,8 @@ EXPERIENCE_RECALL_MAX_CARDS = 1  # One relevant card per successful recall.
 # Both are false by default, preserving existing memory retrieval.
 SHARED_RECALL_BUDGET_ENABLED = os.getenv("SHARED_RECALL_BUDGET_ENABLED", "false").lower() == "true"
 SHARED_RECALL_MAX_CHARS = max(0, min(_env_int("SHARED_RECALL_MAX_CHARS", 6000), 30000))
+# Optional, literal alias dictionary for proper-noun search. Empty by default.
+MEMORY_QUERY_ALIASES_JSON = os.getenv("MEMORY_QUERY_ALIASES_JSON", "")
 # A single concise experience cue may use at most 600 characters and 20% of
 # the common recall budget. The rest remains available to normal memories.
 SHARED_RECALL_CARD_MAX_CHARS = max(
@@ -729,6 +731,13 @@ async def gateway_auth_middleware(request: Request, call_next):
 # 记忆注入
 # ============================================================
 
+def _memory_query_with_aliases(query: str) -> str:
+    if not MEMORY_QUERY_ALIASES_JSON:
+        return query
+    from memory_recall_extensions import expand_query_terms
+    return expand_query_terms(query, MEMORY_QUERY_ALIASES_JSON)
+
+
 async def build_system_prompt_with_memories(user_message: str, max_chars: int | None = None) -> str:
     """构建记忆数据块（不含人设，由调用方追加到人设末尾）"""
     if not MEMORY_ENABLED or not MEMORY_EXTRACT_ENABLED:
@@ -737,7 +746,7 @@ async def build_system_prompt_with_memories(user_message: str, max_chars: int | 
         return ""
 
     try:
-        memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
+        memories = await search_memories(_memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT)
         if not memories:
             return ""
 
@@ -2126,7 +2135,7 @@ async def build_memory_text(user_message: str, max_chars: int | None = None) -> 
     if MAX_MEMORIES_INJECT <= 0:
         return ""
     try:
-        memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
+        memories = await search_memories(_memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT)
         if not memories:
             return ""
         
