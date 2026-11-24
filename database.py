@@ -222,6 +222,16 @@ async def init_tables():
             );
         """)
 
+        # Opt-in pinned memories: additive, idempotent, existing rows stay unpinned.
+        await conn.execute("""
+            ALTER TABLE memories ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_pinned_active
+            ON memories (importance DESC, id ASC)
+            WHERE is_pinned = TRUE AND is_active = TRUE
+        """)
+
         # 共同经历卡片草稿。Phase 1 仅用于 Dashboard 人工审核，聊天检索不读取此表。
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS shared_experience_cards (
@@ -1810,6 +1820,37 @@ async def update_message_content(message_id: int, new_content: str):
 # 记忆操作
 # ============================================================
 
+async def get_pinned_memories(limit: int = 4):
+    """Return bounded, active, explicitly user-pinned memories."""
+    limit = max(0, min(int(limit), 10))
+    if limit == 0:
+        return []
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, content, importance, is_active, is_pinned
+            FROM memories
+            WHERE is_active = TRUE AND is_pinned = TRUE
+            ORDER BY importance DESC, id ASC
+            LIMIT $1
+        """, limit)
+        return [dict(row) for row in rows]
+
+
+async def set_memory_pinned(memory_id: int, pinned: bool):
+    """Explicit user action only; refuse inactive or missing memories."""
+    if type(memory_id) is not int or memory_id <= 0 or type(pinned) is not bool:
+        raise ValueError("invalid_pinned_memory_request")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE memories SET is_pinned = $2
+            WHERE id = $1 AND is_active = TRUE
+            RETURNING id, is_pinned
+        """, memory_id, pinned)
+        return dict(row) if row else None
+
+
 async def save_memory(content: str, importance: int = 5, source_session: str = ""):
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -2223,7 +2264,7 @@ async def get_recent_memories_detail(limit: int = 12):
         rows = await conn.fetch(
             """
             SELECT id, content, importance, source_session, created_at,
-                   layer, title, is_active, merged_from, event_date
+                   layer, title, is_active, merged_from, event_date, is_pinned
             FROM memories
             ORDER BY created_at DESC, id DESC
             LIMIT $1
