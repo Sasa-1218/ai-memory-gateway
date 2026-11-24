@@ -17,9 +17,10 @@ class RecyclePostgresTests(unittest.IsolatedAsyncioTestCase):
         admin = await asyncpg.connect(TEST_DSN)
         await admin.execute("CREATE SCHEMA IF NOT EXISTS recycle_test")
         await admin.close()
-        async def setup(conn):
-            await conn.execute("SET search_path TO recycle_test")
-        self.pool = await asyncpg.create_pool(TEST_DSN, min_size=1, max_size=2, init=setup)
+        self.pool = await asyncpg.create_pool(
+            TEST_DSN, min_size=1, max_size=2,
+            server_settings={"search_path": "recycle_test"},
+        )
         async with self.pool.acquire() as conn:
             await conn.execute("DROP TABLE IF EXISTS conversation_recycle_bin")
             await conn.execute("DROP TABLE IF EXISTS session_cache_state")
