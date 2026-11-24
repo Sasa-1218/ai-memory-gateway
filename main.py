@@ -800,15 +800,15 @@ async def _rerank_memory_candidates(user_message: str, records):
 async def _read_pinned_memory_text(max_chars: int | None) -> str:
     """Pinned memory is optional, bounded, and only ever reads active user pins."""
     if not MEMORY_PINNED_ENABLED:
-        return ""
+        return "", []
     from memory_recall_extensions import pinned_lines
     try:
         rows = await _db_module.get_pinned_memories(limit=4)
         cap = min(900, max_chars) if max_chars is not None else 900
-        return pinned_lines(rows, max_chars=cap)
+        return pinned_lines(rows, max_chars=cap, return_ids=True)
     except Exception as exc:
         print(f"[pinned-memory] skipped {type(exc).__name__}", flush=True)
-        return ""
+        return "", []
 
 
 def _join_pinned_memory(pinned: str, normal: str, max_chars: int | None):
@@ -830,7 +830,7 @@ async def build_system_prompt_with_memories(user_message: str, max_chars: int | 
         return ""
 
     try:
-        pinned = await _read_pinned_memory_text(max_chars)
+        pinned, pinned_ids = await _read_pinned_memory_text(max_chars)
         remaining = max(0, max_chars - len(pinned) - (2 if pinned else 0)) if max_chars is not None else None
         memories = await search_memories(
             _memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT,
@@ -838,6 +838,8 @@ async def build_system_prompt_with_memories(user_message: str, max_chars: int | 
         if memories:
             memories = await _deduplicate_verified_memory_candidates(memories)
             memories = await _rerank_memory_candidates(user_message, memories)
+            if pinned_ids:
+                memories = [mem for mem in memories if mem.get("id") not in pinned_ids]
         if not memories:
             return pinned
 
@@ -2226,7 +2228,7 @@ async def build_memory_text(user_message: str, max_chars: int | None = None) -> 
     if MAX_MEMORIES_INJECT <= 0 and not MEMORY_PINNED_ENABLED:
         return ""
     try:
-        pinned = await _read_pinned_memory_text(max_chars)
+        pinned, pinned_ids = await _read_pinned_memory_text(max_chars)
         remaining = max(0, max_chars - len(pinned) - (2 if pinned else 0)) if max_chars is not None else None
         memories = await search_memories(
             _memory_query_with_aliases(user_message), limit=MAX_MEMORIES_INJECT,
@@ -2234,6 +2236,8 @@ async def build_memory_text(user_message: str, max_chars: int | None = None) -> 
         if memories:
             memories = await _deduplicate_verified_memory_candidates(memories)
             memories = await _rerank_memory_candidates(user_message, memories)
+            if pinned_ids:
+                memories = [mem for mem in memories if mem.get("id") not in pinned_ids]
         if not memories:
             return pinned
         
