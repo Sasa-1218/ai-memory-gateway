@@ -353,6 +353,8 @@ MEMORY_QUERY_ALIASES_JSON = os.getenv("MEMORY_QUERY_ALIASES_JSON", "")
 MEMORY_PINNED_ENABLED = os.getenv("MEMORY_PINNED_ENABLED", "false").lower() == "true"
 MEMORY_RERANK_ENABLED = os.getenv("MEMORY_RERANK_ENABLED", "false").lower() == "true"
 MEMORY_RERANK_MODEL = os.getenv("MEMORY_RERANK_MODEL", "").strip()
+# Externally accessible read-only tools require a configured gateway secret.
+MCP_READONLY_ENABLED = os.getenv("MCP_READONLY_ENABLED", "false").lower() == "true"
 # A single concise experience cue may use at most 600 characters and 20% of
 # the common recall budget. The rest remains available to normal memories.
 SHARED_RECALL_CARD_MAX_CHARS = max(
@@ -7201,6 +7203,35 @@ async def api_batch_delete(request: Request):
         return {"status": "ok", "deleted": len(archived), "recycled": archived}
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.post("/mcp")
+async def mcp_readonly_endpoint(request: Request):
+    """Stateless JSON-RPC MCP subset; disabled by default and key-gated."""
+    if not MCP_READONLY_ENABLED:
+        raise HTTPException(status_code=404, detail="mcp_disabled")
+    if not GATEWAY_SECRET:
+        raise HTTPException(status_code=503, detail="gateway_secret_required")
+    presented = request.headers.get("x-gateway-key", "")
+    if not secrets.compare_digest(presented, GATEWAY_SECRET):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        from mcp_readonly import dispatch
+        body = await request.json()
+        reply = await dispatch(
+            body, search=search_memories,
+            lineage=_db_module.get_memory_lineage_readonly,
+        )
+        if reply is None:
+            return Response(status_code=202, headers={"Cache-Control": "no-store"})
+        return JSONResponse(reply, headers={"Cache-Control": "no-store"})
+    except Exception as exc:
+        print(f"[mcp-readonly] {type(exc).__name__}", flush=True)
+        return JSONResponse(
+            {"jsonrpc": "2.0", "id": None,
+             "error": {"code": -32603, "message": "Internal error"}},
+            headers={"Cache-Control": "no-store"},
+        )
 
 
 @app.get("/api/conversations/recycle-bin")
