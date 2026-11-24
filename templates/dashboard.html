@@ -691,6 +691,13 @@
                     <div id="conv-pagination" style="display: flex; justify-content: center; align-items: center; gap: 12px; margin-top: 16px;"></div>
                 </div>
 
+                <details class="card" style="margin:16px 0;" id="conversationRecyclePanel">
+                    <summary style="cursor:pointer;font-weight:600;" onclick="loadConversationRecycleBin()">对话回收站（可恢复）</summary>
+                    <p class="section-desc">删除整个对话后会暂存原始消息与摘要状态，支持恢复。永久清除需要额外确认。</p>
+                    <button class="btn btn-secondary" type="button" onclick="loadConversationRecycleBin()">刷新回收站</button>
+                    <div id="conversationRecycleList" style="margin-top:12px;">展开后加载</div>
+                </details>
+
                 <!-- 对话详情（点击列表项后展开） -->
                 <div id="conv-detail-panel" class="card" style="display: none;">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
