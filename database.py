@@ -3806,28 +3806,40 @@ async def get_conversations_paginated(page: int = 1, per_page: int = 20):
 
 
 async def delete_conversation(session_id: str):
-    """Snapshot and delete a session atomically; no irreversible chat deletion."""
+    """Atomically archive exactly those messages actually deleted.
+
+    The data-modifying CTE prevents a snapshot/delete race with concurrent
+    message writes; any later message remains in the active table.
+    """
     if not isinstance(session_id, str) or not session_id.strip():
         raise ValueError("invalid_session_id")
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", "recycle:" + session_id)
-            count = await conn.fetchval(
-                "SELECT COUNT(*) FROM conversations WHERE session_id = $1", session_id)
-            if not count:
-                return None
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1))", "recycle:" + session_id
+            )
             recycle_id = await conn.fetchval("""
-                INSERT INTO conversation_recycle_bin (session_id, messages, cache_state)
-                SELECT $1, COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.id), '[]'::jsonb),
-                    (SELECT to_jsonb(s) FROM session_cache_state s WHERE s.session_id=$1)
-                FROM conversations c WHERE c.session_id=$1
+                WITH removed_messages AS (
+                    DELETE FROM conversations
+                    WHERE session_id=$1 RETURNING *
+                ), removed_cache AS (
+                    DELETE FROM session_cache_state
+                    WHERE session_id=$1 RETURNING *
+                ), snapshot AS (
+                    SELECT COALESCE(
+                        (SELECT jsonb_agg(to_jsonb(m) ORDER BY m.id)
+                         FROM removed_messages m), '[]'::jsonb
+                    ) AS messages,
+                    (SELECT to_jsonb(s) FROM removed_cache s LIMIT 1) AS cache_state
+                )
+                INSERT INTO conversation_recycle_bin
+                    (session_id, messages, cache_state)
+                SELECT $1, messages, cache_state FROM snapshot
+                WHERE jsonb_array_length(messages) > 0 OR cache_state IS NOT NULL
                 RETURNING id
             """, session_id)
-            await conn.execute("DELETE FROM conversations WHERE session_id=$1", session_id)
-            await conn.execute("DELETE FROM session_cache_state WHERE session_id=$1", session_id)
-            return int(recycle_id)
-
+            return int(recycle_id) if recycle_id is not None else None
 
 async def batch_delete_conversations(session_ids: list):
     """Safely recycle each independent session; report successful snapshots."""
